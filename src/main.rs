@@ -7,6 +7,7 @@ use metainfo::Metainfo;
 use serde_bencode::de;
 
 pub mod metainfo;
+pub mod tracker;
 
 fn main() -> io::Result<()> {
     // Open the torrent file
