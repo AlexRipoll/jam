@@ -1,31 +1,34 @@
+use metainfo::Metainfo;
+use serde_bencode::de;
 use std::{
     fs::File,
     io::{self, Read},
 };
-
-use metainfo::Metainfo;
-use serde_bencode::de;
+use tracker::get;
 
 pub mod metainfo;
 pub mod tracker;
 
-fn main() -> io::Result<()> {
+#[tokio::main]
+async fn main() -> io::Result<()> {
     // Open the torrent file
-    let mut file = File::open("sintel.torrent")?;
+    // archlinux-2024.09.01-x86_64.iso.torrent
+    let mut file = File::open("ubuntu-24.10-desktop-amd64.iso.torrent")?;
     let mut buffer = Vec::new();
 
     // Read the entire file into buffer
     file.read_to_end(&mut buffer)?;
 
+    let info_hash = Metainfo::compute_info_hash(&buffer);
+
     // Deserialize the buffer into a Metainfo struct
-    match de::from_bytes::<Metainfo>(&buffer) {
-        Ok(metainfo) => {
-            println!("{:#?}", metainfo);
-        }
-        Err(e) => {
-            eprintln!("Failed to deserialize torrent file: {}", e);
-        }
-    }
+    let metainfo =
+        de::from_bytes::<Metainfo>(&buffer).expect("Failed to deserialize torrent file: {}");
+
+    let url = metainfo.build_tracker_url(info_hash, 6889);
+    println!("=>> URL: {:?}", url);
+
+    get(&url).await.unwrap();
 
     Ok(())
 }
