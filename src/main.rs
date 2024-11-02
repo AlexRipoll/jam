@@ -1,5 +1,4 @@
 use metainfo::Metainfo;
-use serde_bencode::de;
 use std::{
     fs::File,
     io::{self, Read},
@@ -22,8 +21,7 @@ async fn main() -> io::Result<()> {
     let info_hash = Metainfo::compute_info_hash(&buffer);
 
     // Deserialize the buffer into a Metainfo struct
-    let metainfo =
-        de::from_bytes::<Metainfo>(&buffer).expect("Failed to deserialize torrent file: {}");
+    let metainfo = Metainfo::deserialize(&buffer)?;
 
     let url = metainfo.build_tracker_url(info_hash, 6889);
     println!("=>> URL: {:?}", url);

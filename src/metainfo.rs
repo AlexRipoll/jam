@@ -34,7 +34,6 @@ struct Info {
     length: Option<u64>,
     #[serde(rename = "piece length")]
     piece_length: u64,
-    #[serde(skip)]
     pieces: ByteBuf,
     private: Option<u8>,
     md5sum: Option<String>,
@@ -42,20 +41,20 @@ struct Info {
 }
 
 impl Metainfo {
-    fn deserialize(data: &[u8]) -> io::Result<Metainfo> {
+    pub fn deserialize(data: &[u8]) -> io::Result<Metainfo> {
         de::from_bytes::<Metainfo>(data).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
 
-    fn serialize(metainfo: &Metainfo) -> io::Result<Vec<u8>> {
+    pub fn serialize(metainfo: &Metainfo) -> io::Result<Vec<u8>> {
         ser::to_bytes(metainfo).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
 
     pub fn build_tracker_url(&self, info_hash: Vec<u8>, port: u32) -> String {
         let mut announce = String::new();
         if let Some(n) = self.announce.as_ref() {
-            announce = n.clone();
+            announce.clone_from(n);
         } else if let Some(n) = self.announce_list.as_ref() {
-            announce = n[0][0].clone();
+            announce.clone_from(&n[0][0]);
         }
 
         let mut url = Url::parse(&announce).unwrap();
@@ -77,15 +76,15 @@ impl Metainfo {
             .append_pair("uploaded", "0")
             .append_pair("downloaded", "0")
             .append_pair("left", &self.info.length.unwrap_or(0).to_string())
-            .append_pair("compact", "0");
-        // .append_pair("no_peer_id", "0");
+            // TODO: parameterize
+            .append_pair("compact", "1");
 
         url.to_string()
     }
 
-    pub fn compute_info_hash(torrent_bytes: &Vec<u8>) -> Vec<u8> {
+    pub fn compute_info_hash(torrent_bytes: &[u8]) -> Vec<u8> {
         let decoded: BTreeMap<String, serde_bencode::value::Value> =
-            de::from_bytes(&torrent_bytes).unwrap();
+            de::from_bytes(torrent_bytes).unwrap();
 
         //  Extract the `info` dictionary
         let info_value = decoded
