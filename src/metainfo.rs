@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_bencode::{de, ser};
 use serde_bytes::ByteBuf;
 use sha1::{Digest, Sha1};
-use std::{collections::BTreeMap, io};
+use std::{collections::BTreeMap, error::Error, fmt::Display, io};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Metainfo {
@@ -34,6 +34,7 @@ struct Info {
     length: Option<u64>,
     #[serde(rename = "piece length")]
     piece_length: u64,
+    // #[serde(skip)]
     pieces: ByteBuf,
     private: Option<u8>,
     md5sum: Option<String>,
@@ -49,19 +50,30 @@ impl Metainfo {
         ser::to_bytes(metainfo).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
 
-    pub fn build_tracker_url(&self, info_hash: Vec<u8>, port: u32) -> String {
-        let mut announce = String::new();
-        if let Some(n) = self.announce.as_ref() {
-            announce.clone_from(n);
-        } else if let Some(n) = self.announce_list.as_ref() {
-            announce.clone_from(&n[0][0]);
-        }
+    pub fn build_tracker_url(
+        &self,
+        info_hash: Vec<u8>,
+        port: u32,
+    ) -> Result<String, MetainfoError> {
+        // TODO: if both announce and announce_list are None, it means it is intended to be
+        // distributed over a DHT or PEX
+        let announce = self
+            .announce
+            .as_deref()
+            .or_else(|| {
+                self.announce_list
+                    .as_ref()
+                    .and_then(|list| list.first().and_then(|tier| tier.first()))
+                    .map(|x| x.as_str())
+            })
+            .ok_or(MetainfoError::MissingAnnouceUrl)?;
 
-        let mut url = Url::parse(&announce).unwrap();
+        let mut url = Url::parse(announce)?;
 
+        // Encode info_hash and peer_id
         let info_hash = percent_encode(&info_hash, NON_ALPHANUMERIC).collect::<String>();
-        let peer_id = "-GT0001-123456789012".to_string();
         // TODO: generate peer_id
+        let peer_id = "-GT0001-123456789012".to_string();
         let encoded_peer_id = percent_encode(peer_id.as_bytes(), NON_ALPHANUMERIC).to_string();
 
         url.set_query(Some(&format!("info_hash={info_hash}")));
@@ -75,30 +87,74 @@ impl Metainfo {
             .append_pair("port", &port.to_string())
             .append_pair("uploaded", "0")
             .append_pair("downloaded", "0")
-            .append_pair("left", &self.info.length.unwrap_or(0).to_string())
-            // TODO: parameterize
+            .append_pair("left", &self.info.length.unwrap_or_default().to_string())
+            // TODO: make compact configurable
             .append_pair("compact", "1");
 
-        url.to_string()
+        Ok(url.to_string())
     }
 
-    pub fn compute_info_hash(torrent_bytes: &[u8]) -> Vec<u8> {
-        let decoded: BTreeMap<String, serde_bencode::value::Value> =
-            de::from_bytes(torrent_bytes).unwrap();
+    pub fn compute_info_hash(torrent_bytes: &[u8]) -> Result<Vec<u8>, MetainfoError> {
+        let decoded: BTreeMap<String, serde_bencode::value::Value> = de::from_bytes(torrent_bytes)?;
 
         //  Extract the `info` dictionary
-        let info_value = decoded
-            .get("info")
-            .ok_or("No `info` field found in the torrent file")
-            .unwrap();
+        let info = decoded.get("info").ok_or(MetainfoError::MissingInfoField)?;
 
         // Bencode the `info` dictionary
-        let bencoded_info = ser::to_bytes(info_value).unwrap();
+        let bencoded_info = ser::to_bytes(info).map_err(MetainfoError::EncodeError)?;
 
         let mut hasher = Sha1::new();
         hasher.update(bencoded_info);
 
-        hasher.finalize().to_vec()
+        Ok(hasher.finalize().to_vec())
+    }
+}
+
+#[derive(Debug)]
+pub enum MetainfoError {
+    MissingAnnouceUrl,
+    UrlParseError(url::ParseError),
+    DecodeError(serde_bencode::Error),
+    EncodeError(serde_bencode::Error),
+    MissingInfoField,
+}
+
+impl Display for MetainfoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MetainfoError::MissingAnnouceUrl => write!(f, "No announce URL found"),
+            MetainfoError::MissingInfoField => write!(f, "Missing `info` field in metainfo"),
+            MetainfoError::UrlParseError(err) => write!(f, "Failed to parse announce URL: {}", err),
+            MetainfoError::DecodeError(err) => {
+                write!(f, "Failed to decode metainfo: {}", err)
+            }
+            MetainfoError::EncodeError(err) => {
+                write!(f, "Failed to encode metainfo: {}", err)
+            }
+        }
+    }
+}
+
+impl From<url::ParseError> for MetainfoError {
+    fn from(err: url::ParseError) -> MetainfoError {
+        MetainfoError::UrlParseError(err)
+    }
+}
+
+impl From<serde_bencode::Error> for MetainfoError {
+    fn from(err: serde_bencode::Error) -> MetainfoError {
+        MetainfoError::DecodeError(err)
+    }
+}
+
+impl Error for MetainfoError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            MetainfoError::UrlParseError(err) => Some(err),
+            MetainfoError::DecodeError(err) => Some(err),
+            MetainfoError::EncodeError(err) => Some(err),
+            _ => None,
+        }
     }
 }
 
@@ -139,7 +195,7 @@ mod tests {
             encoding: None,
         };
 
-        let url = metainfo.build_tracker_url(sha1.to_vec(), 6889);
+        let url = metainfo.build_tracker_url(sha1.to_vec(), 6889).unwrap();
 
         assert_eq!(
             "https://torrent.ubuntu.com/announce?info_hash=%124Vx%9A%BC%DE%F1%23Eg%89%AB%CD%EF%124Vx%9A&peer_id=%2DGT0001%2D123456789012&port=6889&uploaded=0&downloaded=0&left=5665497088&compact=1",
