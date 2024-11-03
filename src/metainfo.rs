@@ -42,12 +42,12 @@ struct Info {
 }
 
 impl Metainfo {
-    pub fn deserialize(data: &[u8]) -> io::Result<Metainfo> {
-        de::from_bytes::<Metainfo>(data).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    pub fn deserialize(data: &[u8]) -> Result<Metainfo, MetainfoError> {
+        de::from_bytes::<Metainfo>(data).map_err(MetainfoError::DecodeError)
     }
 
-    pub fn serialize(metainfo: &Metainfo) -> io::Result<Vec<u8>> {
-        ser::to_bytes(metainfo).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    pub fn serialize(metainfo: &Metainfo) -> Result<Vec<u8>, MetainfoError> {
+        ser::to_bytes(metainfo).map_err(MetainfoError::EncodeError)
     }
 
     pub fn build_tracker_url(
@@ -57,16 +57,7 @@ impl Metainfo {
     ) -> Result<String, MetainfoError> {
         // TODO: if both announce and announce_list are None, it means it is intended to be
         // distributed over a DHT or PEX
-        let announce = self
-            .announce
-            .as_deref()
-            .or_else(|| {
-                self.announce_list
-                    .as_ref()
-                    .and_then(|list| list.first().and_then(|tier| tier.first()))
-                    .map(|x| x.as_str())
-            })
-            .ok_or(MetainfoError::MissingAnnouceUrl)?;
+        let announce = self.announce()?;
 
         let mut url = Url::parse(announce)?;
 
@@ -108,6 +99,41 @@ impl Metainfo {
 
         Ok(hasher.finalize().to_vec())
     }
+
+    fn announce(&self) -> Result<&str, MetainfoError> {
+        self.announce
+            .as_deref()
+            .or_else(|| {
+                self.announce_list
+                    .as_ref()
+                    .and_then(|list| list.first().and_then(|tier| tier.first()))
+                    .map(|x| x.as_str())
+            })
+            .ok_or(MetainfoError::MissingAnnouceUrl)
+    }
+
+    pub fn scrape_url(&self) -> Result<String, MetainfoError> {
+        // Get the announce URL
+        let announce_url = self.announce()?;
+
+        let mut url = Url::parse(announce_url)?;
+
+        // Extract the path and check if it ends with "announce"
+        let mut path_segments: Vec<&str> = url.as_str().split("/").collect();
+
+        if let Some(last_segment) = path_segments.last_mut() {
+            if last_segment.starts_with("announce") {
+                // Replace "announce" with "scrape"
+                let scrape_segment = last_segment.replace("announce", "scrape");
+                *last_segment = &scrape_segment;
+
+                return Ok(path_segments.join("/"));
+            }
+        }
+
+        // If the "announce" convention is not followed, scraping isn't supported
+        Err(MetainfoError::ScrapeNotSupported)
+    }
 }
 
 #[derive(Debug)]
@@ -117,12 +143,14 @@ pub enum MetainfoError {
     DecodeError(serde_bencode::Error),
     EncodeError(serde_bencode::Error),
     MissingInfoField,
+    ScrapeNotSupported,
 }
 
 impl Display for MetainfoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MetainfoError::MissingAnnouceUrl => write!(f, "No announce URL found"),
+            MetainfoError::ScrapeNotSupported => write!(f, "Tracker scrape not supported"),
             MetainfoError::MissingInfoField => write!(f, "Missing `info` field in metainfo"),
             MetainfoError::UrlParseError(err) => write!(f, "Failed to parse announce URL: {}", err),
             MetainfoError::DecodeError(err) => {
@@ -201,6 +229,97 @@ mod tests {
             "https://torrent.ubuntu.com/announce?info_hash=%124Vx%9A%BC%DE%F1%23Eg%89%AB%CD%EF%124Vx%9A&peer_id=%2DGT0001%2D123456789012&port=6889&uploaded=0&downloaded=0&left=5665497088&compact=1",
             url.as_str()
         );
+    }
+
+    #[test]
+    fn test_tracker_scrape() {
+        struct TestCase {
+            value: String,
+            expected: String,
+        }
+
+        let test_cases = vec![
+            TestCase {
+                value: "http://example.com/announce".to_string(),
+                expected: "http://example.com/scrape".to_string(),
+            },
+            TestCase {
+                value: "https://torrent.ubuntu.com/x/announce".to_string(),
+                expected: "https://torrent.ubuntu.com/x/scrape".to_string(),
+            },
+            TestCase {
+                value: "https://torrent.ubuntu.com/announce.php".to_string(),
+                expected: "https://torrent.ubuntu.com/scrape.php".to_string(),
+            },
+            TestCase {
+                value: "https://torrent.ubuntu.com/announce?x2%0644".to_string(),
+                expected: "https://torrent.ubuntu.com/scrape?x2%0644".to_string(),
+            },
+        ];
+
+        for announce_url in test_cases {
+            let metainfo = Metainfo {
+                info: Info {
+                    name: "ubuntu-24.10-desktop-amd64.iso".to_string(),
+                    length: Some(5665497088),
+                    piece_length: 262144,
+                    pieces: ByteBuf::default(),
+                    private: None,
+                    md5sum: None,
+                    files: None,
+                },
+                announce: Some(announce_url.value),
+                announce_list: Some(vec![
+                    vec!["https://torrent.ubuntu.com/announce".to_string()],
+                    vec!["https://ipv6.torrent.ubuntu.com/announce".to_string()],
+                ]),
+                creation_date: Some(1728557557),
+                comment: Some("Ubuntu CD releases.ubuntu.com".to_string()),
+                created_by: Some("mktorrent 1.1".to_string()),
+                encoding: None,
+            };
+
+            let scrape_url = metainfo.scrape_url().unwrap();
+
+            assert_eq!(announce_url.expected, scrape_url);
+        }
+    }
+
+    #[test]
+    fn test_tracker_scrape_not_supported() {
+        let test_cases = vec![
+            "http://example.com/a",
+            "http://example.com/announce?x=2/4",
+            "http://example.com/x%064announce",
+        ];
+
+        for announce_url in test_cases {
+            let metainfo = Metainfo {
+                info: Info {
+                    name: "dummy_file.iso".to_string(),
+                    length: Some(1024),
+                    piece_length: 512,
+                    pieces: ByteBuf::default(),
+                    private: None,
+                    md5sum: None,
+                    files: None,
+                },
+                announce: Some(announce_url.to_string()),
+                announce_list: None,
+                creation_date: None,
+                comment: None,
+                created_by: None,
+                encoding: None,
+            };
+
+            // Verify that an error is returned, specifically the ScrapeNotSupported error
+            assert!(matches!(
+                metainfo
+                    .scrape_url()
+                    .expect_err("Expected ScrapeNotSupported error"),
+                MetainfoError::ScrapeNotSupported
+            ));
+        }
     }
 
     #[test]

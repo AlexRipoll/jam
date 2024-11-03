@@ -27,7 +27,8 @@ async fn main() -> io::Result<()> {
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
     // Deserialize the buffer into a Metainfo struct
-    let metainfo = Metainfo::deserialize(&buffer)?;
+    let metainfo =
+        Metainfo::deserialize(&buffer).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
     let url = metainfo
         .build_tracker_url(info_hash, 6889)
