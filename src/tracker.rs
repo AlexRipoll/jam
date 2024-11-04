@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_bencode::de;
 use serde_bytes::ByteBuf;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };

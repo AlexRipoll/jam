@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_bencode::{de, ser};
 use serde_bytes::ByteBuf;
 use sha1::{Digest, Sha1};
-use std::{collections::BTreeMap, error::Error, fmt::Display, io};
+use std::{collections::BTreeMap, error::Error, fmt::Display};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Metainfo {
@@ -52,7 +52,7 @@ impl Metainfo {
 
     pub fn build_tracker_url(
         &self,
-        info_hash: Vec<u8>,
+        info_hash: [u8; 20],
         port: u32,
     ) -> Result<String, MetainfoError> {
         // TODO: if both announce and announce_list are None, it means it is intended to be
@@ -85,7 +85,7 @@ impl Metainfo {
         Ok(url.to_string())
     }
 
-    pub fn compute_info_hash(torrent_bytes: &[u8]) -> Result<Vec<u8>, MetainfoError> {
+    pub fn compute_info_hash(torrent_bytes: &[u8]) -> Result<[u8; 20], MetainfoError> {
         let decoded: BTreeMap<String, serde_bencode::value::Value> = de::from_bytes(torrent_bytes)?;
 
         //  Extract the `info` dictionary
@@ -97,7 +97,7 @@ impl Metainfo {
         let mut hasher = Sha1::new();
         hasher.update(bencoded_info);
 
-        Ok(hasher.finalize().to_vec())
+        Ok(hasher.finalize().into())
     }
 
     fn announce(&self) -> Result<&str, MetainfoError> {
@@ -112,11 +112,27 @@ impl Metainfo {
             .ok_or(MetainfoError::MissingAnnouceUrl)
     }
 
-    pub fn scrape_url(&self) -> Result<String, MetainfoError> {
+    pub fn scrape_url(&self, info_hashes: Option<Vec<[u8; 20]>>) -> Result<String, MetainfoError> {
         // Get the announce URL
         let announce_url = self.announce()?;
 
         let mut url = Url::parse(announce_url)?;
+
+        if let Some(info_hashes) = info_hashes {
+            for info_hash in info_hashes {
+                let info_hash = percent_encode(&info_hash, NON_ALPHANUMERIC).collect::<String>();
+
+                if url.query().is_none() {
+                    url.set_query(Some(&format!("info_hash={info_hash}")));
+                } else {
+                    url.set_query(Some(&format!(
+                        "{}&{}",
+                        url.query().unwrap_or(""),
+                        &format!("info_hash={info_hash}")
+                    )));
+                }
+            }
+        }
 
         // Extract the path and check if it ends with "announce"
         let mut path_segments: Vec<&str> = url.as_str().split("/").collect();
@@ -189,8 +205,7 @@ impl Error for MetainfoError {
 #[cfg(test)]
 mod tests {
     use std::fs::File;
-
-    use io::Read;
+    use std::io::Read;
 
     use super::*;
 
@@ -223,7 +238,7 @@ mod tests {
             encoding: None,
         };
 
-        let url = metainfo.build_tracker_url(sha1.to_vec(), 6889).unwrap();
+        let url = metainfo.build_tracker_url(sha1, 6889).unwrap();
 
         assert_eq!(
             "https://torrent.ubuntu.com/announce?info_hash=%124Vx%9A%BC%DE%F1%23Eg%89%AB%CD%EF%124Vx%9A&peer_id=%2DGT0001%2D123456789012&port=6889&uploaded=0&downloaded=0&left=5665497088&compact=1",
@@ -279,9 +294,78 @@ mod tests {
                 encoding: None,
             };
 
-            let scrape_url = metainfo.scrape_url().unwrap();
+            let scrape_url = metainfo.scrape_url(None).unwrap();
 
             assert_eq!(announce_url.expected, scrape_url);
+        }
+    }
+
+    #[test]
+    fn test_tracker_scrape_with_info_hashes() {
+        struct TestCase {
+            value: String,
+            info_hashes: Vec<[u8; 20]>,
+            expected: String,
+        }
+
+        let sha1: [u8; 20] = [
+            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf1, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd,
+            0xef, 0x12, 0x34, 0x56, 0x78, 0x9a,
+        ];
+
+        let test_cases = vec![
+            TestCase {
+                value: "http://example.com/announce".to_string(),
+                info_hashes: vec![sha1],
+                expected: "http://example.com/scrape?info_hash=%124Vx%9A%BC%DE%F1%23Eg%89%AB%CD%EF%124Vx%9A".to_string(),
+            },
+            TestCase {
+                value: "https://torrent.ubuntu.com/x/announce".to_string(),
+                info_hashes: vec![sha1],
+                expected: "https://torrent.ubuntu.com/x/scrape?info_hash=%124Vx%9A%BC%DE%F1%23Eg%89%AB%CD%EF%124Vx%9A".to_string(),
+            },
+            TestCase {
+                value: "https://torrent.ubuntu.com/announce.php".to_string(),
+                info_hashes: vec![sha1],
+                expected: "https://torrent.ubuntu.com/scrape.php?info_hash=%124Vx%9A%BC%DE%F1%23Eg%89%AB%CD%EF%124Vx%9A".to_string(),
+            },
+            TestCase {
+                value: "https://torrent.ubuntu.com/announce?x2%0644".to_string(),
+                info_hashes: vec![sha1],
+                expected: "https://torrent.ubuntu.com/scrape?x2%0644&info_hash=%124Vx%9A%BC%DE%F1%23Eg%89%AB%CD%EF%124Vx%9A".to_string(),
+            },
+            TestCase {
+                value: "https://torrent.ubuntu.com/announce.php".to_string(),
+                info_hashes: vec![sha1, sha1],
+                expected: "https://torrent.ubuntu.com/scrape.php?info_hash=%124Vx%9A%BC%DE%F1%23Eg%89%AB%CD%EF%124Vx%9A&info_hash=%124Vx%9A%BC%DE%F1%23Eg%89%AB%CD%EF%124Vx%9A".to_string(),
+            },
+        ];
+
+        for url in test_cases {
+            let metainfo = Metainfo {
+                info: Info {
+                    name: "ubuntu-24.10-desktop-amd64.iso".to_string(),
+                    length: Some(5665497088),
+                    piece_length: 262144,
+                    pieces: ByteBuf::default(),
+                    private: None,
+                    md5sum: None,
+                    files: None,
+                },
+                announce: Some(url.value),
+                announce_list: Some(vec![
+                    vec!["https://torrent.ubuntu.com/announce".to_string()],
+                    vec!["https://ipv6.torrent.ubuntu.com/announce".to_string()],
+                ]),
+                creation_date: Some(1728557557),
+                comment: Some("Ubuntu CD releases.ubuntu.com".to_string()),
+                created_by: Some("mktorrent 1.1".to_string()),
+                encoding: None,
+            };
+
+            let scrape_url = metainfo.scrape_url(Some(url.info_hashes)).unwrap();
+
+            assert_eq!(url.expected, scrape_url);
         }
     }
 
@@ -315,7 +399,7 @@ mod tests {
             // Verify that an error is returned, specifically the ScrapeNotSupported error
             assert!(matches!(
                 metainfo
-                    .scrape_url()
+                    .scrape_url(None)
                     .expect_err("Expected ScrapeNotSupported error"),
                 MetainfoError::ScrapeNotSupported
             ));
