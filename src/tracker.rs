@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_bencode::de;
 use serde_bytes::ByteBuf;
 use std::{
+    collections::{BTreeMap, HashMap},
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
@@ -62,6 +63,26 @@ pub enum Ip {
     IpV4(Ipv4Addr),
     IpV6(Ipv6Addr),
     Dns(String),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ScrapeResponse {
+    failure_response: Option<String>,
+    flags: Option<Flags>,
+    files: Option<HashMap<ByteBuf, FileStatus>>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct FileStatus {
+    name: Option<String>,
+    complete: Option<u32>,
+    downloaded: Option<u32>,
+    incomplete: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Flags {
+    min_request_interval: Option<u64>,
 }
 
 pub async fn get(url: &str) -> Result<Response, Box<dyn std::error::Error>> {
