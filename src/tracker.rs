@@ -3,6 +3,8 @@ use serde_bencode::de;
 use serde_bytes::ByteBuf;
 use std::{
     collections::HashMap,
+    error::Error,
+    fmt::Display,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
@@ -53,9 +55,9 @@ pub enum Peers {
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct Peer {
-    peer_id: String,
+    peer_id: Option<String>,
     ip: Ip,
-    port: u32,
+    port: u16,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
@@ -85,6 +87,32 @@ pub struct Flags {
     min_request_interval: Option<u64>,
 }
 
+impl Response {
+    fn decode_peers(&self) -> Result<Vec<Peer>, TrackerError> {
+        if let Some(peers_bytes) = &self.peers {
+            if peers_bytes.len() % 6 != 0 {
+                return Err(TrackerError::InvalidPeersFormat);
+            }
+            let peers: Vec<Peer> = peers_bytes
+                .chunks(6)
+                .map(|peer_bytes| Peer {
+                    peer_id: None,
+                    ip: Ip::IpV4(Ipv4Addr::new(
+                        peer_bytes[0],
+                        peer_bytes[1],
+                        peer_bytes[2],
+                        peer_bytes[3],
+                    )),
+                    port: u16::from_be_bytes([peer_bytes[4], peer_bytes[5]]),
+                })
+                .collect();
+            return Ok(peers);
+        }
+
+        Err(TrackerError::EmptyPeers)
+    }
+}
+
 pub async fn get(url: &str) -> Result<Response, Box<dyn std::error::Error>> {
     let response = reqwest::get(url).await?;
     let bencoded_body = response.bytes().await?;
@@ -94,11 +122,42 @@ pub async fn get(url: &str) -> Result<Response, Box<dyn std::error::Error>> {
     Ok(response_parsed)
 }
 
+#[derive(Debug)]
+pub enum TrackerError {
+    InvalidPeersFormat,
+    EmptyPeers,
+}
+
+impl Display for TrackerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TrackerError::InvalidPeersFormat => write!(
+                f,
+                "Invalid peers format: must be consist of multiples of 6 bytes."
+            ),
+            TrackerError::EmptyPeers => write!(f, "No peers bytes found in tracker's response"),
+        }
+    }
+}
+
+impl Error for TrackerError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
-    use serde_bencode::de;
+    use std::net::Ipv4Addr;
 
-    use super::Response;
+    use serde_bencode::de;
+    use serde_bytes::ByteBuf;
+
+    use crate::tracker::TrackerError;
+
+    use super::{Ip, Peer, Response};
 
     #[test]
     fn test_bencode_reponse_decode() {
@@ -120,5 +179,79 @@ mod test {
         };
 
         assert_eq!(expected_response, response);
+    }
+
+    #[test]
+    fn test_peers_binary_model_decode() {
+        let response = Response {
+            failure_response: None,
+            warning_message: None,
+            interval: None,
+            min_interval: None,
+            tracker_id: None,
+            complete: None,
+            incomplete: None,
+            peers: Some(ByteBuf::from(vec![
+                185, 125, 190, 59, 26, 247, 187, 125, 192, 48, 26, 233,
+            ])),
+        };
+
+        let expected = vec![
+            Peer {
+                peer_id: None,
+                ip: Ip::IpV4(Ipv4Addr::new(185, 125, 190, 59)),
+                port: 6903,
+            },
+            Peer {
+                peer_id: None,
+                ip: Ip::IpV4(Ipv4Addr::new(187, 125, 192, 48)),
+                port: 6889,
+            },
+        ];
+
+        assert_eq!(expected, response.decode_peers().unwrap());
+    }
+
+    #[test]
+    fn test_peers_binary_model_decode_error_invalid_format() {
+        let response = Response {
+            failure_response: None,
+            warning_message: None,
+            interval: None,
+            min_interval: None,
+            tracker_id: None,
+            complete: None,
+            incomplete: None,
+            peers: Some(ByteBuf::from(vec![
+                185, 125, 190, 59, 26, 247, 187, 125, 192, 48,
+            ])),
+        };
+
+        assert!(matches!(
+            response
+                .decode_peers()
+                .expect_err("Expected InvalidPeersFormat error"),
+            TrackerError::InvalidPeersFormat,
+        ));
+    }
+    #[test]
+    fn test_peers_binary_model_decode_error_empty_peers() {
+        let response = Response {
+            failure_response: None,
+            warning_message: None,
+            interval: None,
+            min_interval: None,
+            tracker_id: None,
+            complete: None,
+            incomplete: None,
+            peers: None,
+        };
+
+        assert!(matches!(
+            response
+                .decode_peers()
+                .expect_err("Expected EmptyPeers error"),
+            TrackerError::EmptyPeers,
+        ));
     }
 }
