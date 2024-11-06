@@ -4,10 +4,12 @@ use serde_bytes::ByteBuf;
 use std::{
     collections::HashMap,
     error::Error,
-    fmt::Display,
+    fmt::{self, format, Display},
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    path::Display,
 };
+use url::Host;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Request {
@@ -87,6 +89,16 @@ pub struct Flags {
     min_request_interval: Option<u64>,
 }
 
+impl Display for Ip {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Ip::IpV4(ipv4) => write!(f, "{}", ipv4.to_string()),
+            Ip::IpV6(ipv6) => write!(f, "{}", ipv6.to_string()),
+            Ip::Dns(dns) => write!(f, "{}", dns),
+        }
+    }
+}
+
 impl Response {
     fn decode_peers(&self) -> Result<Vec<Peer>, TrackerError> {
         if let Some(peers_bytes) = &self.peers {
@@ -110,6 +122,12 @@ impl Response {
         }
 
         Err(TrackerError::EmptyPeers)
+    }
+}
+
+impl Peer {
+    fn address(&self) -> String {
+        format!("{}:{}", &self.ip, &self.port)
     }
 }
 
