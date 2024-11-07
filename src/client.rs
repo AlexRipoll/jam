@@ -1,3 +1,4 @@
+use rand::{distributions::Alphanumeric, Rng};
 use std::usize;
 
 use tokio::{
@@ -116,4 +117,48 @@ pub async fn peer_handshake(
     }
 
     Ok(buffer)
+}
+
+fn client_version() -> String {
+    let version_tag = env!("CARGO_PKG_VERSION").replace(".", "");
+    let version = version_tag
+        .chars()
+        .filter(|c| c.is_digit(10))
+        .take(4)
+        .collect::<String>();
+
+    // Ensure exactly 4 characters, padding with "0" if necessary
+    format!("{:0<4}", version)
+}
+
+pub fn generate_peer_id() -> [u8; 20] {
+    let version = client_version();
+    let client_id = "JM";
+
+    // Generate a 12-character random alphanumeric sequence
+    let random_seq: String = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(12)
+        .map(char::from)
+        .collect();
+
+    let format = format!("-{}{}-{}", client_id, version, random_seq);
+
+    let mut id = [0u8; 20];
+    id.copy_from_slice(format.as_bytes());
+
+    id
+}
+
+#[cfg(test)]
+mod test {
+    use crate::client::{client_version, generate_peer_id};
+
+    #[test]
+    fn test_generate_peer_id() {
+        let version = client_version();
+        let expected = format!("-JM{}-", version);
+
+        assert_eq!(&generate_peer_id()[..8], expected.as_bytes());
+    }
 }

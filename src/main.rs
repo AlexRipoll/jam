@@ -1,4 +1,4 @@
-use client::{peer_handshake, Handshake};
+use client::{generate_peer_id, peer_handshake, Handshake};
 use metainfo::Metainfo;
 use std::{
     fs::File,
@@ -39,8 +39,10 @@ async fn main() -> io::Result<()> {
         Metainfo::deserialize(&buffer).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     println!("->> Metainfo: {:#?}", metainfo);
 
+    let peer_id = generate_peer_id();
+
     let url = metainfo
-        .build_tracker_url(info_hash, 6889)
+        .build_tracker_url(info_hash, peer_id, 6889)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     println!("->> URL: {:?}", url);
 
@@ -48,14 +50,13 @@ async fn main() -> io::Result<()> {
     println!("->> Tracker Response: {:#?}", response);
 
     let peers = response.decode_peers().unwrap();
-    let peer_id = "-GT0001-123456789012";
-    let bytes = peer_id.as_bytes();
-    let mut peer_id_bytes = [0u8; 20];
-    peer_id_bytes.copy_from_slice(bytes);
+    // let bytes = peer_id.as_bytes();
+    // let mut peer_id_bytes = [0u8; 20];
+    // peer_id_bytes.copy_from_slice(bytes);
 
     println!("->> Peers: {:#?}", peers);
 
-    let res = peer_handshake(&peers[0].address(), info_hash, peer_id_bytes).await?;
+    let res = peer_handshake(&peers[0].address(), info_hash, peer_id).await?;
     println!("RES BYTES: {:?} :: {}", &res, res.len());
     println!("RES: {:?}", String::from_utf8_lossy(&res),);
     let handshake_res = Handshake::deserialize(res).unwrap();

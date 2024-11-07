@@ -53,6 +53,7 @@ impl Metainfo {
     pub fn build_tracker_url(
         &self,
         info_hash: [u8; 20],
+        peer_id: [u8; 20],
         port: u32,
     ) -> Result<String, MetainfoError> {
         // TODO: if both announce and announce_list are None, it means it is intended to be
@@ -64,8 +65,7 @@ impl Metainfo {
         // Encode info_hash and peer_id
         let info_hash = percent_encode(&info_hash, NON_ALPHANUMERIC).collect::<String>();
         // TODO: generate peer_id
-        let peer_id = "-GT0001-123456789012".to_string();
-        let encoded_peer_id = percent_encode(peer_id.as_bytes(), NON_ALPHANUMERIC).to_string();
+        let encoded_peer_id = percent_encode(&peer_id, NON_ALPHANUMERIC).to_string();
 
         url.set_query(Some(&format!("info_hash={info_hash}")));
         url.set_query(Some(&format!(
@@ -238,10 +238,14 @@ mod tests {
             encoding: None,
         };
 
-        let url = metainfo.build_tracker_url(sha1, 6889).unwrap();
+        let peer_id_str = "-JM0100-XPGcHeKEmI45";
+        let mut peer_id = [0u8; 20];
+        peer_id.copy_from_slice(peer_id_str.as_bytes());
+
+        let url = metainfo.build_tracker_url(sha1, peer_id, 6889).unwrap();
 
         assert_eq!(
-            "https://torrent.ubuntu.com/announce?info_hash=%124Vx%9A%BC%DE%F1%23Eg%89%AB%CD%EF%124Vx%9A&peer_id=%2DGT0001%2D123456789012&port=6889&uploaded=0&downloaded=0&left=5665497088&compact=1",
+            "https://torrent.ubuntu.com/announce?info_hash=%124Vx%9A%BC%DE%F1%23Eg%89%AB%CD%EF%124Vx%9A&peer_id=%2DJM0100%2DXPGcHeKEmI45&port=6889&uploaded=0&downloaded=0&left=5665497088&compact=1",
             url.as_str()
         );
     }
