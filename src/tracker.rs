@@ -7,9 +7,7 @@ use std::{
     fmt::{self, format, Display},
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    path::Display,
 };
-use url::Host;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Request {
@@ -100,7 +98,7 @@ impl Display for Ip {
 }
 
 impl Response {
-    fn decode_peers(&self) -> Result<Vec<Peer>, TrackerError> {
+    pub fn decode_peers(&self) -> Result<Vec<Peer>, TrackerError> {
         if let Some(peers_bytes) = &self.peers {
             if peers_bytes.len() % 6 != 0 {
                 return Err(TrackerError::InvalidPeersFormat);
@@ -126,7 +124,7 @@ impl Response {
 }
 
 impl Peer {
-    fn address(&self) -> String {
+    pub fn address(&self) -> String {
         format!("{}:{}", &self.ip, &self.port)
     }
 }
