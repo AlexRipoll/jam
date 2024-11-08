@@ -133,6 +133,33 @@ impl Transfer {
     }
 }
 
+struct Piece {
+    index: u32,
+    begin: u32,
+    block: Vec<u8>,
+}
+
+impl Piece {
+    fn new(index: u32, begin: u32, block: Vec<u8>) -> Self {
+        Self {
+            index,
+            begin,
+            block,
+        }
+    }
+
+    fn serialize_payload(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(4 + 4 + 4);
+
+        // the Request and Cancel payload has the following format <index><begin><length>
+        bytes.extend_from_slice(&self.index.to_be_bytes());
+        bytes.extend_from_slice(&self.begin.to_be_bytes());
+        bytes.extend_from_slice(&self.block);
+
+        bytes
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::Bitfield;
