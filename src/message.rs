@@ -105,6 +105,34 @@ impl Bitfield {
     }
 }
 
+// struct sued for Request and Cancel message payloads
+struct Transfer {
+    index: u32,
+    begin: u32,
+    length: u32,
+}
+
+impl Transfer {
+    fn new(index: u32, begin: u32, block: u32) -> Self {
+        Self {
+            index,
+            begin,
+            length: block,
+        }
+    }
+
+    fn serialize_payload(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(4 + 4 + 4);
+
+        // the Request and Cancel payload has the following format <index><begin><length>
+        bytes.extend_from_slice(&self.index.to_be_bytes());
+        bytes.extend_from_slice(&self.begin.to_be_bytes());
+        bytes.extend_from_slice(&self.length.to_be_bytes());
+
+        bytes
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::Bitfield;
