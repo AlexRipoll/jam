@@ -1,10 +1,10 @@
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Message {
-    message_id: MessageId,
-    payload: Vec<u8>,
+    pub message_id: MessageId,
+    pub payload: Option<Vec<u8>>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum MessageId {
     Choke = 0,
     Unchoke = 1,
@@ -37,7 +37,7 @@ impl From<u8> for MessageId {
 }
 
 impl Message {
-    pub fn new(message_id: MessageId, payload: Vec<u8>) -> Message {
+    pub fn new(message_id: MessageId, payload: Option<Vec<u8>>) -> Message {
         Message {
             message_id,
             payload,
@@ -45,17 +45,22 @@ impl Message {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
-        // Preallocate the buffer with the exact capacity needed
-        let mut bytes = Vec::with_capacity(4 + 1 + self.payload.len());
+        // Determine payload length (0 if None)
+        let payload_length = self.payload.as_ref().map_or(0, |p| p.len());
+
+        // Preallocate the buffer with the capacity needed
+        let mut bytes = Vec::with_capacity(4 + 1 + payload_length);
 
         // a Message has the following format <length prefix><message ID><payload>.
         //
         // Write the length of the message (payload size + 1 for message ID)
-        bytes.extend_from_slice(&(self.payload.len() as u32 + 1).to_be_bytes());
+        bytes.extend_from_slice(&(payload_length as u32 + 1).to_be_bytes());
         // Write the message ID as a single byte
         bytes.push(self.message_id as u8);
-        // Write the payload
-        bytes.extend_from_slice(&self.payload);
+        // Write the payload, if it exists
+        if let Some(payload) = &self.payload {
+            bytes.extend_from_slice(payload);
+        }
 
         bytes
     }
@@ -65,8 +70,12 @@ impl Message {
         length_bytes.copy_from_slice(&buffer[..4]);
         let length_prefix = u32::from_be_bytes(length_bytes);
 
-        let message_id = MessageId::from(buffer[5]);
-        let payload = buffer[6..length_prefix as usize + 6].to_vec();
+        let message_id = MessageId::from(buffer[4]);
+
+        let mut payload = None;
+        if length_prefix > 1 {
+            payload = Some(buffer[5..length_prefix as usize + 5 - 1].to_vec());
+        }
 
         Message {
             message_id,
@@ -75,7 +84,8 @@ impl Message {
     }
 }
 
-struct Bitfield {
+#[derive(Debug)]
+pub struct Bitfield {
     bytes: Vec<u8>,
 }
 
@@ -106,14 +116,15 @@ impl Bitfield {
 }
 
 // struct sued for Request and Cancel message payloads
-struct Transfer {
+#[derive(Debug)]
+pub struct Transfer {
     index: u32,
     begin: u32,
     length: u32,
 }
 
 impl Transfer {
-    fn new(index: u32, begin: u32, block: u32) -> Self {
+    pub fn new(index: u32, begin: u32, block: u32) -> Self {
         Self {
             index,
             begin,
@@ -121,7 +132,7 @@ impl Transfer {
         }
     }
 
-    fn serialize_payload(&self) -> Vec<u8> {
+    pub fn serialize_payload(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(4 + 4 + 4);
 
         // the Request and Cancel payload has the following format <index><begin><length>
@@ -133,14 +144,14 @@ impl Transfer {
     }
 }
 
-struct Piece {
+pub struct Piece {
     index: u32,
     begin: u32,
     block: Vec<u8>,
 }
 
 impl Piece {
-    fn new(index: u32, begin: u32, block: Vec<u8>) -> Self {
+    pub fn new(index: u32, begin: u32, block: Vec<u8>) -> Self {
         Self {
             index,
             begin,
@@ -148,7 +159,7 @@ impl Piece {
         }
     }
 
-    fn serialize_payload(&self) -> Vec<u8> {
+    pub fn serialize_payload(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(4 + 4 + 4);
 
         // the Request and Cancel payload has the following format <index><begin><length>
@@ -158,11 +169,31 @@ impl Piece {
 
         bytes
     }
+
+    pub fn deserialize_payload(payload: &[u8]) -> Result<Self, &'static str> {
+        // Check that the payload is at least 8 bytes for `index` and `begin`
+        if payload.len() < 8 {
+            return Err("Payload too short for Piece deserialization");
+        }
+
+        // Extract the `index` (first 4 bytes) and `begin` (next 4 bytes)
+        let mut index = [0u8; 4];
+        index.copy_from_slice(&payload[..4]);
+        let index = u32::from_be_bytes(index);
+        let mut begin = [0u8; 4];
+        begin.copy_from_slice(&payload[4..8]);
+        let begin = u32::from_be_bytes(begin);
+
+        // The remaining bytes correspond to the `block`
+        let block = payload[8..].to_vec();
+
+        Ok(Piece::new(index, begin, block))
+    }
 }
 
 #[cfg(test)]
 mod test {
-    use super::Bitfield;
+    use super::{Bitfield, Message};
 
     #[test]
     fn test_has_piece() {
@@ -194,5 +225,17 @@ mod test {
 
         // no change in bitfield
         assert_eq!(bitfield.bytes, vec![0b0, 0b0, 0b0, 0b0]);
+    }
+
+    #[test]
+    fn test_bitfield_message_deserialize() {
+        let bytes = vec![
+            0, 0, 0, 10, 5, 255, 255, 255, 255, 255, 255, 255, 255, 240, 0, 0, 0, 0, 0,
+        ];
+        let expected = Message {
+            message_id: super::MessageId::Bitfield,
+            payload: Some(vec![255, 255, 255, 255, 255, 255, 255, 255, 240]),
+        };
+        assert_eq!(expected, Message::deserialize(bytes));
     }
 }
