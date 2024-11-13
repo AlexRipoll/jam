@@ -90,8 +90,10 @@ pub struct Bitfield {
 }
 
 impl Bitfield {
-    pub fn new(bitfield: Vec<u8>) -> Self {
-        Self { bytes: bitfield }
+    pub fn new(bitfield: &[u8]) -> Self {
+        Self {
+            bytes: bitfield.to_vec(),
+        }
     }
 
     pub fn has_piece(&self, index: usize) -> bool {
@@ -197,21 +199,21 @@ mod test {
 
     #[test]
     fn test_has_piece() {
-        let bitfield = Bitfield::new(vec![0b0, 0b0, 0b00001000, 0b0]);
+        let bitfield = Bitfield::new(&vec![0b0, 0b0, 0b00001000, 0b0]);
         //check that it has the only piece available at index 20
         assert!(bitfield.has_piece(20));
     }
 
     #[test]
     fn test_has_piece_out_of_range() {
-        let bitfield = Bitfield::new(vec![0b0, 0b0, 0b00001000, 0b0]);
+        let bitfield = Bitfield::new(&vec![0b0, 0b0, 0b00001000, 0b0]);
         // should return false when checking for a piece index out of range
         assert!(!bitfield.has_piece(50));
     }
 
     #[test]
     fn test_set_piece() {
-        let mut bitfield = Bitfield::new(vec![0b0, 0b0, 0b0, 0b0]);
+        let mut bitfield = Bitfield::new(&vec![0b0, 0b0, 0b0, 0b0]);
         bitfield.set_piece(20);
 
         assert_eq!(bitfield.bytes, vec![0b0, 0b0, 0b00001000, 0b0]);
@@ -219,7 +221,7 @@ mod test {
 
     #[test]
     fn test_set_piece_out_of_range() {
-        let mut bitfield = Bitfield::new(vec![0b0, 0b0, 0b0, 0b0]);
+        let mut bitfield = Bitfield::new(&vec![0b0, 0b0, 0b0, 0b0]);
         // out of range
         bitfield.set_piece(50);
 

@@ -6,7 +6,24 @@ use tokio::{
     net::TcpStream,
 };
 
+use crate::message::{self, Bitfield, Message, MessageId, Piece, Transfer};
+
 const PSTR: &str = "BitTorrent protocol";
+
+pub struct Client {
+    stream: TcpStream,
+    is_choked: bool,
+    is_interested: bool,
+    peer_chocked: bool,
+    peer_interested: bool,
+    peer_bitfield: Bitfield,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum State {
+    Choked,
+    Interested,
+}
 
 #[derive(Debug)]
 pub struct Handshake {
@@ -41,7 +58,7 @@ impl Handshake {
     pub fn deserialize(buffer: Vec<u8>) -> Result<Handshake, &'static str> {
         let mut offset = 0;
 
-        // 1. Parse `pstr_length` (1 byte)
+        // Parse `pstr_length` (1 byte)
         let pstr_length = buffer[offset];
         offset += 1;
 
@@ -50,24 +67,24 @@ impl Handshake {
             return Err("pstr length mismatch");
         }
 
-        // 2. Parse `pstr` (19 bytes)
+        // Parse `pstr` (19 bytes)
         let pstr = match std::str::from_utf8(&buffer[offset..offset + pstr_length as usize]) {
             Ok(s) => s.to_string(),
             Err(_) => return Err("Invalid UTF-8 in pstr"),
         };
         offset += pstr_length as usize;
 
-        // 3. Parse `reserved` (8 bytes)
+        // Parse `reserved` (8 bytes)
         let mut reserved = [0u8; 8];
         reserved.copy_from_slice(&buffer[offset..offset + 8]);
         offset += 8;
 
-        // 4. Parse `info_hash` (20 bytes)
+        // Parse `info_hash` (20 bytes)
         let mut info_hash = [0u8; 20];
         info_hash.copy_from_slice(&buffer[offset..offset + 20]);
         offset += 20;
 
-        // 5. Parse `peer_id` (20 bytes)
+        // Parse `peer_id` (20 bytes)
         let peer_id_len = std::cmp::min(buffer.len() - offset, 20);
         let mut peer_id = [0u8; 20];
         // peer_id.copy_from_slice(&buffer[offset..]);
@@ -82,41 +99,161 @@ impl Handshake {
     }
 }
 
-pub async fn peer_handshake(
-    peer_address: &str,
-    info_hash: [u8; 20],
-    peer_id: [u8; 20],
-) -> io::Result<Vec<u8>> {
-    let handshake = Handshake::new(info_hash, peer_id);
-
-    let mut stream = TcpStream::connect(peer_address).await?;
-    stream.write_all(&handshake.serialize()).await?;
-
-    let mut buffer = vec![0u8; 68];
-    stream.readable().await?;
-
-    let mut bytes_read = 0;
-    // Loop until we've read exactly 68 bytes
-    while bytes_read < 68 {
-        match stream.try_read(&mut buffer[bytes_read..]) {
-            Ok(0) => break, // Connection closed
-            Ok(n) => bytes_read += n,
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                stream.readable().await?;
-            }
-            Err(e) => return Err(e.into()),
+impl Client {
+    pub fn new(stream: TcpStream) -> Self {
+        Self {
+            stream,
+            is_choked: true,
+            is_interested: false,
+            peer_chocked: true,
+            peer_interested: false,
+            peer_bitfield: Bitfield::new(&vec![]),
         }
     }
 
-    if bytes_read != 68 {
-        eprintln!("Warning: Incomplete handshake response received");
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "Handshake response was not 68 bytes",
-        ));
+    pub async fn handshake(
+        &mut self,
+        info_hash: [u8; 20],
+        peer_id: [u8; 20],
+    ) -> io::Result<Vec<u8>> {
+        let handshake = Handshake::new(info_hash, peer_id);
+        self.stream.write_all(&handshake.serialize()).await?;
+
+        let mut buffer = vec![0u8; 68];
+        self.stream.readable().await?;
+
+        let mut bytes_read = 0;
+        // Loop until we've read exactly 68 bytes
+        while bytes_read < 68 {
+            match self.stream.try_read(&mut buffer[bytes_read..]) {
+                Ok(0) => break, // Connection closed
+                Ok(n) => bytes_read += n,
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    self.stream.readable().await?;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        if bytes_read != 68 {
+            eprintln!("Warning: Incomplete handshake response received");
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Handshake response was not 68 bytes",
+            ));
+        }
+
+        Ok(buffer)
     }
 
-    Ok(buffer)
+    pub async fn send_message(
+        &mut self,
+        message_id: MessageId,
+        payload: Option<Vec<u8>>,
+    ) -> io::Result<()> {
+        let message = Message::new(message_id, payload);
+        self.stream.write_all(&message.serialize()).await?;
+
+        Ok(())
+    }
+
+    pub async fn read_message(&mut self) -> io::Result<Message> {
+        self.stream.readable().await?;
+
+        //  Read the 4-byte length field
+        let mut length_buffer = [0u8; 4];
+        let mut bytes_read = 0;
+        while bytes_read < 4 {
+            match self.stream.try_read(&mut length_buffer[bytes_read..]) {
+                Ok(0) => {
+                    break;
+                } // Connection closed
+                Ok(n) => bytes_read += n,
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    self.stream.readable().await?;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        // Convert the length bytes from Big-Endian to usize
+        let message_length = u32::from_be_bytes(length_buffer) as usize;
+
+        //  Allocate a buffer for the message based on the length
+        let mut message_buffer = vec![0u8; 4 + message_length];
+        message_buffer[..4].copy_from_slice(&length_buffer);
+
+        bytes_read = 0;
+
+        //  Read the actual message data into the buffer
+        while bytes_read < message_length {
+            match self.stream.try_read(&mut message_buffer[4 + bytes_read..]) {
+                Ok(0) => {
+                    break;
+                } // Connection closed
+                Ok(n) => bytes_read += n,
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    self.stream.readable().await?;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        let message = Message::deserialize(message_buffer);
+
+        self.process_message(&message);
+
+        Ok(message)
+    }
+
+    pub async fn process_message(&mut self, message: &Message) -> io::Result<()> {
+        match message.message_id {
+            MessageId::Choke => self.is_choked = true, // stop sending msg until unchoked
+            MessageId::Unchoke => {
+                self.is_choked = false;
+                // TODO:start requesting
+            }
+            MessageId::Interested => {
+                self.peer_interested = true;
+                // TODO: logic for unchoking peer
+                if self.peer_chocked {
+                    self.peer_chocked = false;
+                    self.send_message(MessageId::Unchoke, None).await?; // Notifying unchoked
+                }
+            }
+            MessageId::NotInterested => {
+                self.peer_interested = false;
+            }
+            MessageId::Have => self.process_have(message),
+            MessageId::Bitfield => {
+                self.peer_bitfield = Bitfield::new(message.payload.as_ref().unwrap())
+            }
+            MessageId::Request => {
+                todo!()
+            }
+            MessageId::Piece => {
+                todo!()
+            }
+            MessageId::Cancel => {
+                todo!()
+            }
+            MessageId::Port => {
+                todo!()
+            }
+        }
+
+        Ok(())
+    }
+
+    fn process_have(&mut self, message: &Message) {
+        let mut piece_index_be = [0u8; 4];
+        piece_index_be.copy_from_slice(message.payload.as_ref().unwrap());
+        let piece_index = u32::from_be_bytes(piece_index_be) as usize;
+        if !self.peer_bitfield.has_piece(piece_index) {
+            self.peer_bitfield.set_piece(piece_index);
+        }
+        // TODO: check if interested
+    }
 }
 
 fn client_version() -> String {
