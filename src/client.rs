@@ -199,16 +199,20 @@ impl Client {
             }
         }
 
-        let message = Message::deserialize(message_buffer);
+        let message = Message::deserialize(&message_buffer)?;
 
-        self.process_message(&message);
+        self.process_message(&message).await?;
 
         Ok(message)
     }
 
     pub async fn process_message(&mut self, message: &Message) -> io::Result<()> {
         match message.message_id {
-            MessageId::Choke => self.is_choked = true, // stop sending msg until unchoked
+            MessageId::KeepAlive => {} // TODO: extend stream alive
+            MessageId::Choke => {
+                self.is_choked = true;
+                // TODO:  stop sending msg until unchoked
+            }
             MessageId::Unchoke => {
                 self.is_choked = false;
                 // TODO:start requesting
@@ -226,12 +230,19 @@ impl Client {
             }
             MessageId::Have => self.process_have(message),
             MessageId::Bitfield => {
-                self.peer_bitfield = Bitfield::new(message.payload.as_ref().unwrap())
+                self.peer_bitfield = Bitfield::new(message.payload.as_ref().unwrap());
+
+                // TODO: check if peer has any piece the client is interested in downloading then
+                // request to unchoke and notify interest
+                self.send_message(MessageId::Unchoke, None).await?;
+                self.send_message(MessageId::Interested, None).await?;
             }
             MessageId::Request => {
+                // send piece block to peer
                 todo!()
             }
             MessageId::Piece => {
+                // store piece block
                 todo!()
             }
             MessageId::Cancel => {

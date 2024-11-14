@@ -1,3 +1,7 @@
+use std::io::{self, Error, ErrorKind};
+
+use tokio::time::error::Elapsed;
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct Message {
     pub message_id: MessageId,
@@ -6,6 +10,7 @@ pub struct Message {
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum MessageId {
+    KeepAlive = -1,
     Choke = 0,
     Unchoke = 1,
     Interested = 2,
@@ -65,22 +70,31 @@ impl Message {
         bytes
     }
 
-    pub fn deserialize(buffer: Vec<u8>) -> Message {
+    pub fn deserialize(buffer: &[u8]) -> io::Result<Message> {
+        if buffer.len() < 4 {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "Buffer too short for length prefix",
+            ));
+        }
+
         let mut length_bytes = [0u8; 4];
         length_bytes.copy_from_slice(&buffer[..4]);
         let length_prefix = u32::from_be_bytes(length_bytes);
 
+        if length_prefix == 0 {
+            return Ok(Message::new(MessageId::KeepAlive, None));
+        }
+
         let message_id = MessageId::from(buffer[4]);
 
-        let mut payload = None;
-        if length_prefix > 1 {
-            payload = Some(buffer[5..length_prefix as usize + 5 - 1].to_vec());
-        }
+        let payload = if length_prefix > 1 {
+            Some(buffer[5..length_prefix as usize + 5 - 1].to_vec())
+        } else {
+            None
+        };
 
-        Message {
-            message_id,
-            payload,
-        }
+        Ok(Message::new(message_id, payload))
     }
 }
 
@@ -238,6 +252,6 @@ mod test {
             message_id: super::MessageId::Bitfield,
             payload: Some(vec![255, 255, 255, 255, 255, 255, 255, 255, 240]),
         };
-        assert_eq!(expected, Message::deserialize(bytes));
+        assert_eq!(expected, Message::deserialize(&bytes).unwrap());
     }
 }
