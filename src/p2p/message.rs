@@ -1,7 +1,5 @@
 use std::io::{self, Error, ErrorKind};
 
-use tokio::time::error::Elapsed;
-
 #[derive(Debug, PartialEq, Eq)]
 pub struct Message {
     pub message_id: MessageId,
@@ -133,22 +131,22 @@ impl Bitfield {
 
 // struct sued for Request and Cancel message payloads
 #[derive(Debug)]
-pub struct Transfer {
+pub struct TransferPayload {
     index: u32,
     begin: u32,
     length: u32,
 }
 
-impl Transfer {
-    pub fn new(index: u32, begin: u32, block: u32) -> Self {
+impl TransferPayload {
+    pub fn new(index: u32, begin: u32, length: u32) -> Self {
         Self {
             index,
             begin,
-            length: block,
+            length,
         }
     }
 
-    pub fn serialize_payload(&self) -> Vec<u8> {
+    pub fn serialize(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(4 + 4 + 4);
 
         // the Request and Cancel payload has the following format <index><begin><length>
@@ -160,13 +158,13 @@ impl Transfer {
     }
 }
 
-pub struct Piece {
-    index: u32,
-    begin: u32,
-    block: Vec<u8>,
+pub struct PiecePayload {
+    pub index: u32,
+    pub begin: u32,
+    pub block: Vec<u8>,
 }
 
-impl Piece {
+impl PiecePayload {
     pub fn new(index: u32, begin: u32, block: Vec<u8>) -> Self {
         Self {
             index,
@@ -175,7 +173,7 @@ impl Piece {
         }
     }
 
-    pub fn serialize_payload(&self) -> Vec<u8> {
+    pub fn serialize(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(4 + 4 + 4);
 
         // the Request and Cancel payload has the following format <index><begin><length>
@@ -186,7 +184,7 @@ impl Piece {
         bytes
     }
 
-    pub fn deserialize_payload(payload: &[u8]) -> Result<Self, &'static str> {
+    pub fn deserialize(payload: &[u8]) -> Result<Self, &'static str> {
         // Check that the payload is at least 8 bytes for `index` and `begin`
         if payload.len() < 8 {
             return Err("Payload too short for Piece deserialization");
@@ -203,7 +201,7 @@ impl Piece {
         // The remaining bytes correspond to the `block`
         let block = payload[8..].to_vec();
 
-        Ok(Piece::new(index, begin, block))
+        Ok(PiecePayload::new(index, begin, block))
     }
 }
 
