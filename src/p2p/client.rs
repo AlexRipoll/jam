@@ -1,6 +1,9 @@
 use rand::{distributions::Alphanumeric, Rng};
-use std::usize;
-
+use sha1::{Digest, Sha1};
+use std::error::Error;
+use std::fmt::Display;
+use std::sync::mpsc;
+use std::{collections::HashMap, usize};
 use tokio::{
     io::{self, AsyncWriteExt},
     net::TcpStream,
@@ -8,21 +11,19 @@ use tokio::{
 
 use crate::p2p::message::{Bitfield, Message, MessageId, PiecePayload, TransferPayload};
 
+use super::piece::{Piece, PieceError};
+
 const PSTR: &str = "BitTorrent protocol";
 
 pub struct Client {
     stream: TcpStream,
+    sender: mpsc::Sender<Piece>,
     is_choked: bool,
     is_interested: bool,
     peer_chocked: bool,
     peer_interested: bool,
     peer_bitfield: Bitfield,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum State {
-    Choked,
-    Interested,
+    pieces: HashMap<usize, Piece>,
 }
 
 #[derive(Debug)]
@@ -100,14 +101,16 @@ impl Handshake {
 }
 
 impl Client {
-    pub fn new(stream: TcpStream) -> Self {
+    pub fn new(stream: TcpStream, sender: mpsc::Sender<Piece>) -> Self {
         Self {
             stream,
+            sender,
             is_choked: true,
             is_interested: false,
             peer_chocked: true,
             peer_interested: false,
             peer_bitfield: Bitfield::new(&vec![]),
+            pieces: HashMap::new(),
         }
     }
 
@@ -266,8 +269,33 @@ impl Client {
         Ok(())
     }
 
-    fn download(&self, payload: Option<&[u8]>) {
-        unimplemented!();
+    fn download(&mut self, payload: Option<&[u8]>) -> Result<(), P2pError> {
+        let bytes = payload.ok_or(P2pError::EmptyPayload)?;
+        // Deserialize the payload
+        let payload = PiecePayload::deserialize(bytes)?;
+
+        // Access the piece or insert a new one if it doesn't exist
+        let piece = self
+            .pieces
+            .get_mut(&(payload.index as usize))
+            .ok_or(P2pError::PieceNotFound)?;
+        // Add the block to the piece
+        piece.add_block(payload.begin, payload.block.clone())?;
+
+        // Check if the piece is ready and not yet completed
+        if piece.is_ready() && !piece.is_completed() {
+            let buffer = piece.assemble()?;
+
+            // Validate the piece and send it if valid
+            if is_valid_piece(piece.hash(), &buffer) {
+                piece.set_complete();
+                self.sender.send(piece.clone())?;
+            } else {
+                return Err(P2pError::PieceInvalid);
+            }
+        }
+
+        Ok(())
     }
 
     fn process_have(&mut self, message: &Message) {
@@ -278,6 +306,63 @@ impl Client {
             self.peer_bitfield.set_piece(piece_index);
         }
         // TODO: check if interested
+    }
+}
+
+#[derive(Debug)]
+pub enum P2pError {
+    EmptyPayload,
+    DeserializationError(&'static str),
+    PieceMissingBlocks(PieceError),
+    PieceOutOfBounds(PieceError),
+    PieceNotFound,
+    PieceInvalid,
+    SenderError(mpsc::SendError<Piece>),
+}
+
+impl Display for P2pError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            P2pError::EmptyPayload => write!(f, "Empty payload"),
+            P2pError::DeserializationError(err) => write!(f, "Deserialization error: {}", err),
+            P2pError::PieceNotFound => write!(f, "Piece not found in map"),
+            P2pError::PieceInvalid => write!(f, "Invalid piece, hash mismatch"),
+            P2pError::PieceMissingBlocks(err) => write!(f, "{}", err),
+            P2pError::PieceOutOfBounds(err) => write!(f, "{}", err),
+            P2pError::SenderError(err) => write!(f, "Sender error: {}", err),
+        }
+    }
+}
+
+impl From<&'static str> for P2pError {
+    fn from(err: &'static str) -> Self {
+        P2pError::DeserializationError(err)
+    }
+}
+
+impl From<PieceError> for P2pError {
+    fn from(err: PieceError) -> Self {
+        match err {
+            PieceError::MissingBlocks => P2pError::PieceMissingBlocks(err),
+            PieceError::OutOfBounds => P2pError::PieceOutOfBounds(err),
+        }
+    }
+}
+
+impl From<mpsc::SendError<Piece>> for P2pError {
+    fn from(err: mpsc::SendError<Piece>) -> Self {
+        P2pError::SenderError(err)
+    }
+}
+
+impl Error for P2pError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            P2pError::PieceMissingBlocks(err) => Some(err),
+            P2pError::PieceOutOfBounds(err) => Some(err),
+            P2pError::SenderError(err) => Some(err),
+            _ => None,
+        }
     }
 }
 
@@ -310,6 +395,14 @@ pub fn generate_peer_id() -> [u8; 20] {
     id.copy_from_slice(format.as_bytes());
 
     id
+}
+
+fn is_valid_piece(piece_hash: [u8; 20], piece_bytes: &[u8]) -> bool {
+    let mut hasher = Sha1::new();
+    hasher.update(&piece_bytes);
+    let hash = hasher.finalize();
+
+    piece_hash == hash.as_slice()
 }
 
 #[cfg(test)]
