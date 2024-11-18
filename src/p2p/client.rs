@@ -17,7 +17,7 @@ const PSTR: &str = "BitTorrent protocol";
 
 pub struct Client {
     stream: TcpStream,
-    sender: mpsc::Sender<Piece>,
+    sender: mpsc::Sender<(Piece, Vec<u8>)>,
     is_choked: bool,
     is_interested: bool,
     peer_chocked: bool,
@@ -101,7 +101,7 @@ impl Handshake {
 }
 
 impl Client {
-    pub fn new(stream: TcpStream, sender: mpsc::Sender<Piece>) -> Self {
+    pub fn new(stream: TcpStream, sender: mpsc::Sender<(Piece, Vec<u8>)>) -> Self {
         Self {
             stream,
             sender,
@@ -288,8 +288,9 @@ impl Client {
 
             // Validate the piece and send it if valid
             if is_valid_piece(piece.hash(), &buffer) {
+                self.sender.send((piece.clone(), buffer))?;
+                // NOTE: consider removing from pieces hashmap instead
                 piece.set_complete();
-                self.sender.send(piece.clone())?;
             } else {
                 return Err(P2pError::PieceInvalid);
             }
@@ -317,7 +318,7 @@ pub enum P2pError {
     PieceOutOfBounds(PieceError),
     PieceNotFound,
     PieceInvalid,
-    SenderError(mpsc::SendError<Piece>),
+    SenderError(mpsc::SendError<(Piece, Vec<u8>)>),
 }
 
 impl Display for P2pError {
@@ -349,8 +350,8 @@ impl From<PieceError> for P2pError {
     }
 }
 
-impl From<mpsc::SendError<Piece>> for P2pError {
-    fn from(err: mpsc::SendError<Piece>) -> Self {
+impl From<mpsc::SendError<(Piece, Vec<u8>)>> for P2pError {
+    fn from(err: mpsc::SendError<(Piece, Vec<u8>)>) -> Self {
         P2pError::SenderError(err)
     }
 }
