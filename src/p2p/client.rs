@@ -56,7 +56,7 @@ impl Handshake {
         buf
     }
 
-    pub fn deserialize(buffer: Vec<u8>) -> Result<Handshake, &'static str> {
+    pub fn deserialize(buffer: Vec<u8>) -> Result<Handshake, P2pError> {
         let mut offset = 0;
 
         // Parse `pstr_length` (1 byte)
@@ -65,13 +65,13 @@ impl Handshake {
 
         // Check if `pstr_length` matches expected length for "BitTorrent protocol"
         if pstr_length as usize != PSTR.len() {
-            return Err("pstr length mismatch");
+            return Err(P2pError::DeserializationError("pstr length mismatch"));
         }
 
         // Parse `pstr` (19 bytes)
         let pstr = match std::str::from_utf8(&buffer[offset..offset + pstr_length as usize]) {
             Ok(s) => s.to_string(),
-            Err(_) => return Err("Invalid UTF-8 in pstr"),
+            Err(_) => return Err(P2pError::DeserializationError("Invalid UTF-8 in pstr")),
         };
         offset += pstr_length as usize;
 
@@ -118,7 +118,7 @@ impl Client {
         &mut self,
         info_hash: [u8; 20],
         peer_id: [u8; 20],
-    ) -> io::Result<Vec<u8>> {
+    ) -> Result<Vec<u8>, P2pError> {
         let handshake = Handshake::new(info_hash, peer_id);
         self.stream.write_all(&handshake.serialize()).await?;
 
@@ -140,10 +140,7 @@ impl Client {
 
         if bytes_read != 68 {
             eprintln!("Warning: Incomplete handshake response received");
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "Handshake response was not 68 bytes",
-            ));
+            return Err(P2pError::InvalidHandshake);
         }
 
         Ok(buffer)
@@ -153,14 +150,14 @@ impl Client {
         &mut self,
         message_id: MessageId,
         payload: Option<Vec<u8>>,
-    ) -> io::Result<()> {
+    ) -> Result<(), P2pError> {
         let message = Message::new(message_id, payload);
         self.stream.write_all(&message.serialize()).await?;
 
         Ok(())
     }
 
-    pub async fn read_message(&mut self) -> io::Result<Message> {
+    pub async fn read_message(&mut self) -> Result<Message, P2pError> {
         self.stream.readable().await?;
 
         //  Read the 4-byte length field
@@ -209,7 +206,7 @@ impl Client {
         Ok(message)
     }
 
-    pub async fn process_message(&mut self, message: &Message) -> io::Result<()> {
+    pub async fn process_message(&mut self, message: &Message) -> Result<(), P2pError> {
         match message.message_id {
             MessageId::KeepAlive => {} // TODO: extend stream alive
             MessageId::Choke => {
@@ -262,7 +259,7 @@ impl Client {
         Ok(())
     }
 
-    pub async fn request(&mut self, index: u32, begin: u32, length: u32) -> io::Result<()> {
+    pub async fn request(&mut self, index: u32, begin: u32, length: u32) -> Result<(), P2pError> {
         let payload = TransferPayload::new(index, begin, length).serialize();
         self.send_message(MessageId::Request, Some(payload)).await?;
 
@@ -313,24 +310,28 @@ impl Client {
 #[derive(Debug)]
 pub enum P2pError {
     EmptyPayload,
+    InvalidHandshake,
     DeserializationError(&'static str),
     PieceMissingBlocks(PieceError),
     PieceOutOfBounds(PieceError),
     PieceNotFound,
     PieceInvalid,
     SenderError(mpsc::SendError<(Piece, Vec<u8>)>),
+    IoError(io::Error),
 }
 
 impl Display for P2pError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             P2pError::EmptyPayload => write!(f, "Empty payload"),
+            P2pError::InvalidHandshake => write!(f, "Handshake response was not 68 bytes"),
             P2pError::DeserializationError(err) => write!(f, "Deserialization error: {}", err),
             P2pError::PieceNotFound => write!(f, "Piece not found in map"),
             P2pError::PieceInvalid => write!(f, "Invalid piece, hash mismatch"),
             P2pError::PieceMissingBlocks(err) => write!(f, "{}", err),
             P2pError::PieceOutOfBounds(err) => write!(f, "{}", err),
             P2pError::SenderError(err) => write!(f, "Sender error: {}", err),
+            P2pError::IoError(err) => write!(f, "IO error: {}", err),
         }
     }
 }
@@ -356,12 +357,19 @@ impl From<mpsc::SendError<(Piece, Vec<u8>)>> for P2pError {
     }
 }
 
+impl From<io::Error> for P2pError {
+    fn from(err: io::Error) -> Self {
+        P2pError::IoError(err)
+    }
+}
+
 impl Error for P2pError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             P2pError::PieceMissingBlocks(err) => Some(err),
             P2pError::PieceOutOfBounds(err) => Some(err),
             P2pError::SenderError(err) => Some(err),
+            P2pError::IoError(err) => Some(err),
             _ => None,
         }
     }
