@@ -62,6 +62,10 @@ impl Piece {
         self.size
     }
 
+    pub fn offset(&self) -> u64 {
+        (self.size as u64).saturating_mul(self.index() as u64)
+    }
+
     pub fn hash(&self) -> [u8; 20] {
         self.hash
     }
