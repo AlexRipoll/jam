@@ -130,11 +130,11 @@ impl Bitfield {
 }
 
 // struct sued for Request and Cancel message payloads
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TransferPayload {
-    index: u32,
-    begin: u32,
-    length: u32,
+    pub index: u32,
+    pub begin: u32,
+    pub length: u32,
 }
 
 impl TransferPayload {

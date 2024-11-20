@@ -23,11 +23,11 @@ impl Piece {
 
     pub fn add_block(&mut self, offset: u32, block: Vec<u8>) -> Result<(), PieceError> {
         let block_index = (offset / 16384) as usize;
-        if block_index < self.blocks.len() {
-            self.blocks[block_index] = block;
-        } else {
+
+        if block_index >= self.blocks.len() {
             return Err(PieceError::OutOfBounds);
         }
+        self.blocks[block_index] = block;
 
         Ok(())
     }
@@ -70,11 +70,11 @@ impl Piece {
         self.hash
     }
 
-    pub fn is_completed(&self) -> bool {
+    pub fn is_finalized(&self) -> bool {
         self.is_complete
     }
 
-    pub fn set_complete(&mut self) {
+    pub fn mark_finalized(&mut self) {
         self.is_complete = true;
     }
 }

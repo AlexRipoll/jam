@@ -1,3 +1,4 @@
+use core::panic;
 use rand::{distributions::Alphanumeric, Rng};
 use sha1::{Digest, Sha1};
 use std::error::Error;
@@ -12,6 +13,7 @@ use tokio::{
 use crate::p2p::message::{Bitfield, Message, MessageId, PiecePayload, TransferPayload};
 
 use super::piece::{Piece, PieceError};
+use super::pipeline::Pipeline;
 
 const PSTR: &str = "BitTorrent protocol";
 
@@ -23,7 +25,9 @@ pub struct Client {
     peer_chocked: bool,
     peer_interested: bool,
     peer_bitfield: Bitfield,
-    pieces: HashMap<usize, Piece>,
+    pieces_status: HashMap<usize, Piece>,
+    pieces_queue: Vec<Piece>,
+    pipeline: Pipeline,
 }
 
 #[derive(Debug)]
@@ -69,10 +73,10 @@ impl Handshake {
         }
 
         // Parse `pstr` (19 bytes)
-        let pstr = match std::str::from_utf8(&buffer[offset..offset + pstr_length as usize]) {
-            Ok(s) => s.to_string(),
-            Err(_) => return Err(P2pError::DeserializationError("Invalid UTF-8 in pstr")),
-        };
+        let pstr = std::str::from_utf8(&buffer[offset..offset + pstr_length as usize])
+            .map_err(|_| P2pError::DeserializationError("Invalid UTF-8 in pstr"))?
+            .to_string();
+
         offset += pstr_length as usize;
 
         // Parse `reserved` (8 bytes)
@@ -110,7 +114,9 @@ impl Client {
             peer_chocked: true,
             peer_interested: false,
             peer_bitfield: Bitfield::new(&vec![]),
-            pieces: HashMap::new(),
+            pieces_status: HashMap::new(),
+            pieces_queue: vec![],
+            pipeline: Pipeline::new(5),
         }
     }
 
@@ -216,9 +222,6 @@ impl Client {
             MessageId::Unchoke => {
                 self.is_choked = false;
                 // TODO:start requesting
-                for n in 0..4 {
-                    self.request(0, n * 16384, 16384).await?;
-                }
             }
             MessageId::Interested => {
                 self.peer_interested = true;
@@ -239,14 +242,15 @@ impl Client {
                 // request to unchoke and notify interest
                 self.send_message(MessageId::Unchoke, None).await?;
                 self.send_message(MessageId::Interested, None).await?;
+                self.is_interested = true;
             }
             MessageId::Request => {
-                // send piece block to peer
+                // send piece blocks to peer
                 todo!()
             }
             MessageId::Piece => {
                 // store piece block
-                self.download(message.payload.as_deref());
+                self.download(message.payload.as_deref())?;
             }
             MessageId::Cancel => {
                 todo!()
@@ -259,35 +263,83 @@ impl Client {
         Ok(())
     }
 
-    pub async fn request(&mut self, index: u32, begin: u32, length: u32) -> Result<(), P2pError> {
-        let payload = TransferPayload::new(index, begin, length).serialize();
-        self.send_message(MessageId::Request, Some(payload)).await?;
+    pub async fn request(&mut self) -> Result<(), P2pError> {
+        let (queue_index, block_offset) = match self.pipeline.last_added.clone() {
+            Some(piece_data) => {
+                if let Some(index) = self
+                    .pieces_queue
+                    .clone()
+                    .iter()
+                    .position(|piece| piece.index() == piece_data.piece_index)
+                {
+                    (index, piece_data.block_offset + 16384)
+                } else {
+                    panic!("piece not found in queue");
+                }
+            }
+            None => (0, 0),
+        };
+
+        for i in queue_index..self.pieces_queue.len() {
+            let piece = self.pieces_queue[i].clone();
+            self.request_from_offset(&piece, block_offset).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Core logic to request blocks from a piece starting at a given offset
+    async fn request_from_offset(
+        &mut self,
+        piece: &Piece,
+        start_offset: u32,
+    ) -> Result<(), P2pError> {
+        let total_blocks = (piece.size() + 16384 - 1) / 16384;
+
+        for block_index in ((start_offset / 16384) as usize)..total_blocks {
+            let block_offset = block_index as u32 * 16384;
+            let block_size = 16384.min(piece.size() as u32 - block_offset);
+
+            // Add to pipeline and send the request
+            self.pipeline.add_request(piece.index(), block_offset);
+            let payload = TransferPayload::new(piece.index(), block_offset, block_size).serialize();
+            self.send_message(MessageId::Request, Some(payload)).await?;
+            // self.request(piece.index(), block_offset, block_size)
+            //     .await?;
+
+            // Stop if the pipeline is full
+            if self.pipeline.is_full() {
+                break;
+            }
+        }
 
         Ok(())
     }
 
     fn download(&mut self, payload: Option<&[u8]>) -> Result<(), P2pError> {
         let bytes = payload.ok_or(P2pError::EmptyPayload)?;
-        // Deserialize the payload
         let payload = PiecePayload::deserialize(bytes)?;
 
-        // Access the piece or insert a new one if it doesn't exist
         let piece = self
-            .pieces
+            .pieces_status
             .get_mut(&(payload.index as usize))
             .ok_or(P2pError::PieceNotFound)?;
         // Add the block to the piece
         piece.add_block(payload.begin, payload.block.clone())?;
+        self.pipeline.remove_request(payload.index, payload.begin);
 
         // Check if the piece is ready and not yet completed
-        if piece.is_ready() && !piece.is_completed() {
+        if piece.is_ready() && !piece.is_finalized() {
             let buffer = piece.assemble()?;
 
-            // Validate the piece and send it if valid
+            // Validate the piece hash
             if is_valid_piece(piece.hash(), &buffer) {
                 self.sender.send((piece.clone(), buffer))?;
                 // NOTE: consider removing from pieces hashmap instead
-                piece.set_complete();
+                piece.mark_finalized();
+                // remove the finalized piece from the queue
+                self.pieces_queue
+                    .retain(|piece| piece.index() != piece.index());
             } else {
                 return Err(P2pError::PieceInvalid);
             }
