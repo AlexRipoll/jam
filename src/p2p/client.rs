@@ -3,7 +3,7 @@ use rand::{distributions::Alphanumeric, Rng};
 use sha1::{Digest, Sha1};
 use std::error::Error;
 use std::fmt::Display;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::{collections::HashMap, usize};
 use tokio::{
     io::{self, AsyncWriteExt},
@@ -13,21 +13,22 @@ use tokio::{
 use crate::p2p::message::{Bitfield, Message, MessageId, PiecePayload, TransferPayload};
 
 use super::piece::{Piece, PieceError};
-use super::pipeline::Pipeline;
+use super::pipeline::{self, Pipeline};
 
 const PSTR: &str = "BitTorrent protocol";
 
+#[derive(Debug)]
 pub struct Client {
     stream: TcpStream,
     sender: mpsc::Sender<(Piece, Vec<u8>)>,
-    is_choked: bool,
-    is_interested: bool,
-    peer_chocked: bool,
-    peer_interested: bool,
-    peer_bitfield: Bitfield,
-    pieces_status: HashMap<usize, Piece>,
-    pieces_queue: Vec<Piece>,
-    pipeline: Pipeline,
+    is_choked: RwLock<bool>,
+    is_interested: RwLock<bool>,
+    peer_choked: RwLock<bool>,
+    peer_interested: RwLock<bool>,
+    peer_bitfield: RwLock<Bitfield>,
+    pieces_status: RwLock<HashMap<usize, Piece>>,
+    pieces_queue: RwLock<Vec<Piece>>,
+    pipeline: Mutex<Pipeline>,
 }
 
 #[derive(Debug)]
@@ -109,14 +110,14 @@ impl Client {
         Self {
             stream,
             sender,
-            is_choked: true,
-            is_interested: false,
-            peer_chocked: true,
-            peer_interested: false,
-            peer_bitfield: Bitfield::new(&vec![]),
-            pieces_status: HashMap::new(),
-            pieces_queue: vec![],
-            pipeline: Pipeline::new(5),
+            is_choked: RwLock::new(true),
+            is_interested: RwLock::new(false),
+            peer_choked: RwLock::new(true),
+            peer_interested: RwLock::new(false),
+            peer_bitfield: RwLock::new(Bitfield::new(&vec![])),
+            pieces_status: RwLock::new(HashMap::new()),
+            pieces_queue: RwLock::new(vec![]),
+            pipeline: Mutex::new(Pipeline::new(5)),
         }
     }
 
@@ -216,33 +217,50 @@ impl Client {
         match message.message_id {
             MessageId::KeepAlive => {} // TODO: extend stream alive
             MessageId::Choke => {
-                self.is_choked = true;
                 // TODO:  stop sending msg until unchoked
+                let mut is_choked = self.is_choked.write().unwrap();
+                *is_choked = true;
+                println!("Client is now choked by the peer.");
             }
             MessageId::Unchoke => {
-                self.is_choked = false;
+                let mut is_choked = self.is_choked.write().unwrap();
+                *is_choked = false; // Update `is_choked`
+                println!("Client is now unchoked by the peer.");
                 // TODO:start requesting
             }
             MessageId::Interested => {
-                self.peer_interested = true;
+                {
+                    let mut peer_interested = self.peer_interested.write().unwrap();
+                    *peer_interested = true;
+                }
+
                 // TODO: logic for unchoking peer
-                if self.peer_chocked {
-                    self.peer_chocked = false;
-                    self.send_message(MessageId::Unchoke, None).await?; // Notifying unchoked
+                let mut peer_choked = self.peer_choked.write().unwrap();
+                if *peer_choked {
+                    *peer_choked = false;
+                    drop(peer_choked); // Explicitly drop lock to avoid conflict
+                    self.send_message(MessageId::Unchoke, None).await?; // Notify unchoked
                 }
             }
             MessageId::NotInterested => {
-                self.peer_interested = false;
+                let mut peer_interested = self.peer_interested.write().unwrap();
+                *peer_interested = false;
             }
             MessageId::Have => self.process_have(message),
             MessageId::Bitfield => {
-                self.peer_bitfield = Bitfield::new(message.payload.as_ref().unwrap());
+                // Update the peer's bitfield and determine if the client is interested
+                {
+                    let mut peer_bitfield = self.peer_bitfield.write().unwrap();
+                    *peer_bitfield = Bitfield::new(message.payload.as_ref().unwrap());
+                }
 
+                // TODO: send bitfield to clients orchestrator.
                 // TODO: check if peer has any piece the client is interested in downloading then
                 // request to unchoke and notify interest
                 self.send_message(MessageId::Unchoke, None).await?;
                 self.send_message(MessageId::Interested, None).await?;
-                self.is_interested = true;
+                let mut is_interested = self.is_interested.write().unwrap();
+                *is_interested = true;
             }
             MessageId::Request => {
                 // send piece blocks to peer
@@ -264,24 +282,29 @@ impl Client {
     }
 
     pub async fn request(&mut self) -> Result<(), P2pError> {
-        let (queue_index, block_offset) = match self.pipeline.last_added.clone() {
-            Some(piece_data) => {
-                if let Some(index) = self
-                    .pieces_queue
-                    .clone()
-                    .iter()
-                    .position(|piece| piece.index() == piece_data.piece_index)
-                {
-                    (index, piece_data.block_offset + 16384)
-                } else {
-                    panic!("piece not found in queue");
+        let (queue_index, block_offset) = {
+            let pipeline = self.pipeline.lock().unwrap();
+            match pipeline.last_added.clone() {
+                Some(piece_data) => {
+                    let pieces_queue = self.pieces_queue.read().unwrap();
+                    if let Some(index) = pieces_queue
+                        .iter()
+                        .position(|piece| piece.index() == piece_data.piece_index)
+                    {
+                        (index, piece_data.block_offset + 16384)
+                    } else {
+                        panic!("piece not found in queue");
+                    }
                 }
+                None => (0, 0),
             }
-            None => (0, 0),
         };
 
-        for i in queue_index..self.pieces_queue.len() {
-            let piece = self.pieces_queue[i].clone();
+        let queue_length = self.pieces_queue.read().unwrap().len();
+        for i in queue_index..queue_length {
+            let pieces_queue = self.pieces_queue.read().unwrap();
+            let piece = pieces_queue[i].clone();
+            drop(pieces_queue);
             self.request_from_offset(&piece, block_offset).await?;
         }
 
@@ -301,14 +324,17 @@ impl Client {
             let block_size = 16384.min(piece.size() as u32 - block_offset);
 
             // Add to pipeline and send the request
-            self.pipeline.add_request(piece.index(), block_offset);
+            let mut pipeline = self.pipeline.lock().unwrap();
+            pipeline.add_request(piece.index(), block_offset);
+            drop(pipeline);
+
             let payload = TransferPayload::new(piece.index(), block_offset, block_size).serialize();
             self.send_message(MessageId::Request, Some(payload)).await?;
-            // self.request(piece.index(), block_offset, block_size)
-            //     .await?;
 
+            // FIX: bad design
+            let pipeline = self.pipeline.lock().unwrap();
             // Stop if the pipeline is full
-            if self.pipeline.is_full() {
+            if pipeline.is_full() {
                 break;
             }
         }
@@ -320,13 +346,15 @@ impl Client {
         let bytes = payload.ok_or(P2pError::EmptyPayload)?;
         let payload = PiecePayload::deserialize(bytes)?;
 
-        let piece = self
-            .pieces_status
+        let mut pieces_status = self.pieces_status.write().unwrap();
+        let piece = pieces_status
             .get_mut(&(payload.index as usize))
             .ok_or(P2pError::PieceNotFound)?;
+
         // Add the block to the piece
         piece.add_block(payload.begin, payload.block.clone())?;
-        self.pipeline.remove_request(payload.index, payload.begin);
+        let mut pipeline = self.pipeline.lock().unwrap();
+        pipeline.remove_request(payload.index, payload.begin);
 
         // Check if the piece is ready and not yet completed
         if piece.is_ready() && !piece.is_finalized() {
@@ -337,9 +365,10 @@ impl Client {
                 self.sender.send((piece.clone(), buffer))?;
                 // NOTE: consider removing from pieces hashmap instead
                 piece.mark_finalized();
+
                 // remove the finalized piece from the queue
-                self.pieces_queue
-                    .retain(|piece| piece.index() != piece.index());
+                let mut pieces_queue = self.pieces_queue.write().unwrap();
+                pieces_queue.retain(|piece| piece.index() != piece.index());
             } else {
                 return Err(P2pError::PieceInvalid);
             }
@@ -352,8 +381,9 @@ impl Client {
         let mut piece_index_be = [0u8; 4];
         piece_index_be.copy_from_slice(message.payload.as_ref().unwrap());
         let piece_index = u32::from_be_bytes(piece_index_be) as usize;
-        if !self.peer_bitfield.has_piece(piece_index) {
-            self.peer_bitfield.set_piece(piece_index);
+        let mut peer_bitfield = self.peer_bitfield.write().unwrap();
+        if !peer_bitfield.has_piece(piece_index) {
+            peer_bitfield.set_piece(piece_index);
         }
         // TODO: check if interested
     }
