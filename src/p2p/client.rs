@@ -1,14 +1,11 @@
-use core::panic;
 use rand::{distributions::Alphanumeric, Rng};
 use sha1::{Digest, Sha1};
 use std::error::Error;
 use std::fmt::Display;
-use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::{collections::HashMap, usize};
-use tokio::{
-    io::{self, AsyncWriteExt},
-    net::TcpStream,
-};
+use tokio::io::{self, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 
 use crate::p2p::message::{Bitfield, Message, MessageId, PiecePayload, TransferPayload};
 
@@ -18,17 +15,217 @@ use super::pipeline::{self, Pipeline};
 const PSTR: &str = "BitTorrent protocol";
 
 #[derive(Debug)]
-pub struct Client {
-    stream: TcpStream,
-    sender: mpsc::Sender<(Piece, Vec<u8>)>,
-    is_choked: RwLock<bool>,
-    is_interested: RwLock<bool>,
-    peer_choked: RwLock<bool>,
-    peer_interested: RwLock<bool>,
-    peer_bitfield: RwLock<Bitfield>,
-    pieces_status: RwLock<HashMap<usize, Piece>>,
-    pieces_queue: RwLock<Vec<Piece>>,
-    pipeline: Mutex<Pipeline>,
+pub struct Actor {
+    io_wtx: mpsc::Sender<Message>,
+    disk_tx: mpsc::Sender<(Piece, Vec<u8>)>,
+
+    // rx: mpsc::Receiver<Message>,
+    // sender: mpsc::Sender<(Piece, Vec<u8>)>,
+    state: State,
+}
+
+#[derive(Debug)]
+struct State {
+    is_choked: bool,
+    is_interested: bool,
+    peer_choked: bool,
+    peer_interested: bool,
+    peer_bitfield: Bitfield,
+    pieces_status: HashMap<usize, Piece>,
+    pieces_queue: Vec<Piece>,
+    pipeline: Pipeline,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        State {
+            is_choked: true,
+            is_interested: false,
+            peer_choked: true,
+            peer_interested: false,
+            peer_bitfield: Bitfield::new(&vec![]),
+            pieces_status: HashMap::new(),
+            pieces_queue: vec![],
+            pipeline: Pipeline::new(5),
+        }
+    }
+}
+
+impl Actor {
+    pub fn new(io_wtx: mpsc::Sender<Message>, disk_tx: mpsc::Sender<(Piece, Vec<u8>)>) -> Self {
+        Self {
+            io_wtx,
+            disk_tx,
+            state: State::default(),
+        }
+    }
+
+    pub async fn handle_message(&mut self, message: Message) -> Result<(), P2pError> {
+        // modifies state
+        match message.message_id {
+            MessageId::KeepAlive => {} // TODO: extend stream alive
+            MessageId::Choke => {
+                // TODO:  stop sending msg until unchoked
+                self.state.is_choked = true;
+                println!("Client choked by the peer.");
+            }
+            MessageId::Unchoke => {
+                self.state.is_choked = false;
+                println!("Client unchoked by the peer.");
+                // TODO:start requesting
+            }
+            MessageId::Interested => {
+                self.state.peer_interested = true;
+
+                // TODO: logic for unchoking peer
+                if self.state.peer_choked {
+                    self.state.peer_choked = false;
+                    self.io_wtx
+                        .send(Message::new(MessageId::Unchoke, None))
+                        .await?;
+                }
+            }
+            MessageId::NotInterested => {
+                self.state.peer_interested = false;
+            }
+            MessageId::Have => self.process_have(&message),
+            MessageId::Bitfield => {
+                // Update the peer's bitfield and determine if the client is interested
+
+                self.state.peer_bitfield = Bitfield::new(message.payload.as_ref().unwrap());
+
+                // TODO: send bitfield to clients orchestrator.
+                // TODO: check if peer has any piece the client is interested in downloading then
+                self.io_wtx
+                    .send(Message::new(MessageId::Unchoke, None))
+                    .await?;
+                self.io_wtx
+                    .send(Message::new(MessageId::Interested, None))
+                    .await?;
+                self.state.is_interested = true;
+            }
+            MessageId::Request => {
+                // send piece blocks to peer
+                todo!()
+            }
+            MessageId::Piece => {
+                // store piece block
+                self.download(message.payload.as_deref()).await?;
+            }
+            MessageId::Cancel => {
+                todo!()
+            }
+            MessageId::Port => {
+                todo!()
+            }
+        }
+
+        Ok(())
+    }
+
+    fn process_have(&mut self, message: &Message) {
+        let mut piece_index_be = [0u8; 4];
+        piece_index_be.copy_from_slice(message.payload.as_ref().unwrap());
+        let piece_index = u32::from_be_bytes(piece_index_be) as usize;
+
+        if !self.state.peer_bitfield.has_piece(piece_index) {
+            self.state.peer_bitfield.set_piece(piece_index);
+        }
+        // TODO: check if interested
+    }
+
+    async fn download(&mut self, payload: Option<&[u8]>) -> Result<(), P2pError> {
+        let bytes = payload.ok_or(P2pError::EmptyPayload)?;
+        let payload = PiecePayload::deserialize(bytes)?;
+
+        let piece = self
+            .state
+            .pieces_status
+            .get_mut(&(payload.index as usize))
+            .ok_or(P2pError::PieceNotFound)?;
+
+        // Add the block to the piece
+        piece.add_block(payload.begin, payload.block.clone())?;
+        self.state
+            .pipeline
+            .remove_request(payload.index, payload.begin);
+
+        // Check if the piece is ready and not yet completed
+        if piece.is_ready() && !piece.is_finalized() {
+            let buffer = piece.assemble()?;
+
+            // Validate the piece hash
+            if is_valid_piece(piece.hash(), &buffer) {
+                self.disk_tx.send((piece.clone(), buffer)).await?;
+                // NOTE: consider removing from pieces hashmap instead
+                piece.mark_finalized();
+
+                // remove the finalized piece from the queue
+                self.state
+                    .pieces_queue
+                    .retain(|piece| piece.index() != piece.index());
+            } else {
+                return Err(P2pError::PieceInvalid);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn request(&mut self) -> Result<(), P2pError> {
+        let (queue_index, block_offset) = {
+            match self.state.pipeline.last_added.clone() {
+                Some(piece_data) => {
+                    if let Some(index) = self
+                        .state
+                        .pieces_queue
+                        .iter()
+                        .position(|piece| piece.index() == piece_data.piece_index)
+                    {
+                        (index, piece_data.block_offset + 16384)
+                    } else {
+                        panic!("piece not found in queue");
+                    }
+                }
+                None => (0, 0),
+            }
+        };
+
+        let queue_length = self.state.pieces_queue.len();
+        for i in queue_index..queue_length {
+            let piece = self.state.pieces_queue[i].clone();
+            self.request_from_offset(&piece, block_offset).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Core logic to request blocks from a piece starting at a given offset
+    async fn request_from_offset(
+        &mut self,
+        piece: &Piece,
+        start_offset: u32,
+    ) -> Result<(), P2pError> {
+        let total_blocks = (piece.size() + 16384 - 1) / 16384;
+
+        for block_index in ((start_offset / 16384) as usize)..total_blocks {
+            let block_offset = block_index as u32 * 16384;
+            let block_size = 16384.min(piece.size() as u32 - block_offset);
+
+            // Add to pipeline and send the request
+            self.state.pipeline.add_request(piece.index(), block_offset);
+
+            let payload = TransferPayload::new(piece.index(), block_offset, block_size).serialize();
+            self.io_wtx
+                .send(Message::new(MessageId::Request, Some(payload)));
+
+            if self.state.pipeline.is_full() {
+                break;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -105,288 +302,36 @@ impl Handshake {
     }
 }
 
-impl Client {
-    pub fn new(stream: TcpStream, sender: mpsc::Sender<(Piece, Vec<u8>)>) -> Self {
-        Self {
-            stream,
-            sender,
-            is_choked: RwLock::new(true),
-            is_interested: RwLock::new(false),
-            peer_choked: RwLock::new(true),
-            peer_interested: RwLock::new(false),
-            peer_bitfield: RwLock::new(Bitfield::new(&vec![])),
-            pieces_status: RwLock::new(HashMap::new()),
-            pieces_queue: RwLock::new(vec![]),
-            pipeline: Mutex::new(Pipeline::new(5)),
+pub async fn handshake(
+    stream: &mut TcpStream,
+    info_hash: [u8; 20],
+    peer_id: [u8; 20],
+) -> Result<Vec<u8>, P2pError> {
+    let handshake = Handshake::new(info_hash, peer_id);
+    stream.write_all(&handshake.serialize()).await?;
+
+    let mut buffer = vec![0u8; 68];
+    stream.readable().await?;
+
+    let mut bytes_read = 0;
+    // Loop until we've read exactly 68 bytes
+    while bytes_read < 68 {
+        match stream.try_read(&mut buffer[bytes_read..]) {
+            Ok(0) => break, // Connection closed
+            Ok(n) => bytes_read += n,
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                stream.readable().await?;
+            }
+            Err(e) => return Err(e.into()),
         }
     }
 
-    pub async fn handshake(
-        &mut self,
-        info_hash: [u8; 20],
-        peer_id: [u8; 20],
-    ) -> Result<Vec<u8>, P2pError> {
-        let handshake = Handshake::new(info_hash, peer_id);
-        self.stream.write_all(&handshake.serialize()).await?;
-
-        let mut buffer = vec![0u8; 68];
-        self.stream.readable().await?;
-
-        let mut bytes_read = 0;
-        // Loop until we've read exactly 68 bytes
-        while bytes_read < 68 {
-            match self.stream.try_read(&mut buffer[bytes_read..]) {
-                Ok(0) => break, // Connection closed
-                Ok(n) => bytes_read += n,
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    self.stream.readable().await?;
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
-
-        if bytes_read != 68 {
-            eprintln!("Warning: Incomplete handshake response received");
-            return Err(P2pError::InvalidHandshake);
-        }
-
-        Ok(buffer)
+    if bytes_read != 68 {
+        eprintln!("Warning: Incomplete handshake response received");
+        return Err(P2pError::InvalidHandshake);
     }
 
-    pub async fn send_message(
-        &mut self,
-        message_id: MessageId,
-        payload: Option<Vec<u8>>,
-    ) -> Result<(), P2pError> {
-        let message = Message::new(message_id, payload);
-        self.stream.write_all(&message.serialize()).await?;
-
-        Ok(())
-    }
-
-    pub async fn read_message(&mut self) -> Result<Message, P2pError> {
-        self.stream.readable().await?;
-
-        //  Read the 4-byte length field
-        let mut length_buffer = [0u8; 4];
-        let mut bytes_read = 0;
-        while bytes_read < 4 {
-            match self.stream.try_read(&mut length_buffer[bytes_read..]) {
-                Ok(0) => {
-                    break;
-                } // Connection closed
-                Ok(n) => bytes_read += n,
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    self.stream.readable().await?;
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
-
-        // Convert the length bytes from Big-Endian to usize
-        let message_length = u32::from_be_bytes(length_buffer) as usize;
-
-        //  Allocate a buffer for the message based on the length
-        let mut message_buffer = vec![0u8; 4 + message_length];
-        message_buffer[..4].copy_from_slice(&length_buffer);
-
-        bytes_read = 0;
-
-        //  Read the actual message data into the buffer
-        while bytes_read < message_length {
-            match self.stream.try_read(&mut message_buffer[4 + bytes_read..]) {
-                Ok(0) => {
-                    break;
-                } // Connection closed
-                Ok(n) => bytes_read += n,
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    self.stream.readable().await?;
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
-
-        let message = Message::deserialize(&message_buffer)?;
-
-        self.process_message(&message).await?;
-
-        Ok(message)
-    }
-
-    pub async fn process_message(&mut self, message: &Message) -> Result<(), P2pError> {
-        match message.message_id {
-            MessageId::KeepAlive => {} // TODO: extend stream alive
-            MessageId::Choke => {
-                // TODO:  stop sending msg until unchoked
-                let mut is_choked = self.is_choked.write().unwrap();
-                *is_choked = true;
-                println!("Client is now choked by the peer.");
-            }
-            MessageId::Unchoke => {
-                let mut is_choked = self.is_choked.write().unwrap();
-                *is_choked = false; // Update `is_choked`
-                println!("Client is now unchoked by the peer.");
-                // TODO:start requesting
-            }
-            MessageId::Interested => {
-                {
-                    let mut peer_interested = self.peer_interested.write().unwrap();
-                    *peer_interested = true;
-                }
-
-                // TODO: logic for unchoking peer
-                let mut peer_choked = self.peer_choked.write().unwrap();
-                if *peer_choked {
-                    *peer_choked = false;
-                    drop(peer_choked); // Explicitly drop lock to avoid conflict
-                    self.send_message(MessageId::Unchoke, None).await?; // Notify unchoked
-                }
-            }
-            MessageId::NotInterested => {
-                let mut peer_interested = self.peer_interested.write().unwrap();
-                *peer_interested = false;
-            }
-            MessageId::Have => self.process_have(message),
-            MessageId::Bitfield => {
-                // Update the peer's bitfield and determine if the client is interested
-                {
-                    let mut peer_bitfield = self.peer_bitfield.write().unwrap();
-                    *peer_bitfield = Bitfield::new(message.payload.as_ref().unwrap());
-                }
-
-                // TODO: send bitfield to clients orchestrator.
-                // TODO: check if peer has any piece the client is interested in downloading then
-                // request to unchoke and notify interest
-                self.send_message(MessageId::Unchoke, None).await?;
-                self.send_message(MessageId::Interested, None).await?;
-                let mut is_interested = self.is_interested.write().unwrap();
-                *is_interested = true;
-            }
-            MessageId::Request => {
-                // send piece blocks to peer
-                todo!()
-            }
-            MessageId::Piece => {
-                // store piece block
-                self.download(message.payload.as_deref())?;
-            }
-            MessageId::Cancel => {
-                todo!()
-            }
-            MessageId::Port => {
-                todo!()
-            }
-        }
-
-        Ok(())
-    }
-
-    pub async fn request(&mut self) -> Result<(), P2pError> {
-        let (queue_index, block_offset) = {
-            let pipeline = self.pipeline.lock().unwrap();
-            match pipeline.last_added.clone() {
-                Some(piece_data) => {
-                    let pieces_queue = self.pieces_queue.read().unwrap();
-                    if let Some(index) = pieces_queue
-                        .iter()
-                        .position(|piece| piece.index() == piece_data.piece_index)
-                    {
-                        (index, piece_data.block_offset + 16384)
-                    } else {
-                        panic!("piece not found in queue");
-                    }
-                }
-                None => (0, 0),
-            }
-        };
-
-        let queue_length = self.pieces_queue.read().unwrap().len();
-        for i in queue_index..queue_length {
-            let pieces_queue = self.pieces_queue.read().unwrap();
-            let piece = pieces_queue[i].clone();
-            drop(pieces_queue);
-            self.request_from_offset(&piece, block_offset).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Core logic to request blocks from a piece starting at a given offset
-    async fn request_from_offset(
-        &mut self,
-        piece: &Piece,
-        start_offset: u32,
-    ) -> Result<(), P2pError> {
-        let total_blocks = (piece.size() + 16384 - 1) / 16384;
-
-        for block_index in ((start_offset / 16384) as usize)..total_blocks {
-            let block_offset = block_index as u32 * 16384;
-            let block_size = 16384.min(piece.size() as u32 - block_offset);
-
-            // Add to pipeline and send the request
-            let mut pipeline = self.pipeline.lock().unwrap();
-            pipeline.add_request(piece.index(), block_offset);
-            drop(pipeline);
-
-            let payload = TransferPayload::new(piece.index(), block_offset, block_size).serialize();
-            self.send_message(MessageId::Request, Some(payload)).await?;
-
-            // FIX: bad design
-            let pipeline = self.pipeline.lock().unwrap();
-            // Stop if the pipeline is full
-            if pipeline.is_full() {
-                break;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn download(&mut self, payload: Option<&[u8]>) -> Result<(), P2pError> {
-        let bytes = payload.ok_or(P2pError::EmptyPayload)?;
-        let payload = PiecePayload::deserialize(bytes)?;
-
-        let mut pieces_status = self.pieces_status.write().unwrap();
-        let piece = pieces_status
-            .get_mut(&(payload.index as usize))
-            .ok_or(P2pError::PieceNotFound)?;
-
-        // Add the block to the piece
-        piece.add_block(payload.begin, payload.block.clone())?;
-        let mut pipeline = self.pipeline.lock().unwrap();
-        pipeline.remove_request(payload.index, payload.begin);
-
-        // Check if the piece is ready and not yet completed
-        if piece.is_ready() && !piece.is_finalized() {
-            let buffer = piece.assemble()?;
-
-            // Validate the piece hash
-            if is_valid_piece(piece.hash(), &buffer) {
-                self.sender.send((piece.clone(), buffer))?;
-                // NOTE: consider removing from pieces hashmap instead
-                piece.mark_finalized();
-
-                // remove the finalized piece from the queue
-                let mut pieces_queue = self.pieces_queue.write().unwrap();
-                pieces_queue.retain(|piece| piece.index() != piece.index());
-            } else {
-                return Err(P2pError::PieceInvalid);
-            }
-        }
-
-        Ok(())
-    }
-
-    fn process_have(&mut self, message: &Message) {
-        let mut piece_index_be = [0u8; 4];
-        piece_index_be.copy_from_slice(message.payload.as_ref().unwrap());
-        let piece_index = u32::from_be_bytes(piece_index_be) as usize;
-        let mut peer_bitfield = self.peer_bitfield.write().unwrap();
-        if !peer_bitfield.has_piece(piece_index) {
-            peer_bitfield.set_piece(piece_index);
-        }
-        // TODO: check if interested
-    }
+    Ok(buffer)
 }
 
 #[derive(Debug)]
@@ -398,7 +343,8 @@ pub enum P2pError {
     PieceOutOfBounds(PieceError),
     PieceNotFound,
     PieceInvalid,
-    SenderError(mpsc::SendError<(Piece, Vec<u8>)>),
+    DiskTxError(mpsc::error::SendError<(Piece, Vec<u8>)>),
+    IoTxError(mpsc::error::SendError<Message>),
     IoError(io::Error),
 }
 
@@ -412,7 +358,8 @@ impl Display for P2pError {
             P2pError::PieceInvalid => write!(f, "Invalid piece, hash mismatch"),
             P2pError::PieceMissingBlocks(err) => write!(f, "{}", err),
             P2pError::PieceOutOfBounds(err) => write!(f, "{}", err),
-            P2pError::SenderError(err) => write!(f, "Sender error: {}", err),
+            P2pError::DiskTxError(err) => write!(f, "Disk tx error: {}", err),
+            P2pError::IoTxError(err) => write!(f, "IO tx error: {}", err),
             P2pError::IoError(err) => write!(f, "IO error: {}", err),
         }
     }
@@ -433,9 +380,15 @@ impl From<PieceError> for P2pError {
     }
 }
 
-impl From<mpsc::SendError<(Piece, Vec<u8>)>> for P2pError {
-    fn from(err: mpsc::SendError<(Piece, Vec<u8>)>) -> Self {
-        P2pError::SenderError(err)
+impl From<mpsc::error::SendError<(Piece, Vec<u8>)>> for P2pError {
+    fn from(err: mpsc::error::SendError<(Piece, Vec<u8>)>) -> Self {
+        P2pError::DiskTxError(err)
+    }
+}
+
+impl From<mpsc::error::SendError<Message>> for P2pError {
+    fn from(err: mpsc::error::SendError<Message>) -> Self {
+        P2pError::IoTxError(err)
     }
 }
 
@@ -450,7 +403,8 @@ impl Error for P2pError {
         match self {
             P2pError::PieceMissingBlocks(err) => Some(err),
             P2pError::PieceOutOfBounds(err) => Some(err),
-            P2pError::SenderError(err) => Some(err),
+            P2pError::DiskTxError(err) => Some(err),
+            P2pError::IoTxError(err) => Some(err),
             P2pError::IoError(err) => Some(err),
             _ => None,
         }
