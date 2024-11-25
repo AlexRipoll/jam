@@ -60,6 +60,10 @@ impl Actor {
         }
     }
 
+    pub fn ready_to_request(&self) -> bool {
+        !self.state.is_choked && self.state.is_interested && !self.state.pieces_queue.is_empty()
+    }
+
     pub async fn handle_message(&mut self, message: Message) -> Result<(), P2pError> {
         // modifies state
         match message.message_id {
@@ -173,28 +177,30 @@ impl Actor {
     }
 
     pub async fn request(&mut self) -> Result<(), P2pError> {
-        let (queue_index, block_offset) = {
-            match self.state.pipeline.last_added.clone() {
-                Some(piece_data) => {
-                    if let Some(index) = self
-                        .state
-                        .pieces_queue
-                        .iter()
-                        .position(|piece| piece.index() == piece_data.piece_index)
-                    {
-                        (index, piece_data.block_offset + 16384)
-                    } else {
-                        panic!("piece not found in queue");
+        if !self.state.pipeline.is_full() {
+            let (queue_starting_index, block_offset) = {
+                match self.state.pipeline.last_added.clone() {
+                    Some(piece_data) => {
+                        if let Some(index) = self
+                            .state
+                            .pieces_queue
+                            .iter()
+                            .position(|piece| piece.index() == piece_data.piece_index)
+                        {
+                            (index, piece_data.block_offset + 16384)
+                        } else {
+                            panic!("piece not found in queue");
+                        }
                     }
+                    None => (0, 0),
                 }
-                None => (0, 0),
-            }
-        };
+            };
 
-        let queue_length = self.state.pieces_queue.len();
-        for i in queue_index..queue_length {
-            let piece = self.state.pieces_queue[i].clone();
-            self.request_from_offset(&piece, block_offset).await?;
+            let queue_length = self.state.pieces_queue.len();
+            for i in queue_starting_index..queue_length {
+                let piece = self.state.pieces_queue[i].clone();
+                self.request_from_offset(&piece, block_offset).await?;
+            }
         }
 
         Ok(())
