@@ -2,11 +2,13 @@ use rand::{distributions::Alphanumeric, Rng};
 use sha1::{Digest, Sha1};
 use std::error::Error;
 use std::fmt::Display;
+use std::sync::Arc;
 use std::{collections::HashMap, usize};
 use tokio::io::{self, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+use crate::client::PiecesState;
 use crate::p2p::message::{Bitfield, Message, MessageId, PiecePayload, TransferPayload};
 
 use super::piece::{Piece, PieceError};
@@ -16,12 +18,11 @@ const PSTR: &str = "BitTorrent protocol";
 
 #[derive(Debug)]
 pub struct Actor {
-    io_wtx: mpsc::Sender<Message>,
+    client_tx: mpsc::Sender<Bitfield>,
     disk_tx: mpsc::Sender<(Piece, Vec<u8>)>,
-
-    // rx: mpsc::Receiver<Message>,
-    // sender: mpsc::Sender<(Piece, Vec<u8>)>,
+    io_wtx: mpsc::Sender<Message>,
     state: State,
+    pieces_state: Arc<PiecesState>,
 }
 
 #[derive(Debug)]
@@ -52,11 +53,18 @@ impl Default for State {
 }
 
 impl Actor {
-    pub fn new(io_wtx: mpsc::Sender<Message>, disk_tx: mpsc::Sender<(Piece, Vec<u8>)>) -> Self {
+    pub fn new(
+        client_tx: mpsc::Sender<Bitfield>,
+        io_wtx: mpsc::Sender<Message>,
+        disk_tx: mpsc::Sender<(Piece, Vec<u8>)>,
+        pieces_state: Arc<PiecesState>,
+    ) -> Self {
         Self {
-            io_wtx,
+            client_tx,
             disk_tx,
+            io_wtx,
             state: State::default(),
+            pieces_state,
         }
     }
 
@@ -96,7 +104,9 @@ impl Actor {
             MessageId::Bitfield => {
                 // Update the peer's bitfield and determine if the client is interested
 
-                self.state.peer_bitfield = Bitfield::new(message.payload.as_ref().unwrap());
+                let bitfield = Bitfield::new(message.payload.as_ref().unwrap());
+                self.state.peer_bitfield = bitfield.clone();
+                self.client_tx.send(bitfield).await?;
 
                 // TODO: send bitfield to clients orchestrator.
                 // TODO: check if peer has any piece the client is interested in downloading then
@@ -351,6 +361,7 @@ pub enum P2pError {
     PieceInvalid,
     DiskTxError(mpsc::error::SendError<(Piece, Vec<u8>)>),
     IoTxError(mpsc::error::SendError<Message>),
+    ClientTxError(mpsc::error::SendError<Bitfield>),
     IoError(io::Error),
 }
 
@@ -366,6 +377,7 @@ impl Display for P2pError {
             P2pError::PieceOutOfBounds(err) => write!(f, "{}", err),
             P2pError::DiskTxError(err) => write!(f, "Disk tx error: {}", err),
             P2pError::IoTxError(err) => write!(f, "IO tx error: {}", err),
+            P2pError::ClientTxError(err) => write!(f, "Client tx error: {}", err),
             P2pError::IoError(err) => write!(f, "IO error: {}", err),
         }
     }
@@ -398,6 +410,12 @@ impl From<mpsc::error::SendError<Message>> for P2pError {
     }
 }
 
+impl From<mpsc::error::SendError<Bitfield>> for P2pError {
+    fn from(err: mpsc::error::SendError<Bitfield>) -> Self {
+        P2pError::ClientTxError(err)
+    }
+}
+
 impl From<io::Error> for P2pError {
     fn from(err: io::Error) -> Self {
         P2pError::IoError(err)
@@ -411,6 +429,7 @@ impl Error for P2pError {
             P2pError::PieceOutOfBounds(err) => Some(err),
             P2pError::DiskTxError(err) => Some(err),
             P2pError::IoTxError(err) => Some(err),
+            P2pError::ClientTxError(err) => Some(err),
             P2pError::IoError(err) => Some(err),
             _ => None,
         }
