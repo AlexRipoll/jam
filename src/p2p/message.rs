@@ -96,9 +96,9 @@ impl Message {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Bitfield {
-    bytes: Vec<u8>,
+    pub bytes: Vec<u8>,
 }
 
 impl Bitfield {

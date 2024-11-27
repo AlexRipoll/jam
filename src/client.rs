@@ -27,10 +27,25 @@ struct Client {
     pieces_state: Arc<PiecesState>,
 }
 
+impl Client {
+    fn add_bitfield_rarity(&mut self, bitfield: Bitfield) {
+        for byte_index in 0..bitfield.bytes.len() {
+            for bit_index in 0..8 {
+                let piece_index = (byte_index * 8 + bit_index) as u32;
+                if bitfield.has_piece(piece_index as usize) {
+                    *self.bitfield_rariry_map.entry(piece_index).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    fn run(&self) {}
+}
+
 #[derive(Debug)]
 pub struct PiecesState {
-    pub remaining: Mutex<Vec<u32>>,
-    pub assigned: Mutex<HashSet<u32>>,
+    pub remaining: Mutex<Vec<Piece>>,
+    pub assigned: Mutex<HashSet<Piece>>,
 }
 
 impl PiecesState {
@@ -42,31 +57,31 @@ impl PiecesState {
     }
 
     /// Add a new piece to the remaining queue
-    pub async fn add_piece(&self, piece_index: u32) {
+    pub async fn add_piece(&self, piece: Piece) {
         let mut remaining = self.remaining.lock().await;
-        remaining.push(piece_index);
+        remaining.push(piece);
     }
 
     /// Extract the rarest piece available for a peer
-    pub async fn assign_piece(&self, peer_bitfield: &Bitfield) -> Option<u32> {
+    pub async fn assign_piece(&self, peer_bitfield: &Bitfield) -> Option<Piece> {
         let mut remaining = self.remaining.lock().await;
         let mut assigned = self.assigned.lock().await;
 
-        for (i, &piece_index) in remaining.iter().enumerate() {
-            if !assigned.contains(&piece_index) && peer_bitfield.has_piece(piece_index as usize) {
-                assigned.insert(piece_index);
-                remaining.remove(i);
-                return Some(piece_index);
-            }
+        if let Some(pos) = remaining.iter().position(|piece| {
+            !assigned.contains(piece) && peer_bitfield.has_piece(piece.index() as usize)
+        }) {
+            let piece = remaining.remove(pos);
+            assigned.insert(piece.clone());
+            return Some(piece);
         }
 
         None // No suitable piece found
     }
 
     /// Mark a piece as completed
-    pub async fn complete_piece(&self, piece_index: u32) {
+    pub async fn complete_piece(&self, piece: Piece) {
         let mut assigned = self.assigned.lock().await;
-        assigned.remove(&piece_index);
+        assigned.remove(&piece);
     }
 }
 
@@ -139,7 +154,9 @@ async fn bittorrent_client(
         async move {
             while let Some(message) = receiver.recv().await {
                 let mut actor = actor.lock().await;
-                actor.handle_message(message);
+                if let Err(e) = actor.handle_message(message).await {
+                    eprintln!("actor handler error: {e}")
+                }
             }
         }
     });
@@ -150,8 +167,11 @@ async fn bittorrent_client(
         async move {
             loop {
                 let mut actor = actor.lock().await;
-                if actor.ready_to_request() {
-                    actor.request();
+                if actor.ready_to_request().await {
+                    // if queue is empty, fill with new pieces
+                    if let Err(e) = actor.request().await {
+                        eprintln!("actor piece request error: {e}")
+                    }
                 }
             }
         }

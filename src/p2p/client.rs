@@ -68,8 +68,10 @@ impl Actor {
         }
     }
 
-    pub fn ready_to_request(&self) -> bool {
-        !self.state.is_choked && self.state.is_interested && !self.state.pieces_queue.is_empty()
+    pub async fn ready_to_request(&self) -> bool {
+        !self.state.is_choked
+            && self.state.is_interested
+            && !self.pieces_state.remaining.lock().await.is_empty()
     }
 
     pub async fn handle_message(&mut self, message: Message) -> Result<(), P2pError> {
@@ -186,6 +188,22 @@ impl Actor {
         Ok(())
     }
 
+    pub async fn fill_pieces_queue(&mut self) {
+        let remaining = self.pieces_state.remaining.lock().await;
+        for _ in 0..3 {
+            if remaining.is_empty() || self.state.pieces_queue.len() >= 3 {
+                break;
+            }
+            if let Some(piece) = self
+                .pieces_state
+                .assign_piece(&self.state.peer_bitfield)
+                .await
+            {
+                self.state.pieces_queue.push(piece);
+            }
+        }
+    }
+
     pub async fn request(&mut self) -> Result<(), P2pError> {
         if !self.state.pipeline.is_full() {
             let (queue_starting_index, block_offset) = {
@@ -205,6 +223,10 @@ impl Actor {
                     None => (0, 0),
                 }
             };
+
+            if self.state.pieces_queue.is_empty() {
+                self.fill_pieces_queue().await;
+            }
 
             let queue_length = self.state.pieces_queue.len();
             for i in queue_starting_index..queue_length {
