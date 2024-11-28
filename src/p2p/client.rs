@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::{collections::HashMap, usize};
 use tokio::io::{self, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 
 use crate::client::PiecesState;
 use crate::p2p::message::{Bitfield, Message, MessageId, PiecePayload, TransferPayload};
@@ -255,7 +255,8 @@ impl Actor {
 
             let payload = TransferPayload::new(piece.index(), block_offset, block_size).serialize();
             self.io_wtx
-                .send(Message::new(MessageId::Request, Some(payload)));
+                .send(Message::new(MessageId::Request, Some(payload)))
+                .await?;
 
             if self.state.pipeline.is_full() {
                 break;

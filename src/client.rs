@@ -21,36 +21,81 @@ use crate::{
 
 #[derive(Debug)]
 struct Client {
+    peer_id: [u8; 20],
     peers: Vec<Peer>,
     peer_channels: Vec<mpsc::Receiver<Bitfield>>,
-    bitfield_rariry_map: HashMap<u32, u16>, // piece index -> piece count in bitfields
     pieces_state: Arc<PiecesState>,
 }
 
 impl Client {
-    fn add_bitfield_rarity(&mut self, bitfield: Bitfield) {
-        for byte_index in 0..bitfield.bytes.len() {
-            for bit_index in 0..8 {
-                let piece_index = (byte_index * 8 + bit_index) as u32;
-                if bitfield.has_piece(piece_index as usize) {
-                    *self.bitfield_rariry_map.entry(piece_index).or_insert(0) += 1;
-                }
-            }
+    fn new(peer_id: [u8; 20], peers: Vec<Peer>, pieces: HashMap<u32, Piece>) -> Self {
+        Self {
+            peer_id,
+            peers,
+            peer_channels: Vec::new(),
+            pieces_state: Arc::new(PiecesState::new(pieces)),
         }
     }
 
-    fn run(&self) {}
+    async fn run(mut self, info_hash: [u8; 20]) {
+        let (client_tx, client_rx) = mpsc::channel(50);
+        let (disk_tx, disk_rx) = mpsc::channel(50);
+
+        // Bitfield receiver task
+        let pieces_state = Arc::clone(&self.pieces_state);
+        tokio::spawn(async move {
+            let mut receiver = client_rx;
+            while let Some(bitfield) = receiver.recv().await {
+                // let mut pieces_state = pieces_state.lock().await;
+                pieces_state.add_bitfield_rarity(bitfield).await;
+
+                if pieces_state.bitfield_rariry_map.lock().await.len() >= 3 {
+                    pieces_state.update_remaining().await;
+                }
+            }
+        });
+
+        // initiate 4 peer connections
+        for i in 0..4 {
+            let client_tx = client_tx.clone();
+            let disk_tx = disk_tx.clone();
+            let peer_address = self.peers[i].address().to_string();
+            let peer_id = self.peer_id;
+            let pieces_state = Arc::clone(&self.pieces_state);
+
+            tokio::spawn(async move {
+                if let Err(e) = peer_connection(
+                    &peer_address,
+                    info_hash,
+                    peer_id,
+                    client_tx,
+                    disk_tx,
+                    pieces_state,
+                )
+                .await
+                {
+                    eprintln!("peer connection error: {e}");
+                }
+            });
+        }
+
+        // TODO: disk task
+    }
 }
 
 #[derive(Debug)]
 pub struct PiecesState {
+    pub pieces_map: HashMap<u32, Piece>,
+    pub bitfield_rariry_map: Mutex<HashMap<u32, u16>>, // piece index -> piece count in bitfields
     pub remaining: Mutex<Vec<Piece>>,
     pub assigned: Mutex<HashSet<Piece>>,
 }
 
 impl PiecesState {
-    pub fn new() -> Self {
+    pub fn new(pieces_map: HashMap<u32, Piece>) -> Self {
         Self {
+            pieces_map,
+            bitfield_rariry_map: Mutex::new(HashMap::new()),
             remaining: Mutex::new(Vec::new()),
             assigned: Mutex::new(HashSet::new()),
         }
@@ -60,6 +105,35 @@ impl PiecesState {
     pub async fn add_piece(&self, piece: Piece) {
         let mut remaining = self.remaining.lock().await;
         remaining.push(piece);
+    }
+
+    async fn add_bitfield_rarity(&self, bitfield: Bitfield) {
+        let mut rarity_map = self.bitfield_rariry_map.lock().await;
+        for byte_index in 0..bitfield.bytes.len() {
+            for bit_index in 0..8 {
+                let piece_index = (byte_index * 8 + bit_index) as u32;
+                if bitfield.has_piece(piece_index as usize) {
+                    *rarity_map.entry(piece_index).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    pub async fn update_remaining(&self) {
+        let mut remaining = self.remaining.lock().await;
+        // remaining.clear(); // Clear previous state
+
+        // Sort pieces based on rarity in `bitfield_rariry_map`
+        let rarity_map = self.bitfield_rariry_map.lock().await;
+        let mut sorted_pieces: Vec<_> = rarity_map.iter().collect();
+        sorted_pieces.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by rarity (most rare first)
+
+        // Populate the `remaining` list with full `Piece` structs
+        for (piece_index, _) in sorted_pieces {
+            if let Some(piece) = self.pieces_map.get(piece_index) {
+                remaining.push(piece.clone());
+            }
+        }
     }
 
     /// Extract the rarest piece available for a peer
@@ -85,7 +159,7 @@ impl PiecesState {
     }
 }
 
-async fn bittorrent_client(
+async fn peer_connection(
     peer_addr: &str,
     info_hash: [u8; 20],
     peer_id: [u8; 20],
