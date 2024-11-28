@@ -16,11 +16,13 @@ use crate::{
         message::{Bitfield, Message},
         piece::Piece,
     },
+    store::Writer,
     tracker::Peer,
 };
 
 #[derive(Debug)]
 struct Client {
+    download_path: String,
     peer_id: [u8; 20],
     peers: Vec<Peer>,
     peer_channels: Vec<mpsc::Receiver<Bitfield>>,
@@ -28,8 +30,14 @@ struct Client {
 }
 
 impl Client {
-    fn new(peer_id: [u8; 20], peers: Vec<Peer>, pieces: HashMap<u32, Piece>) -> Self {
+    fn new(
+        download_path: String,
+        peer_id: [u8; 20],
+        peers: Vec<Peer>,
+        pieces: HashMap<u32, Piece>,
+    ) -> Self {
         Self {
+            download_path,
             peer_id,
             peers,
             peer_channels: Vec::new(),
@@ -79,7 +87,16 @@ impl Client {
             });
         }
 
-        // TODO: disk task
+        // Disk writer task
+        let disk_wirter = Writer::new(&self.download_path);
+        tokio::spawn(async move {
+            let mut receiver = disk_rx;
+            while let Some((piece, assembled_piece)) = receiver.recv().await {
+                if let Err(e) = disk_wirter.write_piece_to_disk(piece, &assembled_piece) {
+                    eprintln!("Error writing piece to disk: {}", e);
+                }
+            }
+        });
     }
 }
 
