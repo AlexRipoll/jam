@@ -23,6 +23,8 @@ use crate::{
 #[derive(Debug)]
 struct Client {
     download_path: String,
+    file_size: u64,
+    piece_standard_size: u64,
     peer_id: [u8; 20],
     peers: Vec<Peer>,
     peer_channels: Vec<mpsc::Receiver<Bitfield>>,
@@ -32,6 +34,8 @@ struct Client {
 impl Client {
     fn new(
         download_path: String,
+        file_size: u64,
+        piece_standard_size: u64,
         peer_id: [u8; 20],
         peers: Vec<Peer>,
         pieces: HashMap<u32, Piece>,
@@ -42,10 +46,12 @@ impl Client {
             peers,
             peer_channels: Vec::new(),
             pieces_state: Arc::new(PiecesState::new(pieces)),
+            file_size,
+            piece_standard_size,
         }
     }
 
-    async fn run(mut self, info_hash: [u8; 20]) {
+    async fn run(self, info_hash: [u8; 20]) {
         let (client_tx, client_rx) = mpsc::channel(50);
         let (disk_tx, disk_rx) = mpsc::channel(50);
 
@@ -89,10 +95,18 @@ impl Client {
 
         // Disk writer task
         let disk_wirter = Writer::new(&self.download_path);
+        let file_size = self.file_size;
+        let piece_standard_size = self.piece_standard_size;
+
         tokio::spawn(async move {
             let mut receiver = disk_rx;
             while let Some((piece, assembled_piece)) = receiver.recv().await {
-                if let Err(e) = disk_wirter.write_piece_to_disk(piece, &assembled_piece) {
+                if let Err(e) = disk_wirter.write_piece_to_disk(
+                    piece,
+                    file_size,
+                    piece_standard_size,
+                    &assembled_piece,
+                ) {
                     eprintln!("Error writing piece to disk: {}", e);
                 }
             }

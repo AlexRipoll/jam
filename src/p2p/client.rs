@@ -6,13 +6,13 @@ use std::sync::Arc;
 use std::{collections::HashMap, usize};
 use tokio::io::{self, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 
 use crate::client::PiecesState;
 use crate::p2p::message::{Bitfield, Message, MessageId, PiecePayload, TransferPayload};
 
 use super::piece::{Piece, PieceError};
-use super::pipeline::{self, Pipeline};
+use super::pipeline::Pipeline;
 
 const PSTR: &str = "BitTorrent protocol";
 
