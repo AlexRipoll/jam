@@ -3,7 +3,8 @@ use tokio::{
     net::TcpStream,
 };
 
-use super::{client::P2pError, message::Message};
+use super::{connection::P2pError, message::Message};
+
 pub async fn read_message(
     read_half: &mut tokio::io::ReadHalf<TcpStream>,
 ) -> Result<Message, P2pError> {

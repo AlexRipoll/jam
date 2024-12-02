@@ -55,7 +55,7 @@ pub enum Peers {
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct Peer {
-    peer_id: Option<String>,
+    pub peer_id: Option<String>,
     ip: Ip,
     port: u16,
 }

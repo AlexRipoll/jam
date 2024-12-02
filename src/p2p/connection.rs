@@ -148,6 +148,7 @@ impl Actor {
             self.state.peer_bitfield.set_piece(piece_index);
         }
         // TODO: check if interested
+        // TODO: send to client?
     }
 
     async fn download(&mut self, payload: Option<&[u8]>) -> Result<(), P2pError> {
@@ -500,7 +501,283 @@ fn is_valid_piece(piece_hash: [u8; 20], piece_bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod test {
-    use crate::p2p::client::{client_version, generate_peer_id};
+    use std::{collections::HashMap, sync::Arc};
+
+    use crate::{
+        client::PiecesState,
+        p2p::{
+            connection::{client_version, generate_peer_id, Actor, P2pError},
+            message::{Bitfield, Message, MessageId, PiecePayload, TransferPayload},
+            piece::Piece,
+        },
+    };
+    use assert_matches::assert_matches;
+    use tokio::sync::{mpsc, Mutex};
+
+    #[tokio::test]
+    async fn test_actor_ready_to_request() {
+        let (client_tx, _) = mpsc::channel(10);
+        let (io_wtx, _) = mpsc::channel(10);
+        let (disk_tx, _) = mpsc::channel(10);
+
+        let pieces_map = HashMap::new();
+        let pieces_state = Arc::new(PiecesState::new(pieces_map));
+
+        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, pieces_state);
+
+        // Test when actor is choked
+        assert!(!actor.ready_to_request().await);
+
+        // Modify state to make it ready
+        actor.state.is_choked = false;
+        actor.state.is_interested = true;
+        actor
+            .pieces_state
+            .remaining
+            .lock()
+            .await
+            .push(Piece::new(1, 512, [0u8; 20]));
+        assert!(actor.ready_to_request().await);
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_choke() {
+        let (client_tx, _) = mpsc::channel(10);
+        let (io_wtx, _) = mpsc::channel(10);
+        let (disk_tx, _) = mpsc::channel(10);
+
+        let pieces_map = HashMap::new();
+        let pieces_state = Arc::new(PiecesState::new(pieces_map));
+
+        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, pieces_state);
+        actor
+            .handle_message(Message::new(MessageId::Choke, None))
+            .await
+            .unwrap();
+        assert!(actor.state.is_choked);
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_unchoke() {
+        let (client_tx, _) = mpsc::channel(10);
+        let (io_wtx, _) = mpsc::channel(10);
+        let (disk_tx, _) = mpsc::channel(10);
+
+        let pieces_map = HashMap::new();
+        let pieces_state = Arc::new(PiecesState::new(pieces_map));
+
+        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, pieces_state);
+        actor
+            .handle_message(Message::new(MessageId::Unchoke, None))
+            .await
+            .unwrap();
+        assert!(!actor.state.is_choked);
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_not_interested() {
+        let (client_tx, _) = mpsc::channel(10);
+        let (io_wtx, _) = mpsc::channel(10);
+        let (disk_tx, _) = mpsc::channel(10);
+
+        let pieces_map = HashMap::new();
+        let pieces_state = Arc::new(PiecesState::new(pieces_map));
+
+        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, pieces_state);
+        actor
+            .handle_message(Message::new(MessageId::NotInterested, None))
+            .await
+            .unwrap();
+        assert!(!actor.state.peer_interested);
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_bitfield() {
+        let (client_tx, mut client_rx) = mpsc::channel(10);
+        let (io_wtx, mut io_rx) = mpsc::channel(10);
+        let (disk_tx, _) = mpsc::channel(10);
+
+        let pieces_map = HashMap::new();
+        let pieces_state = Arc::new(PiecesState::new(pieces_map));
+
+        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, pieces_state);
+
+        let bitfield_payload = vec![0b10101010];
+        actor
+            .handle_message(Message::new(
+                MessageId::Bitfield,
+                Some(bitfield_payload.clone()),
+            ))
+            .await
+            .unwrap();
+
+        // Verify the peer bitfield was updated
+        assert_eq!(actor.state.peer_bitfield.bytes, bitfield_payload);
+
+        // Verify messages were sent
+        assert_matches!(io_rx.recv().await, Some(msg) if msg.message_id == MessageId::Unchoke);
+        assert_matches!(io_rx.recv().await, Some(msg) if msg.message_id == MessageId::Interested);
+
+        // Verify client received updated bitfield
+        assert_matches!(client_rx.recv().await, Some(bitfield) if bitfield.bytes == bitfield_payload);
+    }
+
+    #[tokio::test]
+    async fn test_download_valid_piece() {
+        let (client_tx, mut client_rx) = mpsc::channel(10);
+        let (io_wtx, mut io_rx) = mpsc::channel(10);
+        let (disk_tx, mut disk_rx) = mpsc::channel(10);
+
+        let pieces_map = HashMap::new();
+        let pieces_state = Arc::new(PiecesState::new(pieces_map));
+
+        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, pieces_state);
+
+        // Set up a valid piece (index 1, size 32KB, with a dummy hash)
+        let piece_index = 1;
+        let piece_size = 32 * 1024; // 32 KB
+        let piece_hash = [
+            169, 175, 32, 2, 79, 197, 5, 67, 22, 59, 107, 230, 111, 228, 102, 11, 226, 23, 15, 108,
+        ];
+        let piece = Piece::new(piece_index, piece_size, piece_hash);
+
+        // Simulate downloading blocks and adding them to the piece
+        let block_size = 16384; // 16 KB blocks
+        let block_0 = vec![0u8; block_size];
+        let block_1 = vec![1u8; block_size];
+
+        // Add the piece to the actor's state
+        actor
+            .state
+            .pieces_status
+            .insert(piece_index as usize, piece);
+
+        // downloads the first block from piece 1 but should not assemble since not all blocks from piece 1 are downloaded
+        let payload = PiecePayload::new(1, 0, block_0.clone()).serialize();
+        actor
+            .handle_message(Message::new(MessageId::Piece, Some(payload)))
+            .await
+            .unwrap();
+
+        let piece = actor
+            .state
+            .pieces_status
+            .get_mut(&(piece_index as usize))
+            .unwrap();
+        assert!(!piece.is_ready());
+        assert!(!piece.is_finalized());
+
+        // all blocks are downloaded, it should assemble the piece and send it to disk_tx
+        let payload = PiecePayload::new(1, 16384, block_1.clone()).serialize();
+        actor
+            .handle_message(Message::new(MessageId::Piece, Some(payload)))
+            .await
+            .unwrap();
+
+        // Verify that the disk_tx received the piece
+        if let Some((received_piece, assembled_blocks)) = disk_rx.recv().await {
+            assert_eq!(received_piece.index(), piece_index);
+            assert_eq!(assembled_blocks, vec![block_0, block_1].concat());
+        } else {
+            panic!("Expected disk_tx to receive the finalized piece, but none was received");
+        }
+
+        // Verify that the piece has been marked as finalized
+        let piece = actor
+            .state
+            .pieces_status
+            .get_mut(&(piece_index as usize))
+            .unwrap();
+        assert!(piece.is_ready());
+        assert!(piece.is_finalized());
+    }
+
+    #[tokio::test]
+    async fn test_download_invalid_piece() {
+        let (client_tx, mut client_rx) = mpsc::channel(10);
+        let (io_wtx, mut io_rx) = mpsc::channel(10);
+        let (disk_tx, mut disk_rx) = mpsc::channel(10);
+
+        let pieces_map = HashMap::new();
+        let pieces_state = Arc::new(PiecesState::new(pieces_map));
+
+        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, pieces_state);
+
+        // Set up a valid piece (index 1, size 32KB, with a dummy hash)
+        let piece_index = 1;
+        let piece_size = 32 * 1024; // 32 KB
+        let piece_hash = [
+            169, 175, 32, 2, 79, 197, 5, 67, 22, 59, 107, 230, 111, 228, 102, 11, 226, 23, 15, 108,
+        ];
+        let piece = Piece::new(piece_index, piece_size, piece_hash);
+
+        // Simulate downloading blocks and adding them to the piece
+        let block_size = 16384; // 16 KB blocks
+                                // the hash from these blocks does not match with the piece hash
+        let block_0 = vec![1u8; block_size];
+        let block_1 = vec![2u8; block_size];
+
+        // Add the piece to the actor's state
+        actor
+            .state
+            .pieces_status
+            .insert(piece_index as usize, piece);
+
+        // downloads the first block from piece 1 but should not assemble since not all blocks from piece 1 are downloaded
+        let payload = PiecePayload::new(1, 0, block_0.clone()).serialize();
+        actor
+            .handle_message(Message::new(MessageId::Piece, Some(payload)))
+            .await
+            .unwrap();
+
+        let piece = actor
+            .state
+            .pieces_status
+            .get_mut(&(piece_index as usize))
+            .unwrap();
+        assert!(!piece.is_ready());
+        assert!(!piece.is_finalized());
+
+        // all blocks are downloaded, it should assemble the piece and send it to disk_tx
+        let payload = PiecePayload::new(1, 16384, block_1.clone()).serialize();
+        let result = actor
+            .handle_message(Message::new(MessageId::Piece, Some(payload)))
+            .await;
+
+        assert_matches!(result, Err(P2pError::PieceInvalid));
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_have() {
+        // Prepare test data
+        let piece_index = 5;
+        let mut piece_index_be = [0u8; 4];
+        piece_index_be.copy_from_slice(&(piece_index as u32).to_be_bytes());
+
+        let message = Message::new(MessageId::Have, Some(piece_index_be.to_vec()));
+
+        // Create an empty Bitfield
+        let initial_bitfield = Bitfield::new(&vec![0; 10]);
+
+        // Create a PiecesState
+        let pieces_map = HashMap::new();
+        let pieces_state = Arc::new(PiecesState::new(pieces_map));
+
+        // Set up mpsc channels
+        let (client_tx, mut client_rx) = mpsc::channel(10);
+        let (disk_tx, _) = mpsc::channel(10);
+        let (io_wtx, _) = mpsc::channel(10);
+
+        // Initialize the Actor
+        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, pieces_state);
+        actor.state.peer_bitfield = initial_bitfield.clone();
+
+        // Handle the MessageId::Have message
+        actor.handle_message(message).await.unwrap();
+
+        // Assert the peer_bitfield is updated
+        assert!(actor.state.peer_bitfield.has_piece(piece_index));
+    }
 
     #[test]
     fn test_generate_peer_id() {

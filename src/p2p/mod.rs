@@ -1,4 +1,4 @@
-pub mod client;
+pub mod connection;
 pub mod io;
 pub mod message;
 pub mod piece;

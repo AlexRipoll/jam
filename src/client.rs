@@ -11,7 +11,7 @@ use tokio::{
 
 use crate::{
     p2p::{
-        client::{self, Actor},
+        connection::{self, Actor},
         io::{read_message, send_message},
         message::{Bitfield, Message},
         piece::Piece,
@@ -202,7 +202,7 @@ async fn peer_connection(
     println!("TCP conncetion established with peer at address: {peer_addr}");
 
     // Perform handshake
-    if let Err(e) = client::handshake(&mut stream, info_hash, peer_id).await {
+    if let Err(e) = connection::handshake(&mut stream, info_hash, peer_id).await {
         eprintln!("Handshake failed: {e}");
         return Err(io::Error::new(io::ErrorKind::Other, "Handshake failed"));
     }
