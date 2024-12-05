@@ -51,6 +51,7 @@ pub async fn send_message(
     write_half: &mut tokio::io::WriteHalf<TcpStream>,
     message: Message,
 ) -> Result<(), P2pError> {
+    println!("{:?} type message sent to peer", message.message_id);
     write_half.write_all(&message.serialize()).await?;
 
     Ok(())

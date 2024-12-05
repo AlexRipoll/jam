@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, error::Error, fmt::Display};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Metainfo {
-    info: Info,
+    pub info: Info,
     #[serde(rename = "announce", skip_serializing_if = "Option::is_none")]
     announce: Option<String>,
     #[serde(rename = "announce-list", skip_serializing_if = "Option::is_none")]
@@ -29,13 +29,13 @@ struct Files {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct Info {
-    name: String,
-    length: Option<u64>,
+pub struct Info {
+    pub name: String,
+    pub length: Option<u64>,
     #[serde(rename = "piece length")]
-    piece_length: u64,
+    pub piece_length: u64,
     // #[serde(skip)]
-    pieces: ByteBuf,
+    pub pieces: ByteBuf,
     private: Option<u8>,
     md5sum: Option<String>,
     files: Option<Vec<Files>>,

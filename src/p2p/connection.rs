@@ -12,7 +12,6 @@ use crate::client::PiecesState;
 use crate::p2p::message::{Bitfield, Message, MessageId, PiecePayload, TransferPayload};
 
 use super::piece::{Piece, PieceError};
-use super::pipeline::Pipeline;
 
 const PSTR: &str = "BitTorrent protocol";
 
@@ -33,8 +32,7 @@ struct State {
     peer_interested: bool,
     peer_bitfield: Bitfield,
     pieces_status: HashMap<usize, Piece>,
-    pieces_queue: Vec<Piece>,
-    pipeline: Pipeline,
+    download_queue: Vec<Piece>,
 }
 
 impl Default for State {
@@ -46,8 +44,7 @@ impl Default for State {
             peer_interested: false,
             peer_bitfield: Bitfield::new(&vec![]),
             pieces_status: HashMap::new(),
-            pieces_queue: vec![],
-            pipeline: Pipeline::new(5),
+            download_queue: vec![],
         }
     }
 }
@@ -77,23 +74,29 @@ impl Actor {
     pub async fn handle_message(&mut self, message: Message) -> Result<(), P2pError> {
         // modifies state
         match message.message_id {
-            MessageId::KeepAlive => {} // TODO: extend stream alive
+            MessageId::KeepAlive => {
+                println!("Received KeepAlive message");
+                // TODO: extend stream alive
+            }
             MessageId::Choke => {
                 // TODO:  stop sending msg until unchoked
                 self.state.is_choked = true;
-                println!("Client choked by the peer.");
+                println!("Choked by the peer");
+                // TODO: logic in case peer chokes but client is still interested
             }
             MessageId::Unchoke => {
                 self.state.is_choked = false;
-                println!("Client unchoked by the peer.");
+                println!("Unchoked by the peer");
                 // TODO:start requesting
             }
             MessageId::Interested => {
                 self.state.peer_interested = true;
+                println!("Peer expressed insterest");
 
                 // TODO: logic for unchoking peer
                 if self.state.peer_choked {
                     self.state.peer_choked = false;
+                    println!("Peer unchoked");
                     self.io_wtx
                         .send(Message::new(MessageId::Unchoke, None))
                         .await?;
@@ -101,12 +104,18 @@ impl Actor {
             }
             MessageId::NotInterested => {
                 self.state.peer_interested = false;
+                println!("Peer not insterested");
             }
-            MessageId::Have => self.process_have(&message),
+            MessageId::Have => {
+                println!("Processing Have message");
+                self.process_have(&message);
+            }
             MessageId::Bitfield => {
                 // Update the peer's bitfield and determine if the client is interested
-
+                println!("Received Bitfield message");
                 let bitfield = Bitfield::new(message.payload.as_ref().unwrap());
+                println!("Updated peer bitfield");
+
                 self.state.peer_bitfield = bitfield.clone();
                 self.client_tx.send(bitfield).await?;
 
@@ -126,6 +135,7 @@ impl Actor {
             }
             MessageId::Piece => {
                 // store piece block
+                println!("Processing Piece message");
                 self.download(message.payload.as_deref()).await?;
             }
             MessageId::Cancel => {
@@ -140,11 +150,13 @@ impl Actor {
     }
 
     fn process_have(&mut self, message: &Message) {
+        println!("Processing Have message: {:?}", message);
         let mut piece_index_be = [0u8; 4];
         piece_index_be.copy_from_slice(message.payload.as_ref().unwrap());
         let piece_index = u32::from_be_bytes(piece_index_be) as usize;
 
         if !self.state.peer_bitfield.has_piece(piece_index) {
+            println!("Setting piece {} in peer bitfield", piece_index);
             self.state.peer_bitfield.set_piece(piece_index);
         }
         // TODO: check if interested
@@ -161,27 +173,31 @@ impl Actor {
             .get_mut(&(payload.index as usize))
             .ok_or(P2pError::PieceNotFound)?;
 
+        println!(
+            "Downloading piece {} block offset {}",
+            payload.index, payload.begin
+        );
         // Add the block to the piece
         piece.add_block(payload.begin, payload.block.clone())?;
-        self.state
-            .pipeline
-            .remove_request(payload.index, payload.begin);
 
         // Check if the piece is ready and not yet completed
         if piece.is_ready() && !piece.is_finalized() {
             let buffer = piece.assemble()?;
+            println!("Piece {} is ready. Verifying hash...", payload.index);
 
             // Validate the piece hash
             if is_valid_piece(piece.hash(), &buffer) {
+                println!("Piece {} hash verified. Sending to disk.", payload.index);
                 self.disk_tx.send((piece.clone(), buffer)).await?;
                 // NOTE: consider removing from pieces hashmap instead
                 piece.mark_finalized();
 
                 // remove the finalized piece from the queue
                 self.state
-                    .pieces_queue
+                    .download_queue
                     .retain(|piece| piece.index() != piece.index());
             } else {
+                println!("Piece {} hash verification failed.", payload.index);
                 return Err(P2pError::PieceInvalid);
             }
         }
@@ -189,51 +205,37 @@ impl Actor {
         Ok(())
     }
 
-    pub async fn fill_pieces_queue(&mut self) {
-        let remaining = self.pieces_state.remaining.lock().await;
+    pub async fn fill_download_queue(&mut self) {
+        println!("Filling download queue");
         for _ in 0..3 {
-            if remaining.is_empty() || self.state.pieces_queue.len() >= 3 {
+            if self.state.download_queue.len() >= 3 {
+                println!("download queue max capacity reached");
                 break;
             }
+
             if let Some(piece) = self
                 .pieces_state
                 .assign_piece(&self.state.peer_bitfield)
                 .await
             {
-                self.state.pieces_queue.push(piece);
+                println!("Assigned piece {} to queue.", piece.index());
+                self.state.download_queue.push(piece);
             }
         }
     }
 
     pub async fn request(&mut self) -> Result<(), P2pError> {
-        if !self.state.pipeline.is_full() {
-            let (queue_starting_index, block_offset) = {
-                match self.state.pipeline.last_added.clone() {
-                    Some(piece_data) => {
-                        if let Some(index) = self
-                            .state
-                            .pieces_queue
-                            .iter()
-                            .position(|piece| piece.index() == piece_data.piece_index)
-                        {
-                            (index, piece_data.block_offset + 16384)
-                        } else {
-                            panic!("piece not found in queue");
-                        }
-                    }
-                    None => (0, 0),
-                }
-            };
+        println!("Requesting pieces");
+        let (queue_starting_index, block_offset) = (0, 0);
 
-            if self.state.pieces_queue.is_empty() {
-                self.fill_pieces_queue().await;
-            }
+        if self.state.download_queue.is_empty() {
+            self.fill_download_queue().await;
+        }
 
-            let queue_length = self.state.pieces_queue.len();
-            for i in queue_starting_index..queue_length {
-                let piece = self.state.pieces_queue[i].clone();
-                self.request_from_offset(&piece, block_offset).await?;
-            }
+        let queue_length = self.state.download_queue.len();
+        for i in queue_starting_index..queue_length {
+            let piece = self.state.download_queue[i].clone();
+            self.request_from_offset(&piece, block_offset).await?;
         }
 
         Ok(())
@@ -251,17 +253,16 @@ impl Actor {
             let block_offset = block_index as u32 * 16384;
             let block_size = 16384.min(piece.size() as u32 - block_offset);
 
-            // Add to pipeline and send the request
-            self.state.pipeline.add_request(piece.index(), block_offset);
-
             let payload = TransferPayload::new(piece.index(), block_offset, block_size).serialize();
+            println!(
+                "Requesting piece: {} at offset {} ({} bytes)",
+                piece.index(),
+                block_offset,
+                block_size
+            );
             self.io_wtx
                 .send(Message::new(MessageId::Request, Some(payload)))
                 .await?;
-
-            if self.state.pipeline.is_full() {
-                break;
-            }
         }
 
         Ok(())
@@ -347,6 +348,7 @@ pub async fn handshake(
     info_hash: [u8; 20],
     peer_id: [u8; 20],
 ) -> Result<Vec<u8>, P2pError> {
+    println!(">> Initiating peer handshake...");
     let handshake = Handshake::new(info_hash, peer_id);
     stream.write_all(&handshake.serialize()).await?;
 
@@ -501,7 +503,7 @@ fn is_valid_piece(piece_hash: [u8; 20], piece_bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod test {
-    use std::{collections::HashMap, sync::Arc};
+    use std::{collections::HashMap, sync::Arc, time::Duration};
 
     use crate::{
         client::PiecesState,
@@ -512,7 +514,7 @@ mod test {
         },
     };
     use assert_matches::assert_matches;
-    use tokio::sync::{mpsc, Mutex};
+    use tokio::{sync::mpsc, time::timeout};
 
     #[tokio::test]
     async fn test_actor_ready_to_request() {
@@ -777,6 +779,104 @@ mod test {
 
         // Assert the peer_bitfield is updated
         assert!(actor.state.peer_bitfield.has_piece(piece_index));
+    }
+
+    #[tokio::test]
+    async fn test_request() {
+        // Create a mock io_wtx sender and receiver
+        let (io_wtx, mut io_wrx) = mpsc::channel::<Message>(10);
+
+        // Create a dummy Piece object
+        let piece_index = 0;
+        let piece_size = 32768; // 2 blocks of 16KB each
+        let piece_hash = [0u8; 20];
+        let piece = Piece::new(piece_index, piece_size, piece_hash);
+
+        // Initialize the Actor's state with a queued piece
+        let client_tx = mpsc::channel(10).0;
+        let disk_tx = mpsc::channel(10).0;
+        let pieces_map = HashMap::new();
+        let pieces_state = Arc::new(PiecesState::new(pieces_map));
+        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, pieces_state);
+
+        // Pre-fill the pieces queue with the dummy piece
+        actor.state.download_queue.push(piece);
+
+        // Call the request method
+        actor.request().await.expect("request method failed");
+
+        // Collect messages sent to the io_wtx channel
+        let mut sent_messages = Vec::new();
+        while let Ok(Some(message)) = timeout(Duration::from_millis(100), io_wrx.recv()).await {
+            sent_messages.push(message);
+        }
+
+        // Check the number of requests made
+        assert_eq!(sent_messages.len(), 2); // 2 blocks requested (16KB each)
+
+        // Validate the contents of each message
+        for (i, message) in sent_messages.iter().enumerate() {
+            assert_eq!(message.message_id, MessageId::Request);
+
+            // Interpret the payload manually
+            let payload = message.payload.as_ref().expect("Payload missing");
+            let piece_index_field = u32::from_be_bytes(payload[0..4].try_into().unwrap());
+            let block_offset_field = u32::from_be_bytes(payload[4..8].try_into().unwrap());
+            let block_length_field = u32::from_be_bytes(payload[8..12].try_into().unwrap());
+
+            assert_eq!(piece_index_field, piece_index);
+            assert_eq!(block_offset_field, (i * 16384) as u32); // Block offsets
+            assert_eq!(block_length_field, 16384); // Block size (16KB)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_request_from_offset() {
+        // Create a mock io_wtx sender and receiver
+        let (io_wtx, mut io_wrx) = mpsc::channel::<Message>(10);
+
+        // Create a dummy Piece object
+        let piece_index = 0;
+        let piece_size = 32768; // 2 blocks of 16KB each
+        let piece_hash = [0u8; 20];
+        let piece = Piece::new(piece_index, piece_size, piece_hash);
+
+        // Initialize the Actor's state
+        let client_tx = mpsc::channel(10).0;
+        let disk_tx = mpsc::channel(10).0;
+        let pieces_map = HashMap::new();
+        let pieces_state = Arc::new(PiecesState::new(pieces_map));
+        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, pieces_state);
+
+        // Request blocks starting from offset 0
+        let start_offset = 0;
+        actor
+            .request_from_offset(&piece, start_offset)
+            .await
+            .expect("request_from_offset failed");
+
+        // Collect messages sent to the io_wtx channel
+        let mut sent_messages = Vec::new();
+        while let Ok(Some(message)) = timeout(Duration::from_millis(100), io_wrx.recv()).await {
+            sent_messages.push(message);
+        }
+
+        // Check the number of requests made
+        assert_eq!(sent_messages.len(), 2); // 2 blocks requested
+
+        // Validate the contents of each message
+        for (i, message) in sent_messages.iter().enumerate() {
+            assert_eq!(message.message_id, MessageId::Request);
+            // Interpret the payload manually
+            let payload = message.payload.as_ref().expect("Payload missing");
+            let piece_index_field = u32::from_be_bytes(payload[0..4].try_into().unwrap());
+            let block_offset_field = u32::from_be_bytes(payload[4..8].try_into().unwrap());
+            let block_length_field = u32::from_be_bytes(payload[8..12].try_into().unwrap());
+
+            assert_eq!(piece_index_field, piece_index);
+            assert_eq!(block_offset_field, (i * 16384) as u32); // Block offsets
+            assert_eq!(block_length_field, 16384); // Block size (16KB)
+        }
     }
 
     #[test]
