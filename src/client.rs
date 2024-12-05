@@ -21,46 +21,56 @@ use crate::{
 };
 
 #[derive(Debug)]
-struct Client {
+pub struct Client {
     download_path: String,
+    file_name: String,
     file_size: u64,
     piece_standard_size: u64,
     peer_id: [u8; 20],
     peers: Vec<Peer>,
-    peer_channels: Vec<mpsc::Receiver<Bitfield>>,
+    total_peers: usize,
     pieces_state: Arc<PiecesState>,
 }
 
 impl Client {
-    fn new(
+    pub fn new(
         download_path: String,
+        file_name: String,
         file_size: u64,
         piece_standard_size: u64,
         peer_id: [u8; 20],
         peers: Vec<Peer>,
+        peer_total: usize,
         pieces: HashMap<u32, Piece>,
     ) -> Self {
         Self {
             download_path,
-            peer_id,
-            peers,
-            peer_channels: Vec::new(),
-            pieces_state: Arc::new(PiecesState::new(pieces)),
+            file_name,
             file_size,
             piece_standard_size,
+            peer_id,
+            peers,
+            total_peers: peer_total,
+            pieces_state: Arc::new(PiecesState::new(pieces)),
         }
     }
 
-    async fn run(self, info_hash: [u8; 20]) {
+    pub async fn run(self, info_hash: [u8; 20]) {
         let (client_tx, client_rx) = mpsc::channel(50);
         let (disk_tx, disk_rx) = mpsc::channel(50);
 
+        // Vector to keep track of task handles
+        let mut task_handles = Vec::new();
+
         // Bitfield receiver task
         let pieces_state = Arc::clone(&self.pieces_state);
-        tokio::spawn(async move {
+        let bitfield_task = tokio::spawn(async move {
             let mut receiver = client_rx;
+            println!(">> Bitfield receiver listening...");
+
             while let Some(bitfield) = receiver.recv().await {
                 // let mut pieces_state = pieces_state.lock().await;
+                println!(">> Bitfield received");
                 pieces_state.add_bitfield_rarity(bitfield).await;
 
                 if pieces_state.bitfield_rariry_map.lock().await.len() >= 3 {
@@ -68,16 +78,17 @@ impl Client {
                 }
             }
         });
+        task_handles.push(bitfield_task);
 
         // initiate 4 peer connections
-        for i in 0..4 {
+        for i in 0..self.total_peers {
             let client_tx = client_tx.clone();
             let disk_tx = disk_tx.clone();
             let peer_address = self.peers[i].address().to_string();
             let peer_id = self.peer_id;
             let pieces_state = Arc::clone(&self.pieces_state);
 
-            tokio::spawn(async move {
+            let peer_task = tokio::spawn(async move {
                 if let Err(e) = peer_connection(
                     &peer_address,
                     info_hash,
@@ -91,15 +102,17 @@ impl Client {
                     eprintln!("peer connection error: {e}");
                 }
             });
+            task_handles.push(peer_task);
         }
 
         // Disk writer task
-        let disk_wirter = Writer::new(&self.download_path);
+        let disk_wirter = Writer::new(&format!("{}/{}", &self.download_path, &self.file_name));
         let file_size = self.file_size;
         let piece_standard_size = self.piece_standard_size;
 
-        tokio::spawn(async move {
+        let disk_task = tokio::spawn(async move {
             let mut receiver = disk_rx;
+            println!(">> Disk receiver listening...");
             while let Some((piece, assembled_piece)) = receiver.recv().await {
                 if let Err(e) = disk_wirter.write_piece_to_disk(
                     piece,
@@ -111,6 +124,14 @@ impl Client {
                 }
             }
         });
+        task_handles.push(disk_task);
+
+        // Await tasks
+        for handle in task_handles {
+            if let Err(e) = handle.await {
+                eprintln!("Client task error: {:?}", e);
+            }
+        }
     }
 }
 
@@ -198,6 +219,7 @@ async fn peer_connection(
     disk_tx: mpsc::Sender<(Piece, Vec<u8>)>,
     pieces_state: Arc<PiecesState>,
 ) -> io::Result<()> {
+    println!(">> Starting peer connection...");
     let mut stream = TcpStream::connect(peer_addr).await?;
     println!("TCP conncetion established with peer at address: {peer_addr}");
 
@@ -206,12 +228,16 @@ async fn peer_connection(
         eprintln!("Handshake failed: {e}");
         return Err(io::Error::new(io::ErrorKind::Other, "Handshake failed"));
     }
+    println!("Handshake completed");
 
     let (mut read_half, mut write_half) = tokio::io::split(stream);
 
     // Create channels for communication
     let (io_rtx, io_rrx) = mpsc::channel(50);
     let (io_wtx, io_wrx) = mpsc::channel(50);
+
+    // Vector to keep track of task handles
+    let mut task_handles = Vec::new();
 
     let actor = Arc::new(Mutex::new(Actor::new(
         client_tx,
@@ -221,14 +247,15 @@ async fn peer_connection(
     )));
 
     // Reader task
-    tokio::spawn({
+    let reader_task = tokio::spawn({
         let io_rtx = io_rtx.clone();
+        println!(">> Peer IO reader initialized...");
         async move {
             loop {
                 match read_message(&mut read_half).await {
                     Ok(message) => {
                         if io_rtx.send(message).await.is_err() {
-                            println!("Receiver dropped; stopping reader task.");
+                            eprintln!("Receiver dropped; stopping reader task.");
                             break;
                         }
                     }
@@ -240,22 +267,26 @@ async fn peer_connection(
             }
         }
     });
+    task_handles.push(reader_task);
 
     // Writer task
-    tokio::spawn(async move {
+    let writer_task = tokio::spawn(async move {
         // writer
         let mut receiver: mpsc::Receiver<Message> = io_wrx;
+        println!(">> Peer IO writer initialized...");
         while let Some(message) = receiver.recv().await {
             if let Err(e) = send_message(&mut write_half, message).await {
                 eprintln!("send error: {e}");
             }
         }
     });
+    task_handles.push(writer_task);
 
     // Actor handler task
-    tokio::spawn({
+    let actor_task = tokio::spawn({
         let actor = Arc::clone(&actor);
         let mut receiver = io_rrx;
+        println!(">> Peer reader initialized...");
         async move {
             while let Some(message) = receiver.recv().await {
                 let mut actor = actor.lock().await;
@@ -265,10 +296,12 @@ async fn peer_connection(
             }
         }
     });
+    task_handles.push(actor_task);
 
     // Piece request task
-    tokio::spawn({
+    let piece_request_handle = tokio::spawn({
         let actor = Arc::clone(&actor);
+        println!(">> Peer requester initialized...");
         async move {
             loop {
                 let mut actor = actor.lock().await;
@@ -281,6 +314,14 @@ async fn peer_connection(
             }
         }
     });
+    task_handles.push(piece_request_handle);
+
+    // Await tasks
+    for handle in task_handles {
+        if let Err(e) = handle.await {
+            eprintln!("Peer connection task error: {:?}", e);
+        }
+    }
 
     Ok(())
 }

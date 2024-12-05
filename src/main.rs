@@ -1,14 +1,18 @@
-use client::{generate_peer_id, peer_handshake, Handshake};
-use metainfo::Metainfo;
 use std::{
+    collections::HashMap,
     fs::File,
     io::{self, Read},
 };
+
+use client::Client;
+use metainfo::Metainfo;
+use p2p::{connection::generate_peer_id, piece::Piece};
 use tracker::get;
 
 pub mod client;
-pub mod message;
 pub mod metainfo;
+mod p2p;
+pub mod store;
 pub mod tracker;
 
 #[tokio::main]
@@ -25,7 +29,7 @@ async fn main() -> io::Result<()> {
     //
     // With DHT or PEX:
     // - archlinux-2024.09.01-x86_64.iso.torrent
-    let mut file = File::open("ubuntu-24.10-desktop-amd64.iso.torrent")?;
+    let mut file = File::open("debian-12.7.0-amd64-netinst.iso.torrent")?;
     let mut buffer = Vec::new();
 
     // Read the entire file into buffer
@@ -50,21 +54,35 @@ async fn main() -> io::Result<()> {
     println!("->> Tracker Response: {:#?}", response);
 
     let peers = response.decode_peers().unwrap();
-    // let bytes = peer_id.as_bytes();
-    // let mut peer_id_bytes = [0u8; 20];
-    // peer_id_bytes.copy_from_slice(bytes);
 
     println!("->> Peers: {:#?}", peers);
 
-    let res = peer_handshake(&peers[0].address(), info_hash, peer_id).await?;
-    println!("RES BYTES: {:?} :: {}", &res, res.len());
-    println!("RES: {:?}", String::from_utf8_lossy(&res),);
-    let handshake_res = Handshake::deserialize(res).unwrap();
-    println!("{:#?}", handshake_res);
-    println!("{:#?}", handshake_res.pstr);
-    println!("{:#?}", handshake_res.reserved);
-    println!("{:#?}", handshake_res.info_hash);
-    println!("{:#?}", String::from_utf8(handshake_res.peer_id.to_vec()));
+    // config data
+    let download_path = "./downloads".to_string();
+    let piece_standard_size = 16384;
+    let total_peers: usize = 2;
+
+    let mut pieces = HashMap::new();
+
+    for (index, sha1) in metainfo.info.pieces.chunks(20).enumerate() {
+        let sha1: [u8; 20] = sha1.try_into().expect("Invalid piece length");
+        let piece = Piece::new(index as u32, metainfo.info.piece_length as usize, sha1);
+        pieces.insert(index as u32, piece);
+    }
+
+    println!("{}/{}", download_path, metainfo.info.name);
+    let client = Client::new(
+        download_path,
+        metainfo.info.name,
+        metainfo.info.length.unwrap(),
+        piece_standard_size,
+        peer_id,
+        peers,
+        total_peers,
+        pieces,
+    );
+
+    client.run(info_hash).await;
 
     Ok(())
 }
