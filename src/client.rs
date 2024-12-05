@@ -2,11 +2,13 @@ use std::{
     collections::{HashMap, HashSet},
     io,
     sync::Arc,
+    time::Duration,
 };
 
 use tokio::{
     net::TcpStream,
     sync::{mpsc, Mutex},
+    time::timeout,
 };
 
 use crate::{
@@ -30,6 +32,9 @@ pub struct Client {
     peers: Vec<Peer>,
     total_peers: usize,
     pieces_state: Arc<PiecesState>,
+    // TODO: move to config
+    timeout_duration: u64,
+    connection_retries: u32,
 }
 
 impl Client {
@@ -42,6 +47,9 @@ impl Client {
         peers: Vec<Peer>,
         peer_total: usize,
         pieces: HashMap<u32, Piece>,
+        // TODO: move to config
+        timeout_duration: u64,
+        connection_retries: u32,
     ) -> Self {
         Self {
             download_path,
@@ -52,6 +60,8 @@ impl Client {
             peers,
             total_peers: peer_total,
             pieces_state: Arc::new(PiecesState::new(pieces)),
+            timeout_duration,
+            connection_retries,
         }
     }
 
@@ -87,15 +97,19 @@ impl Client {
             let peer_address = self.peers[i].address().to_string();
             let peer_id = self.peer_id;
             let pieces_state = Arc::clone(&self.pieces_state);
+            let timeout_duration = self.timeout_duration;
+            let connection_retries = self.connection_retries;
 
             let peer_task = tokio::spawn(async move {
-                if let Err(e) = peer_connection(
+                if let Err(e) = init_peer_session(
                     &peer_address,
                     info_hash,
                     peer_id,
                     client_tx,
                     disk_tx,
                     pieces_state,
+                    timeout_duration,
+                    connection_retries,
                 )
                 .await
                 {
@@ -211,17 +225,60 @@ impl PiecesState {
     }
 }
 
-async fn peer_connection(
+async fn connect_to_peer_with_retries(
+    peer_addr: &str,
+    timeout_duration: Duration,
+    retries: u32,
+) -> io::Result<TcpStream> {
+    let mut attempts = 0;
+    while attempts < retries {
+        match timeout(timeout_duration, TcpStream::connect(peer_addr)).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(e)) if e.kind() == io::ErrorKind::ConnectionRefused => {
+                eprintln!("Connection refused by peer: {}", peer_addr);
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    "Peer refused connection",
+                ));
+            }
+            Ok(Err(e)) => {
+                eprintln!("Failed to connect to peer {}: {}", peer_addr, e);
+                return Err(e); // Propagate other errors
+            }
+            Err(_) => {
+                // Timeout elapsed
+                attempts += 1;
+                eprintln!("Attempt {} timed out, retrying...", attempts);
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "All connection attempts timed out",
+    ))
+}
+
+async fn init_peer_session(
     peer_addr: &str,
     info_hash: [u8; 20],
     peer_id: [u8; 20],
     client_tx: mpsc::Sender<Bitfield>,
     disk_tx: mpsc::Sender<(Piece, Vec<u8>)>,
     pieces_state: Arc<PiecesState>,
+    // TODO: move to config
+    timeout_duration: u64,
+    connection_retries: u32,
 ) -> io::Result<()> {
     println!(">> Starting peer connection...");
-    let mut stream = TcpStream::connect(peer_addr).await?;
-    println!("TCP conncetion established with peer at address: {peer_addr}");
+    let mut stream = connect_to_peer_with_retries(
+        peer_addr,
+        Duration::from_secs(timeout_duration),
+        connection_retries,
+    )
+    .await?;
+    println!("TCP connection established with peer at address: {peer_addr}");
 
     // Perform handshake
     if let Err(e) = connection::handshake(&mut stream, info_hash, peer_id).await {

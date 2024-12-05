@@ -61,6 +61,8 @@ async fn main() -> io::Result<()> {
     let download_path = "./downloads".to_string();
     let piece_standard_size = 16384;
     let total_peers: usize = 2;
+    let timeout_duration = 3;
+    let connection_retries = 3;
 
     let mut pieces = HashMap::new();
 
@@ -70,7 +72,6 @@ async fn main() -> io::Result<()> {
         pieces.insert(index as u32, piece);
     }
 
-    println!("{}/{}", download_path, metainfo.info.name);
     let client = Client::new(
         download_path,
         metainfo.info.name,
@@ -80,6 +81,8 @@ async fn main() -> io::Result<()> {
         peers,
         total_peers,
         pieces,
+        timeout_duration,
+        connection_retries,
     );
 
     client.run(info_hash).await;
