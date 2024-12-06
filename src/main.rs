@@ -60,9 +60,9 @@ async fn main() -> io::Result<()> {
     // config data
     let download_path = "./downloads".to_string();
     let piece_standard_size = 16384;
-    let total_peers: usize = 2;
+    let max_peer_connections: usize = 2;
     let timeout_duration = 3;
-    let connection_retries = 3;
+    let connection_retries = 2;
 
     let mut pieces = HashMap::new();
 
@@ -79,7 +79,7 @@ async fn main() -> io::Result<()> {
         piece_standard_size,
         peer_id,
         peers,
-        total_peers,
+        max_peer_connections,
         pieces,
         timeout_duration,
         connection_retries,

@@ -7,7 +7,7 @@ use std::{
 
 use tokio::{
     net::TcpStream,
-    sync::{mpsc, Mutex},
+    sync::{mpsc, Mutex, Semaphore},
     time::timeout,
 };
 
@@ -30,7 +30,7 @@ pub struct Client {
     piece_standard_size: u64,
     peer_id: [u8; 20],
     peers: Vec<Peer>,
-    total_peers: usize,
+    max_peer_connections: usize,
     pieces_state: Arc<PiecesState>,
     // TODO: move to config
     timeout_duration: u64,
@@ -58,7 +58,7 @@ impl Client {
             piece_standard_size,
             peer_id,
             peers,
-            total_peers: peer_total,
+            max_peer_connections: peer_total,
             pieces_state: Arc::new(PiecesState::new(pieces)),
             timeout_duration,
             connection_retries,
@@ -90,30 +90,54 @@ impl Client {
         });
         task_handles.push(bitfield_task);
 
-        // initiate 4 peer connections
-        for i in 0..self.total_peers {
+        // Semaphore to enforce 4 active peer sessions
+        let active_sessions = Arc::new(Semaphore::new(self.max_peer_connections));
+        let peers = Arc::new(Mutex::new(self.peers.clone()));
+
+        // Spawn tasks for peer connections
+        for i in 0..self.max_peer_connections {
+            let active_sessions = Arc::clone(&active_sessions);
+            let peers = Arc::clone(&peers);
             let client_tx = client_tx.clone();
             let disk_tx = disk_tx.clone();
-            let peer_address = self.peers[i].address().to_string();
             let peer_id = self.peer_id;
             let pieces_state = Arc::clone(&self.pieces_state);
             let timeout_duration = self.timeout_duration;
             let connection_retries = self.connection_retries;
 
             let peer_task = tokio::spawn(async move {
-                if let Err(e) = init_peer_session(
-                    &peer_address,
-                    info_hash,
-                    peer_id,
-                    client_tx,
-                    disk_tx,
-                    pieces_state,
-                    timeout_duration,
-                    connection_retries,
-                )
-                .await
-                {
-                    eprintln!("peer connection error: {e}");
+                // Acquire a permit to ensure concurrency limit
+                let _permit = active_sessions.acquire().await;
+
+                loop {
+                    // Get a peer from the list
+                    let peer_address = {
+                        let mut peers = peers.lock().await;
+                        if let Some(peer) = peers.pop() {
+                            peer.address().to_string()
+                        } else {
+                            break; // No more peers available
+                        }
+                    };
+
+                    // Try to initialize the peer session
+                    if let Err(e) = init_peer_session(
+                        &peer_address,
+                        info_hash,
+                        peer_id,
+                        client_tx.clone(),
+                        disk_tx.clone(),
+                        Arc::clone(&pieces_state),
+                        timeout_duration,
+                        connection_retries,
+                    )
+                    .await
+                    {
+                        eprintln!("peer connection error: {e}");
+                    } else {
+                        println!("->> {i}");
+                        break;
+                    }
                 }
             });
             task_handles.push(peer_task);

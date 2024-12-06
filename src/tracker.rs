@@ -26,14 +26,14 @@ pub struct Request {
     trackerid: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum Event {
     Started,
     Stopped,
     Completed,
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Response {
     failure_response: Option<String>,
     warning_message: Option<String>,
@@ -47,34 +47,34 @@ pub struct Response {
     peers: Option<ByteBuf>,
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Peers {
     Binary(Vec<u8>),
     Dictionary(Vec<Peer>),
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct Peer {
     pub peer_id: Option<String>,
     ip: Ip,
     port: u16,
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub enum Ip {
     IpV4(Ipv4Addr),
     IpV6(Ipv6Addr),
     Dns(String),
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ScrapeResponse {
     failure_response: Option<String>,
     flags: Option<Flags>,
     files: Option<HashMap<ByteBuf, FileStatus>>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct FileStatus {
     name: Option<String>,
     complete: Option<u32>,
