@@ -235,6 +235,9 @@ impl Actor {
         let queue_length = self.state.download_queue.len();
         for i in queue_starting_index..queue_length {
             let piece = self.state.download_queue[i].clone();
+            self.state
+                .pieces_status
+                .insert(piece.index() as usize, piece.clone());
             self.request_from_offset(&piece, block_offset).await?;
         }
 

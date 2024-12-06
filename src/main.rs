@@ -85,7 +85,7 @@ async fn main() -> io::Result<()> {
         connection_retries,
     );
 
-    client.run(info_hash).await;
+    client.run(info_hash).await?;
 
     Ok(())
 }

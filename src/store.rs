@@ -1,6 +1,7 @@
 use std::{
-    fs::{File, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{self, Seek, SeekFrom, Write},
+    path::Path,
 };
 
 use crate::p2p::piece::Piece;
@@ -10,7 +11,13 @@ pub struct Writer {
 }
 
 impl Writer {
-    pub fn new(file_path: &str) -> Self {
+    pub fn new(file_path: &str) -> Result<Self, io::Error> {
+        // Get the parent directory of the file path
+        if let Some(parent_dir) = Path::new(file_path).parent() {
+            // Create all directories if they do not exist
+            fs::create_dir_all(parent_dir)?;
+        }
+
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -18,7 +25,7 @@ impl Writer {
             .open(file_path)
             .expect("Failed to open file");
 
-        Self { file }
+        Ok(Self { file })
     }
 
     pub fn write_piece_to_disk(

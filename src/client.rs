@@ -65,7 +65,7 @@ impl Client {
         }
     }
 
-    pub async fn run(self, info_hash: [u8; 20]) {
+    pub async fn run(self, info_hash: [u8; 20]) -> io::Result<()> {
         let (client_tx, client_rx) = mpsc::channel(50);
         let (disk_tx, disk_rx) = mpsc::channel(50);
 
@@ -144,7 +144,7 @@ impl Client {
         }
 
         // Disk writer task
-        let disk_wirter = Writer::new(&format!("{}/{}", &self.download_path, &self.file_name));
+        let disk_wirter = Writer::new(&format!("{}/{}", &self.download_path, &self.file_name))?;
         let file_size = self.file_size;
         let piece_standard_size = self.piece_standard_size;
 
@@ -170,6 +170,8 @@ impl Client {
                 eprintln!("Client task error: {:?}", e);
             }
         }
+
+        Ok(())
     }
 }
 
