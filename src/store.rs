@@ -4,6 +4,8 @@ use std::{
     path::Path,
 };
 
+use tracing::debug;
+
 use crate::p2p::piece::Piece;
 
 pub struct Writer {
@@ -41,11 +43,7 @@ impl Writer {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         file.seek(SeekFrom::Start(offset))?;
         file.write_all(assembled_piece)?;
-        println!(
-            "Successfully wrote piece {} at offset {}",
-            piece.index(),
-            offset
-        );
+        debug!(piece_index=?piece.index(),piece_offset=?offset, "Successfully wrote piece to disk");
 
         Ok(())
     }

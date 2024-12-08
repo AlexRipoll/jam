@@ -7,6 +7,7 @@ use std::{collections::HashMap, usize};
 use tokio::io::{self, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tracing::{debug, info};
 
 use crate::client::PiecesState;
 use crate::p2p::message::{Bitfield, Message, MessageId, PiecePayload, TransferPayload};
@@ -75,28 +76,28 @@ impl Actor {
         // modifies state
         match message.message_id {
             MessageId::KeepAlive => {
-                println!("Received KeepAlive message");
+                debug!("Received KeepAlive message");
                 // TODO: extend stream alive
             }
             MessageId::Choke => {
                 // TODO:  stop sending msg until unchoked
                 self.state.is_choked = true;
-                println!("Choked by the peer");
+                info!("Choked by the peer");
                 // TODO: logic in case peer chokes but client is still interested
             }
             MessageId::Unchoke => {
                 self.state.is_choked = false;
-                println!("Unchoked by the peer");
+                info!("Unchoked by the peer");
                 // TODO:start requesting
             }
             MessageId::Interested => {
                 self.state.peer_interested = true;
-                println!("Peer expressed insterest");
+                info!("Peer expressed insterest");
 
                 // TODO: logic for unchoking peer
                 if self.state.peer_choked {
                     self.state.peer_choked = false;
-                    println!("Peer unchoked");
+                    info!("Peer unchoked");
                     self.io_wtx
                         .send(Message::new(MessageId::Unchoke, None))
                         .await?;
@@ -104,17 +105,17 @@ impl Actor {
             }
             MessageId::NotInterested => {
                 self.state.peer_interested = false;
-                println!("Peer not insterested");
+                info!("Peer no longer insterested");
             }
             MessageId::Have => {
-                println!("Processing Have message");
+                debug!("'Have' message received from peer");
                 self.process_have(&message);
             }
             MessageId::Bitfield => {
                 // Update the peer's bitfield and determine if the client is interested
-                println!("Received Bitfield message");
+                info!("Received 'Bitfield' message from peer");
                 let bitfield = Bitfield::new(message.payload.as_ref().unwrap());
-                println!("Updated peer bitfield");
+                debug!(bitfield = ?bitfield, "Updated peer bitfield");
 
                 self.state.peer_bitfield = bitfield.clone();
                 self.client_tx.send(bitfield).await?;
@@ -135,7 +136,7 @@ impl Actor {
             }
             MessageId::Piece => {
                 // store piece block
-                println!("Processing Piece message");
+                info!("'Piece' message received from peer");
                 self.download(message.payload.as_deref()).await?;
             }
             MessageId::Cancel => {
@@ -150,13 +151,11 @@ impl Actor {
     }
 
     fn process_have(&mut self, message: &Message) {
-        println!("Processing Have message: {:?}", message);
         let mut piece_index_be = [0u8; 4];
         piece_index_be.copy_from_slice(message.payload.as_ref().unwrap());
         let piece_index = u32::from_be_bytes(piece_index_be) as usize;
 
         if !self.state.peer_bitfield.has_piece(piece_index) {
-            println!("Setting piece {} in peer bitfield", piece_index);
             self.state.peer_bitfield.set_piece(piece_index);
         }
         // TODO: check if interested
@@ -173,21 +172,18 @@ impl Actor {
             .get_mut(&(payload.index as usize))
             .ok_or(P2pError::PieceNotFound)?;
 
-        println!(
-            "Downloading piece {} block offset {}",
-            payload.index, payload.begin
-        );
+        debug!(piece_index= ?payload.index, block_offset= ?payload.begin, "Downloading piece");
         // Add the block to the piece
         piece.add_block(payload.begin, payload.block.clone())?;
 
         // Check if the piece is ready and not yet completed
         if piece.is_ready() && !piece.is_finalized() {
             let buffer = piece.assemble()?;
-            println!("Piece {} is ready. Verifying hash...", payload.index);
+            debug!(piece_index= ?payload.index, "Piece ready. Verifying hash...");
 
             // Validate the piece hash
             if is_valid_piece(piece.hash(), &buffer) {
-                println!("Piece {} hash verified. Sending to disk.", payload.index);
+                debug!(piece_index= ?payload.index, "Piece hash verified. Sending to disk");
                 self.disk_tx.send((piece.clone(), buffer)).await?;
                 // NOTE: consider removing from pieces hashmap instead
                 piece.mark_finalized();
@@ -197,7 +193,7 @@ impl Actor {
                     .download_queue
                     .retain(|piece| piece.index() != piece.index());
             } else {
-                println!("Piece {} hash verification failed.", payload.index);
+                debug!(piece_index= ?payload.index, "Piece hash verification failed");
                 return Err(P2pError::PieceInvalid);
             }
         }
@@ -206,10 +202,10 @@ impl Actor {
     }
 
     pub async fn fill_download_queue(&mut self) {
-        println!("Filling download queue");
+        debug!("Filling download queue");
         for _ in 0..3 {
             if self.state.download_queue.len() >= 3 {
-                println!("download queue max capacity reached");
+                debug!("Download queue max capacity reached");
                 break;
             }
 
@@ -218,17 +214,17 @@ impl Actor {
                 .assign_piece(&self.state.peer_bitfield)
                 .await
             {
-                println!("Assigned piece {} to queue.", piece.index());
+                debug!(piece_index=?piece.index(),"Assigned piece to queue");
                 self.state.download_queue.push(piece);
             }
         }
     }
 
     pub async fn request(&mut self) -> Result<(), P2pError> {
-        println!("Requesting pieces");
         let (queue_starting_index, block_offset) = (0, 0);
 
         if self.state.download_queue.is_empty() {
+            debug!("Download queue is empty; filling download queue");
             self.fill_download_queue().await;
         }
 
@@ -240,6 +236,7 @@ impl Actor {
                 .insert(piece.index() as usize, piece.clone());
             self.request_from_offset(&piece, block_offset).await?;
         }
+        debug!("Completed piece requests");
 
         Ok(())
     }
@@ -252,16 +249,16 @@ impl Actor {
     ) -> Result<(), P2pError> {
         let total_blocks = (piece.size() + 16384 - 1) / 16384;
 
+        debug!(
+            piece = ?piece.index(), total_blocks= ?total_blocks, start_offset= ?start_offset, "Requesting blocks for piece"
+        );
         for block_index in ((start_offset / 16384) as usize)..total_blocks {
             let block_offset = block_index as u32 * 16384;
             let block_size = 16384.min(piece.size() as u32 - block_offset);
 
             let payload = TransferPayload::new(piece.index(), block_offset, block_size).serialize();
-            println!(
-                "Requesting piece: {} at offset {} ({} bytes)",
-                piece.index(),
-                block_offset,
-                block_size
+            debug!(
+                piece_index = ?piece.index(),block_offset= ?block_offset, block_size= ?block_size, "Sending block request"
             );
             self.io_wtx
                 .send(Message::new(MessageId::Request, Some(payload)))
@@ -351,7 +348,6 @@ pub async fn handshake(
     info_hash: [u8; 20],
     peer_id: [u8; 20],
 ) -> Result<Vec<u8>, P2pError> {
-    println!(">> Initiating peer handshake...");
     let handshake = Handshake::new(info_hash, peer_id);
     stream.write_all(&handshake.serialize()).await?;
 
@@ -372,7 +368,6 @@ pub async fn handshake(
     }
 
     if bytes_read != 68 {
-        eprintln!("Warning: Incomplete handshake response received");
         return Err(P2pError::InvalidHandshake);
     }
 

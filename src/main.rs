@@ -7,6 +7,8 @@ use std::{
 use client::Client;
 use metainfo::Metainfo;
 use p2p::{connection::generate_peer_id, piece::Piece};
+use tracing::{debug, error, info, trace, warn, Level};
+use tracing_subscriber::FmtSubscriber;
 use tracker::get;
 
 pub mod client;
@@ -17,6 +19,21 @@ pub mod tracker;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    // Initialize tracing
+    let builder = FmtSubscriber::builder();
+    let subscriber = builder
+        // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
+        // will be written to stdout.
+        .with_max_level(Level::DEBUG)
+        .with_thread_names(true)
+        .with_target(true)
+        // completes the builder.
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+
+    info!(" Starting BitTorrent client...");
+
     // Open the torrent file
     // Torrent file options:
     // With announce:
@@ -29,33 +46,56 @@ async fn main() -> io::Result<()> {
     //
     // With DHT or PEX:
     // - archlinux-2024.09.01-x86_64.iso.torrent
-    let mut file = File::open("debian-12.7.0-amd64-netinst.iso.torrent")?;
+    let file_path = "debian-12.7.0-amd64-netinst.iso.torrent";
+    info!("Opening torrent file: {}", file_path);
+    let mut file = File::open(file_path).map_err(|e| {
+        warn!("Failed to open torrent file: {}", e);
+        e
+    })?;
     let mut buffer = Vec::new();
 
-    // Read the entire file into buffer
+    trace!("Reading torrent file into buffer...");
     file.read_to_end(&mut buffer)?;
 
+    debug!("Computing info hash...");
     let info_hash = Metainfo::compute_info_hash(&buffer)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    debug!(info_hash = ?hex::encode(&info_hash), "Info hash computed");
 
-    // Deserialize the buffer into a Metainfo struct
-    let metainfo =
-        Metainfo::deserialize(&buffer).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-    println!("->> Metainfo: {:#?}", metainfo);
+    trace!("Deserializing matainfo file");
+    let metainfo = Metainfo::deserialize(&buffer).map_err(|e| {
+        warn!("Failed to deserialize metainfo: {}", e);
+        io::Error::new(io::ErrorKind::Other, e)
+    })?;
+    debug!(torrent_name = ?metainfo.info.name, "Successfully deserialized metainfo");
 
     let peer_id = generate_peer_id();
+    debug!(peer_id = ?String::from_utf8_lossy(&peer_id), "Generated session peer ID");
 
+    trace!("Building tracker URL...");
     let url = metainfo
         .build_tracker_url(info_hash, peer_id, 6889)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-    println!("->> URL: {:?}", url);
+        .map_err(|e| {
+            warn!("Failed to build tracker URL: {}", e);
+            io::Error::new(io::ErrorKind::Other, e)
+        })?;
+    debug!(tracker_url = ?url, "Tracker URL built");
 
-    let response = get(&url).await.unwrap();
-    println!("->> Tracker Response: {:#?}", response);
+    info!("Querying tracker...");
+    let response = get(&url).await.map_err(|e| {
+        warn!("Failed to query tracker: {}", e);
+        io::Error::new(io::ErrorKind::Other, format!("Tracker query failed: {e}"))
+    })?;
 
-    let peers = response.decode_peers().unwrap();
-
-    println!("->> Peers: {:#?}", peers);
+    debug!("Decoding peer list...");
+    let peers = response.decode_peers().map_err(|e| {
+        warn!("Failed to decode peer list: {}", e);
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Failed to decode peers: {e}"),
+        )
+    })?;
+    info!(peer_count = peers.len(), "Successfully decoded peer list");
 
     // config data
     let download_path = "./downloads".to_string();
@@ -64,6 +104,7 @@ async fn main() -> io::Result<()> {
     let timeout_duration = 3;
     let connection_retries = 2;
 
+    trace!("Creating piece map...");
     let mut pieces = HashMap::new();
 
     for (index, sha1) in metainfo.info.pieces.chunks(20).enumerate() {
@@ -72,6 +113,7 @@ async fn main() -> io::Result<()> {
         pieces.insert(index as u32, piece);
     }
 
+    info!("Initializing client...");
     let client = Client::new(
         download_path,
         metainfo.info.name,
@@ -84,8 +126,15 @@ async fn main() -> io::Result<()> {
         timeout_duration,
         connection_retries,
     );
+    debug!("Client initialized");
 
-    client.run(info_hash).await?;
+    info!("Starting download...");
+    if let Err(e) = client.run(info_hash).await {
+        error!("Error during client run: {}", e);
+        return Err(e);
+    }
+
+    info!("Download completed successfully");
 
     Ok(())
 }
