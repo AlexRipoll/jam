@@ -92,7 +92,7 @@ impl Client {
 
                     if pieces_state.bitfield_rarity_map.lock().await.len() >= 3 {
                         debug!("Updating remaining pieces state...");
-                        pieces_state.update_remaining().await;
+                        pieces_state.update_queue().await;
                     }
                 }
 
@@ -218,7 +218,7 @@ impl Client {
 pub struct PiecesState {
     pub pieces_map: HashMap<u32, Piece>,
     pub bitfield_rarity_map: Mutex<HashMap<u32, u16>>, // piece index -> piece count in bitfields
-    pub remaining: Mutex<Vec<Piece>>,
+    pub queue: Mutex<Vec<Piece>>,
     pub assigned: Mutex<HashSet<Piece>>,
 }
 
@@ -227,15 +227,15 @@ impl PiecesState {
         Self {
             pieces_map,
             bitfield_rarity_map: Mutex::new(HashMap::new()),
-            remaining: Mutex::new(Vec::new()),
+            queue: Mutex::new(Vec::new()),
             assigned: Mutex::new(HashSet::new()),
         }
     }
 
     /// Add a new piece to the remaining queue
     pub async fn add_piece(&self, piece: Piece) {
-        let mut remaining = self.remaining.lock().await;
-        remaining.push(piece);
+        let mut queue = self.queue.lock().await;
+        queue.push(piece);
     }
 
     async fn add_bitfield_rarity(&self, bitfield: Bitfield) {
@@ -250,8 +250,8 @@ impl PiecesState {
         }
     }
 
-    pub async fn update_remaining(&self) {
-        let mut remaining = self.remaining.lock().await;
+    pub async fn update_queue(&self) {
+        let mut queue = self.queue.lock().await;
         // remaining.clear(); // Clear previous state
 
         // Sort pieces based on rarity in `bitfield_rariry_map`
@@ -262,20 +262,20 @@ impl PiecesState {
         // Populate the `remaining` list with full `Piece` structs
         for (piece_index, _) in sorted_pieces {
             if let Some(piece) = self.pieces_map.get(piece_index) {
-                remaining.push(piece.clone());
+                queue.push(piece.clone());
             }
         }
     }
 
     /// Extract the rarest piece available for a peer
     pub async fn assign_piece(&self, peer_bitfield: &Bitfield) -> Option<Piece> {
-        let mut remaining = self.remaining.lock().await;
+        let mut queue = self.queue.lock().await;
         let mut assigned = self.assigned.lock().await;
 
-        if let Some(pos) = remaining.iter().position(|piece| {
+        if let Some(pos) = queue.iter().position(|piece| {
             !assigned.contains(piece) && peer_bitfield.has_piece(piece.index() as usize)
         }) {
-            let piece = remaining.remove(pos);
+            let piece = queue.remove(pos);
             assigned.insert(piece.clone());
             return Some(piece);
         }

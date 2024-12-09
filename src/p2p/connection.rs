@@ -69,7 +69,7 @@ impl Actor {
     pub async fn ready_to_request(&self) -> bool {
         !self.state.is_choked
             && self.state.is_interested
-            && !self.pieces_state.remaining.lock().await.is_empty()
+            && !self.pieces_state.queue.lock().await.is_empty()
     }
 
     pub async fn handle_message(&mut self, message: Message) -> Result<(), P2pError> {
@@ -533,7 +533,7 @@ mod test {
         actor.state.is_interested = true;
         actor
             .pieces_state
-            .remaining
+            .queue
             .lock()
             .await
             .push(Piece::new(1, 512, [0u8; 20]));
