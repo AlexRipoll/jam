@@ -6,13 +6,15 @@ use std::{
 };
 
 use tokio::{
+    io::AsyncWriteExt,
     net::TcpStream,
-    sync::{mpsc, Mutex, Semaphore},
+    sync::{broadcast, mpsc, watch, Mutex, Semaphore},
     time::timeout,
 };
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
+    bitfield::TorrentBitfield,
     p2p::{
         connection::{self, Actor},
         io::{read_message, send_message},
@@ -29,6 +31,7 @@ pub struct Client {
     file_name: String,
     file_size: u64,
     piece_standard_size: u64,
+    torrent_bitfield: Arc<Mutex<TorrentBitfield>>,
     peer_id: [u8; 20],
     peers: Vec<Peer>,
     max_peer_connections: usize,
@@ -57,6 +60,10 @@ impl Client {
             file_name,
             file_size,
             piece_standard_size,
+            torrent_bitfield: Arc::new(Mutex::new(TorrentBitfield::new(
+                file_size as usize,
+                "bitfield_file_path",
+            ))),
             peer_id,
             peers,
             max_peer_connections: peer_total,
@@ -167,6 +174,8 @@ impl Client {
         let disk_wirter = Writer::new(&format!("{}/{}", &self.download_path, &self.file_name))?;
         let file_size = self.file_size;
         let piece_standard_size = self.piece_standard_size;
+        // let torrent_bitfield = Arc::clone(Mutex::new(&self.torrent_bitfield));
+        let torrent_bitfield = Arc::clone(&self.torrent_bitfield); // Clone Arc for the task
 
         let disk_task = tokio::spawn({
             let disk_span = tracing::info_span!("disk_writer");
@@ -191,6 +200,12 @@ impl Client {
                                 piece_index = piece_index,
                                 "Piece written to disk successfully"
                             );
+                            // Update torrent_bitfield
+                            {
+                                let mut bitfield = torrent_bitfield.lock().await;
+                                bitfield.set_piece(piece_index as usize);
+                            }
+                            debug!(piece_index = piece_index, "Bitfield piece index updated");
                         }
                         Err(e) => {
                             error!(piece_index = piece_index, error = %e, "Error writing piece to disk")
@@ -265,6 +280,23 @@ impl PiecesState {
                 queue.push(piece.clone());
             }
         }
+    }
+
+    pub async fn has_missing_pieces(&self, bitfield: &Bitfield) -> bool {
+        let rarity_map = self.bitfield_rarity_map.lock().await;
+        for (byte_index, _) in bitfield.bytes.iter().enumerate() {
+            for bit_index in 0..8 {
+                let piece_index = (byte_index * 8 + bit_index) as u32;
+
+                if bitfield.has_piece(piece_index as usize)
+                    && rarity_map.get(&piece_index).is_none()
+                {
+                    return true;
+                }
+            }
+        }
+
+        false
     }
 
     /// Extract the rarest piece available for a peer
@@ -361,6 +393,7 @@ async fn init_peer_session(
     // Create channels for communication
     let (io_rtx, io_rrx) = mpsc::channel(50);
     let (io_wtx, io_wrx) = mpsc::channel(50);
+    let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
     // Vector to keep track of task handles
     let mut task_handles = Vec::new();
@@ -369,6 +402,7 @@ async fn init_peer_session(
         client_tx,
         io_wtx,
         disk_tx,
+        shutdown_tx.clone(),
         pieces_state,
     )));
 
@@ -377,19 +411,29 @@ async fn init_peer_session(
         let io_rtx = io_rtx.clone();
         let peer_addr = peer_addr.to_string();
         let reader_span = tracing::info_span!("reader_task", peer_addr = %peer_addr);
+        let mut shutdown_rx = shutdown_tx.subscribe();
         async move {
             let _enter = reader_span.enter();
             debug!(peer_addr = %peer_addr, "Initializing peer IO reader...");
             loop {
-                match read_message(&mut read_half).await {
-                    Ok(message) => {
-                        if io_rtx.send(message).await.is_err() {
-                            error!(peer_addr = %peer_addr, "Receiver dropped; stopping reader task");
-                            break;
+                tokio::select! {
+                    result = read_message(&mut read_half) => {
+                        match result {
+                            Ok(message) => {
+                                if io_rtx.send(message).await.is_err() {
+                                    error!(peer_addr = %peer_addr, "Receiver dropped; stopping reader task");
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                error!(peer_addr = %peer_addr, error = %e, "Error reading message");
+                                break;
+                            }
                         }
                     }
-                    Err(e) => {
-                        error!(peer_addr = %peer_addr, error = %e, "Error reading message");
+                    _ = shutdown_rx.recv() => {
+                        debug!(peer_addr = %peer_addr, "Reader task received shutdown signal");
+                            drop(read_half);
                         break;
                     }
                 }
@@ -402,13 +446,25 @@ async fn init_peer_session(
     let writer_task = tokio::spawn({
         let peer_addr = peer_addr.to_string();
         let writer_span = tracing::info_span!("writer_task", peer_addr = %peer_addr);
+        let mut receiver: mpsc::Receiver<Message> = io_wrx;
+        let mut shutdown_rx = shutdown_tx.subscribe();
         async move {
             let _enter = writer_span.enter();
             debug!(peer_addr = %peer_addr, "Initializing peer IO writer...");
-            let mut receiver: mpsc::Receiver<Message> = io_wrx;
-            while let Some(message) = receiver.recv().await {
-                if let Err(e) = send_message(&mut write_half, message).await {
-                    error!(peer_addr = %peer_addr, error = %e, "Error sending message");
+            loop {
+                tokio::select! {
+                    Some(message) = receiver.recv() => {
+                        if let Err(e) = send_message(&mut write_half, message).await {
+                            error!(peer_addr = %peer_addr, error = %e, "Error sending message");
+                        }
+                    }
+                    _ = shutdown_rx.recv() => {
+                        debug!(peer_addr = %peer_addr, "Writer task received shutdown signal");
+                        let _ = write_half.shutdown().await;
+                        drop(write_half);
+                        info!(peer_addr = %peer_addr, "TCP stream closed");
+                        break;
+                    }
                 }
             }
         }
@@ -421,13 +477,22 @@ async fn init_peer_session(
         let actor_span = tracing::info_span!("actor_task", peer_addr = %peer_addr);
         let mut receiver = io_rrx;
         let peer_addr = peer_addr.to_string();
+        let mut shutdown_rx = shutdown_tx.subscribe();
         async move {
             let _enter = actor_span.enter();
             debug!(peer_addr = %peer_addr, "Initializing peer actor handler...");
-            while let Some(message) = receiver.recv().await {
-                let mut actor = actor.lock().await;
-                if let Err(e) = actor.handle_message(message).await {
-                    error!(peer_addr = %peer_addr, error = %e, "Actor handler error");
+            loop {
+                tokio::select! {
+                    Some(message) = receiver.recv() => {
+                        let mut actor = actor.lock().await;
+                        if let Err(e) = actor.handle_message(message).await {
+                            error!(peer_addr = %peer_addr, error = %e, "Actor handler error");
+                        }
+                    }
+                    _ = shutdown_rx.recv() => {
+                        debug!(peer_addr = %peer_addr, "Actor task received shutdown signal");
+                        break;
+                    }
                 }
             }
         }
@@ -439,15 +504,23 @@ async fn init_peer_session(
         let actor = Arc::clone(&actor);
         let peer_addr = peer_addr.to_string();
         let request_span = tracing::info_span!("piece_request_task", peer_addr = %peer_addr);
+        let mut shutdown_rx = shutdown_tx.subscribe();
         async move {
             let _enter = request_span.enter();
             debug!(peer_addr = %peer_addr, "Initializing piece requester...");
             loop {
-                let mut actor = actor.lock().await;
-                if actor.ready_to_request().await {
-                    // if queue is empty, fill with new pieces
-                    if let Err(e) = actor.request().await {
-                        error!(peer_addr = %peer_addr, error = %e, "Piece request error");
+                tokio::select! {
+                    _ = async {
+                        let mut actor = actor.lock().await;
+                        if actor.ready_to_request().await {
+                            if let Err(e) = actor.request().await {
+                                error!(peer_addr = %peer_addr, error = %e, "Piece request error");
+                            }
+                        }
+                    } => {}
+                    _ = shutdown_rx.recv() => {
+                        debug!(peer_addr = %peer_addr, "Piece requester received shutdown signal");
+                        break;
                     }
                 }
             }
@@ -464,4 +537,51 @@ async fn init_peer_session(
     tracing::info!(peer_addr, "Peer session completed");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use std::collections::HashMap;
+
+    use crate::{client::PiecesState, p2p::message::Bitfield};
+
+    #[tokio::test]
+    async fn test_has_missing_pieces() {
+        // Create empty pieces map since it is not relevant in this case
+        let pieces_map = HashMap::new();
+
+        // Create a PiecesState instance
+        let pieces_state = PiecesState::new(pieces_map);
+
+        // Add bitfield with pieces 0, 2 and 5 available
+        let bitfield = Bitfield::new(&[0b10100100]); // Bits 0, 2 and 5 are set
+        pieces_state.add_bitfield_rarity(bitfield.clone()).await;
+
+        // check if new bitfield has pieces the rarity map does not have (in this case piece 5 is missing)
+        let bitfield = Bitfield::new(&[0b10101100]); // Bits 0, 2, 4 and 5 are set
+        let result = pieces_state.has_missing_pieces(&bitfield).await;
+
+        // Assert that piece 4 is missing since it is marked in the bitfield but not in the rarity_map
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn test_does_not_have_missing_pieces() {
+        // Create empty pieces map since it is not relevant in this case
+        let pieces_map = HashMap::new();
+
+        // Create a PiecesState instance
+        let pieces_state = PiecesState::new(pieces_map);
+
+        // Add bitfield with pieces 0, 2 and 5 available
+        let bitfield = Bitfield::new(&[0b10100100]); // Bits 0, 2 and 5 are set
+        pieces_state.add_bitfield_rarity(bitfield.clone()).await;
+
+        // check if new bitfield has pieces the rarity map does not have
+        let bitfield = Bitfield::new(&[0b10000100]); // Bits 0 and 5 are set
+        let result = pieces_state.has_missing_pieces(&bitfield).await;
+
+        // Assert that no new pieces are found in this bitfield
+        assert!(!result);
+    }
 }

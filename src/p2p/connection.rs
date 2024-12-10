@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::{collections::HashMap, usize};
 use tokio::io::{self, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info};
 
 use crate::client::PiecesState;
@@ -21,6 +21,7 @@ pub struct Actor {
     client_tx: mpsc::Sender<Bitfield>,
     disk_tx: mpsc::Sender<(Piece, Vec<u8>)>,
     io_wtx: mpsc::Sender<Message>,
+    shutdown_tx: broadcast::Sender<()>,
     state: State,
     pieces_state: Arc<PiecesState>,
 }
@@ -55,12 +56,14 @@ impl Actor {
         client_tx: mpsc::Sender<Bitfield>,
         io_wtx: mpsc::Sender<Message>,
         disk_tx: mpsc::Sender<(Piece, Vec<u8>)>,
+        shutdown_tx: broadcast::Sender<()>,
         pieces_state: Arc<PiecesState>,
     ) -> Self {
         Self {
             client_tx,
             disk_tx,
             io_wtx,
+            shutdown_tx,
             state: State::default(),
             pieces_state,
         }
@@ -117,18 +120,22 @@ impl Actor {
                 let bitfield = Bitfield::new(message.payload.as_ref().unwrap());
                 debug!(bitfield = ?bitfield, "Updated peer bitfield");
 
-                self.state.peer_bitfield = bitfield.clone();
-                self.client_tx.send(bitfield).await?;
+                // check if peer has any piece we are interested in downloading
+                if self.pieces_state.has_missing_pieces(&bitfield).await {
+                    self.state.peer_bitfield = bitfield.clone();
+                    self.client_tx.send(bitfield).await?;
 
-                // TODO: send bitfield to clients orchestrator.
-                // TODO: check if peer has any piece the client is interested in downloading then
-                self.io_wtx
-                    .send(Message::new(MessageId::Unchoke, None))
-                    .await?;
-                self.io_wtx
-                    .send(Message::new(MessageId::Interested, None))
-                    .await?;
-                self.state.is_interested = true;
+                    self.io_wtx
+                        .send(Message::new(MessageId::Unchoke, None))
+                        .await?;
+                    self.io_wtx
+                        .send(Message::new(MessageId::Interested, None))
+                        .await?;
+                    self.state.is_interested = true;
+                } else {
+                    // close TCP stream
+                    self.shutdown_tx.send(())?;
+                }
             }
             MessageId::Request => {
                 // send piece blocks to peer
@@ -386,6 +393,7 @@ pub enum P2pError {
     DiskTxError(mpsc::error::SendError<(Piece, Vec<u8>)>),
     IoTxError(mpsc::error::SendError<Message>),
     ClientTxError(mpsc::error::SendError<Bitfield>),
+    ShutdownError(broadcast::error::SendError<()>),
     IoError(io::Error),
 }
 
@@ -403,6 +411,7 @@ impl Display for P2pError {
             P2pError::IoTxError(err) => write!(f, "IO tx error: {}", err),
             P2pError::ClientTxError(err) => write!(f, "Client tx error: {}", err),
             P2pError::IoError(err) => write!(f, "IO error: {}", err),
+            P2pError::ShutdownError(err) => write!(f, "Shutdown tx error: {}", err),
         }
     }
 }
@@ -440,6 +449,12 @@ impl From<mpsc::error::SendError<Bitfield>> for P2pError {
     }
 }
 
+impl From<broadcast::error::SendError<()>> for P2pError {
+    fn from(err: broadcast::error::SendError<()>) -> Self {
+        P2pError::ShutdownError(err)
+    }
+}
+
 impl From<io::Error> for P2pError {
     fn from(err: io::Error) -> Self {
         P2pError::IoError(err)
@@ -455,6 +470,7 @@ impl Error for P2pError {
             P2pError::IoTxError(err) => Some(err),
             P2pError::ClientTxError(err) => Some(err),
             P2pError::IoError(err) => Some(err),
+            P2pError::ShutdownError(err) => Some(err),
             _ => None,
         }
     }
@@ -512,18 +528,22 @@ mod test {
         },
     };
     use assert_matches::assert_matches;
-    use tokio::{sync::mpsc, time::timeout};
+    use tokio::{
+        sync::{broadcast, mpsc},
+        time::timeout,
+    };
 
     #[tokio::test]
     async fn test_actor_ready_to_request() {
         let (client_tx, _) = mpsc::channel(10);
         let (io_wtx, _) = mpsc::channel(10);
         let (disk_tx, _) = mpsc::channel(10);
+        let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
         let pieces_state = Arc::new(PiecesState::new(pieces_map));
 
-        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, pieces_state);
+        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
 
         // Test when actor is choked
         assert!(!actor.ready_to_request().await);
@@ -545,11 +565,12 @@ mod test {
         let (client_tx, _) = mpsc::channel(10);
         let (io_wtx, _) = mpsc::channel(10);
         let (disk_tx, _) = mpsc::channel(10);
+        let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
         let pieces_state = Arc::new(PiecesState::new(pieces_map));
 
-        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, pieces_state);
+        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
         actor
             .handle_message(Message::new(MessageId::Choke, None))
             .await
@@ -562,11 +583,12 @@ mod test {
         let (client_tx, _) = mpsc::channel(10);
         let (io_wtx, _) = mpsc::channel(10);
         let (disk_tx, _) = mpsc::channel(10);
+        let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
         let pieces_state = Arc::new(PiecesState::new(pieces_map));
 
-        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, pieces_state);
+        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
         actor
             .handle_message(Message::new(MessageId::Unchoke, None))
             .await
@@ -579,11 +601,12 @@ mod test {
         let (client_tx, _) = mpsc::channel(10);
         let (io_wtx, _) = mpsc::channel(10);
         let (disk_tx, _) = mpsc::channel(10);
+        let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
         let pieces_state = Arc::new(PiecesState::new(pieces_map));
 
-        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, pieces_state);
+        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
         actor
             .handle_message(Message::new(MessageId::NotInterested, None))
             .await
@@ -596,11 +619,12 @@ mod test {
         let (client_tx, mut client_rx) = mpsc::channel(10);
         let (io_wtx, mut io_rx) = mpsc::channel(10);
         let (disk_tx, _) = mpsc::channel(10);
+        let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
         let pieces_state = Arc::new(PiecesState::new(pieces_map));
 
-        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, pieces_state);
+        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
 
         let bitfield_payload = vec![0b10101010];
         actor
@@ -627,11 +651,12 @@ mod test {
         let (client_tx, mut client_rx) = mpsc::channel(10);
         let (io_wtx, mut io_rx) = mpsc::channel(10);
         let (disk_tx, mut disk_rx) = mpsc::channel(10);
+        let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
         let pieces_state = Arc::new(PiecesState::new(pieces_map));
 
-        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, pieces_state);
+        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
 
         // Set up a valid piece (index 1, size 32KB, with a dummy hash)
         let piece_index = 1;
@@ -697,11 +722,12 @@ mod test {
         let (client_tx, mut client_rx) = mpsc::channel(10);
         let (io_wtx, mut io_rx) = mpsc::channel(10);
         let (disk_tx, mut disk_rx) = mpsc::channel(10);
+        let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
         let pieces_state = Arc::new(PiecesState::new(pieces_map));
 
-        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, pieces_state);
+        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
 
         // Set up a valid piece (index 1, size 32KB, with a dummy hash)
         let piece_index = 1;
@@ -767,9 +793,10 @@ mod test {
         let (client_tx, mut client_rx) = mpsc::channel(10);
         let (disk_tx, _) = mpsc::channel(10);
         let (io_wtx, _) = mpsc::channel(10);
+        let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         // Initialize the Actor
-        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, pieces_state);
+        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
         actor.state.peer_bitfield = initial_bitfield.clone();
 
         // Handle the MessageId::Have message
@@ -783,6 +810,7 @@ mod test {
     async fn test_request() {
         // Create a mock io_wtx sender and receiver
         let (io_wtx, mut io_wrx) = mpsc::channel::<Message>(10);
+        let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         // Create a dummy Piece object
         let piece_index = 0;
@@ -795,7 +823,7 @@ mod test {
         let disk_tx = mpsc::channel(10).0;
         let pieces_map = HashMap::new();
         let pieces_state = Arc::new(PiecesState::new(pieces_map));
-        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, pieces_state);
+        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
 
         // Pre-fill the pieces queue with the dummy piece
         actor.state.download_queue.push(piece);
@@ -832,6 +860,7 @@ mod test {
     async fn test_request_from_offset() {
         // Create a mock io_wtx sender and receiver
         let (io_wtx, mut io_wrx) = mpsc::channel::<Message>(10);
+        let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         // Create a dummy Piece object
         let piece_index = 0;
@@ -844,7 +873,7 @@ mod test {
         let disk_tx = mpsc::channel(10).0;
         let pieces_map = HashMap::new();
         let pieces_state = Arc::new(PiecesState::new(pieces_map));
-        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, pieces_state);
+        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
 
         // Request blocks starting from offset 0
         let start_offset = 0;
