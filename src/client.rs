@@ -31,7 +31,6 @@ pub struct Client {
     file_name: String,
     file_size: u64,
     piece_standard_size: u64,
-    torrent_bitfield: Arc<Mutex<TorrentBitfield>>,
     peer_id: [u8; 20],
     peers: Vec<Peer>,
     max_peer_connections: usize,
@@ -44,6 +43,7 @@ pub struct Client {
 impl Client {
     pub fn new(
         download_path: String,
+        bitfield_path: String,
         file_name: String,
         file_size: u64,
         piece_standard_size: u64,
@@ -60,14 +60,10 @@ impl Client {
             file_name,
             file_size,
             piece_standard_size,
-            torrent_bitfield: Arc::new(Mutex::new(TorrentBitfield::new(
-                file_size as usize,
-                "bitfield_file_path",
-            ))),
             peer_id,
             peers,
             max_peer_connections: peer_total,
-            pieces_state: Arc::new(PiecesState::new(pieces)),
+            pieces_state: Arc::new(PiecesState::new(pieces, &bitfield_path)),
             timeout_duration,
             connection_retries,
         }
@@ -113,7 +109,7 @@ impl Client {
         let peers = Arc::new(Mutex::new(self.peers.clone()));
 
         // Spawn tasks for peer connections
-        for i in 0..self.max_peer_connections {
+        for i in 0..self.peers.len() {
             let active_sessions = Arc::clone(&active_sessions);
             let peers = Arc::clone(&peers);
             let client_tx = client_tx.clone();
@@ -174,8 +170,6 @@ impl Client {
         let disk_wirter = Writer::new(&format!("{}/{}", &self.download_path, &self.file_name))?;
         let file_size = self.file_size;
         let piece_standard_size = self.piece_standard_size;
-        // let torrent_bitfield = Arc::clone(Mutex::new(&self.torrent_bitfield));
-        let torrent_bitfield = Arc::clone(&self.torrent_bitfield); // Clone Arc for the task
 
         let disk_task = tokio::spawn({
             let disk_span = tracing::info_span!("disk_writer");
@@ -202,7 +196,7 @@ impl Client {
                             );
                             // Update torrent_bitfield
                             {
-                                let mut bitfield = torrent_bitfield.lock().await;
+                                let mut bitfield = self.pieces_state.torrent_bitfield.lock().await;
                                 bitfield.set_piece(piece_index as usize);
                             }
                             debug!(piece_index = piece_index, "Bitfield piece index updated");
@@ -232,15 +226,22 @@ impl Client {
 #[derive(Debug)]
 pub struct PiecesState {
     pub pieces_map: HashMap<u32, Piece>,
+    pub torrent_bitfield: Mutex<TorrentBitfield>,
     pub bitfield_rarity_map: Mutex<HashMap<u32, u16>>, // piece index -> piece count in bitfields
     pub queue: Mutex<Vec<Piece>>,
     pub assigned: Mutex<HashSet<Piece>>,
 }
 
 impl PiecesState {
-    pub fn new(pieces_map: HashMap<u32, Piece>) -> Self {
+    pub fn new(pieces_map: HashMap<u32, Piece>, bitfield_path: &str) -> Self {
+        let pieces_amount = pieces_map.len();
         Self {
             pieces_map,
+            torrent_bitfield: Mutex::new(TorrentBitfield::new(
+                pieces_amount,
+                // FIX: bad design
+                bitfield_path,
+            )),
             bitfield_rarity_map: Mutex::new(HashMap::new()),
             queue: Mutex::new(Vec::new()),
             assigned: Mutex::new(HashSet::new()),
@@ -283,13 +284,13 @@ impl PiecesState {
     }
 
     pub async fn has_missing_pieces(&self, bitfield: &Bitfield) -> bool {
-        let rarity_map = self.bitfield_rarity_map.lock().await;
+        let client_bitfield = self.torrent_bitfield.lock().await;
         for (byte_index, _) in bitfield.bytes.iter().enumerate() {
             for bit_index in 0..8 {
                 let piece_index = (byte_index * 8 + bit_index) as u32;
 
                 if bitfield.has_piece(piece_index as usize)
-                    && rarity_map.get(&piece_index).is_none()
+                    && !client_bitfield.has_piece(piece_index as usize)
                 {
                     return true;
                 }
@@ -543,19 +544,33 @@ async fn init_peer_session(
 mod test {
     use std::collections::HashMap;
 
-    use crate::{client::PiecesState, p2p::message::Bitfield};
+    use crate::{
+        client::PiecesState,
+        p2p::{message::Bitfield, piece::Piece},
+    };
 
     #[tokio::test]
     async fn test_has_missing_pieces() {
-        // Create empty pieces map since it is not relevant in this case
-        let pieces_map = HashMap::new();
+        let mut pieces_map = HashMap::new();
+        pieces_map.insert(0, Piece::new(0, 16384, [0u8; 20]));
+        pieces_map.insert(1, Piece::new(1, 16384, [0u8; 20]));
+        pieces_map.insert(2, Piece::new(2, 16384, [0u8; 20]));
+        pieces_map.insert(3, Piece::new(3, 16384, [0u8; 20]));
+        pieces_map.insert(4, Piece::new(4, 16384, [0u8; 20]));
+        pieces_map.insert(5, Piece::new(5, 16384, [0u8; 20]));
+        pieces_map.insert(6, Piece::new(6, 16384, [0u8; 20]));
+        pieces_map.insert(7, Piece::new(7, 16384, [0u8; 20]));
 
         // Create a PiecesState instance
-        let pieces_state = PiecesState::new(pieces_map);
+        let pieces_state = PiecesState::new(pieces_map, "torrent_path");
 
         // Add bitfield with pieces 0, 2 and 5 available
         let bitfield = Bitfield::new(&[0b10100100]); // Bits 0, 2 and 5 are set
-        pieces_state.add_bitfield_rarity(bitfield.clone()).await;
+        let mut client_bitfield = pieces_state.torrent_bitfield.lock().await;
+        client_bitfield.set_piece(0);
+        client_bitfield.set_piece(2);
+        client_bitfield.set_piece(5);
+        drop(client_bitfield);
 
         // check if new bitfield has pieces the rarity map does not have (in this case piece 5 is missing)
         let bitfield = Bitfield::new(&[0b10101100]); // Bits 0, 2, 4 and 5 are set
@@ -567,15 +582,26 @@ mod test {
 
     #[tokio::test]
     async fn test_does_not_have_missing_pieces() {
-        // Create empty pieces map since it is not relevant in this case
-        let pieces_map = HashMap::new();
+        let mut pieces_map = HashMap::new();
+        pieces_map.insert(0, Piece::new(0, 16384, [0u8; 20]));
+        pieces_map.insert(1, Piece::new(1, 16384, [0u8; 20]));
+        pieces_map.insert(2, Piece::new(2, 16384, [0u8; 20]));
+        pieces_map.insert(3, Piece::new(3, 16384, [0u8; 20]));
+        pieces_map.insert(4, Piece::new(4, 16384, [0u8; 20]));
+        pieces_map.insert(5, Piece::new(5, 16384, [0u8; 20]));
+        pieces_map.insert(6, Piece::new(6, 16384, [0u8; 20]));
+        pieces_map.insert(7, Piece::new(7, 16384, [0u8; 20]));
 
         // Create a PiecesState instance
-        let pieces_state = PiecesState::new(pieces_map);
+        let pieces_state = PiecesState::new(pieces_map, "torrent_path");
 
         // Add bitfield with pieces 0, 2 and 5 available
         let bitfield = Bitfield::new(&[0b10100100]); // Bits 0, 2 and 5 are set
-        pieces_state.add_bitfield_rarity(bitfield.clone()).await;
+        let mut client_bitfield = pieces_state.torrent_bitfield.lock().await;
+        client_bitfield.set_piece(0);
+        client_bitfield.set_piece(2);
+        client_bitfield.set_piece(5);
+        drop(client_bitfield);
 
         // check if new bitfield has pieces the rarity map does not have
         let bitfield = Bitfield::new(&[0b10000100]); // Bits 0 and 5 are set

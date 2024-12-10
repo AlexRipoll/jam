@@ -83,15 +83,13 @@ impl Actor {
                 // TODO: extend stream alive
             }
             MessageId::Choke => {
-                // TODO:  stop sending msg until unchoked
                 self.state.is_choked = true;
-                info!("Choked by the peer");
+                info!("Choked by peer");
                 // TODO: logic in case peer chokes but client is still interested
             }
             MessageId::Unchoke => {
                 self.state.is_choked = false;
-                info!("Unchoked by the peer");
-                // TODO:start requesting
+                info!("Unchoked by peer");
             }
             MessageId::Interested => {
                 self.state.peer_interested = true;
@@ -166,7 +164,6 @@ impl Actor {
             self.state.peer_bitfield.set_piece(piece_index);
         }
         // TODO: check if interested
-        // TODO: send to client?
     }
 
     async fn download(&mut self, payload: Option<&[u8]>) -> Result<(), P2pError> {
@@ -541,7 +538,7 @@ mod test {
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
-        let pieces_state = Arc::new(PiecesState::new(pieces_map));
+        let pieces_state = Arc::new(PiecesState::new(pieces_map, "bitfield_path"));
 
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
 
@@ -568,7 +565,7 @@ mod test {
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
-        let pieces_state = Arc::new(PiecesState::new(pieces_map));
+        let pieces_state = Arc::new(PiecesState::new(pieces_map, "bitfield_path"));
 
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
         actor
@@ -586,7 +583,7 @@ mod test {
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
-        let pieces_state = Arc::new(PiecesState::new(pieces_map));
+        let pieces_state = Arc::new(PiecesState::new(pieces_map, "bitfield_path"));
 
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
         actor
@@ -604,7 +601,7 @@ mod test {
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
-        let pieces_state = Arc::new(PiecesState::new(pieces_map));
+        let pieces_state = Arc::new(PiecesState::new(pieces_map, "bitfield_path"));
 
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
         actor
@@ -622,7 +619,7 @@ mod test {
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
-        let pieces_state = Arc::new(PiecesState::new(pieces_map));
+        let pieces_state = Arc::new(PiecesState::new(pieces_map, "bitfield_path"));
 
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
 
@@ -654,7 +651,7 @@ mod test {
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
-        let pieces_state = Arc::new(PiecesState::new(pieces_map));
+        let pieces_state = Arc::new(PiecesState::new(pieces_map, "bitfield_path"));
 
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
 
@@ -725,7 +722,7 @@ mod test {
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
-        let pieces_state = Arc::new(PiecesState::new(pieces_map));
+        let pieces_state = Arc::new(PiecesState::new(pieces_map, "bitfield_path"));
 
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
 
@@ -787,7 +784,7 @@ mod test {
 
         // Create a PiecesState
         let pieces_map = HashMap::new();
-        let pieces_state = Arc::new(PiecesState::new(pieces_map));
+        let pieces_state = Arc::new(PiecesState::new(pieces_map, "bitfield_path"));
 
         // Set up mpsc channels
         let (client_tx, mut client_rx) = mpsc::channel(10);
@@ -822,7 +819,7 @@ mod test {
         let client_tx = mpsc::channel(10).0;
         let disk_tx = mpsc::channel(10).0;
         let pieces_map = HashMap::new();
-        let pieces_state = Arc::new(PiecesState::new(pieces_map));
+        let pieces_state = Arc::new(PiecesState::new(pieces_map, "bitfield_path"));
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
 
         // Pre-fill the pieces queue with the dummy piece
@@ -872,7 +869,7 @@ mod test {
         let client_tx = mpsc::channel(10).0;
         let disk_tx = mpsc::channel(10).0;
         let pieces_map = HashMap::new();
-        let pieces_state = Arc::new(PiecesState::new(pieces_map));
+        let pieces_state = Arc::new(PiecesState::new(pieces_map, "bitfield_path"));
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
 
         // Request blocks starting from offset 0

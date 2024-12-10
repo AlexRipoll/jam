@@ -11,6 +11,7 @@ use tracing::{debug, error, info, trace, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 use tracker::get;
 
+pub mod bitfield;
 pub mod client;
 pub mod metainfo;
 mod p2p;
@@ -24,7 +25,7 @@ async fn main() -> io::Result<()> {
     let subscriber = builder
         // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
         // will be written to stdout.
-        .with_max_level(Level::DEBUG)
+        .with_max_level(Level::INFO)
         .with_thread_names(true)
         .with_target(true)
         // completes the builder.
@@ -99,6 +100,7 @@ async fn main() -> io::Result<()> {
 
     // config data
     let download_path = "./downloads".to_string();
+    let torrent_path = "./downloads".to_string();
     let piece_standard_size = 16384;
     let max_peer_connections: usize = 2;
     let timeout_duration = 3;
@@ -116,6 +118,7 @@ async fn main() -> io::Result<()> {
     info!("Initializing client...");
     let client = Client::new(
         download_path,
+        torrent_path,
         metainfo.info.name,
         metainfo.info.length.unwrap(),
         piece_standard_size,
