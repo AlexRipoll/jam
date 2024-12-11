@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     io,
     sync::Arc,
     time::Duration,
@@ -106,12 +106,13 @@ impl Client {
 
         // Semaphore to enforce 4 active peer sessions
         let active_sessions = Arc::new(Semaphore::new(self.max_peer_connections));
-        let peers = Arc::new(Mutex::new(self.peers.clone()));
+        // let peers = Arc::new(Mutex::new(self.peers.clone()));
+        let peers_queue = Arc::new(Mutex::new(VecDeque::from(self.peers.clone())));
 
         // Spawn tasks for peer connections
-        for i in 0..self.peers.len() {
+        for i in 0..self.max_peer_connections {
             let active_sessions = Arc::clone(&active_sessions);
-            let peers = Arc::clone(&peers);
+            let peers_queue = Arc::clone(&peers_queue);
             let client_tx = client_tx.clone();
             let disk_tx = disk_tx.clone();
             let peer_id = self.peer_id;
@@ -128,36 +129,39 @@ impl Client {
                     debug!(peer_index = i, "Peer connection task started");
 
                     loop {
-                        // Get a peer from the list
-                        let peer_address = {
-                            let mut peers = peers.lock().await;
-                            if let Some(peer) = peers.pop() {
-                                peer.address().to_string()
-                            } else {
-                                warn!(peer_index = i, "No more peers available");
-                                break; // No more peers available
-                            }
+                        let peer = {
+                            let mut queue = peers_queue.lock().await;
+                            queue.pop_front()
                         };
 
-                        // Try to initialize the peer session
-                        match init_peer_session(
-                            &peer_address,
-                            info_hash,
-                            peer_id,
-                            client_tx.clone(),
-                            disk_tx.clone(),
-                            Arc::clone(&pieces_state),
-                            timeout_duration,
-                            connection_retries,
-                        )
-                        .await
-                        {
-                            Ok(_) => {
-                                info!(peer_index = i, peer_address = %peer_address, "Peer session initialized successfully");
-                                break;
+                        match peer {
+                            Some(peer) => {
+                                // Try to initialize the peer session
+                                match init_peer_session(
+                                    &peer.address().to_string(),
+                                    info_hash,
+                                    peer_id,
+                                    client_tx.clone(),
+                                    disk_tx.clone(),
+                                    Arc::clone(&pieces_state),
+                                    timeout_duration,
+                                    connection_retries,
+                                )
+                                .await
+                                {
+                                    Ok(_) => {
+                                        info!(worker_index = i, peer_address = %peer.address(), "Peer session initialized successfully");
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        error!(worker_index = i, peer_address = %peer.address(), error = %e, "Error initializing peer session");
+                                    }
+                                }
                             }
-                            Err(e) => {
-                                error!(peer_index = i, peer_address = %peer_address, error = %e, "Error initializing peer session");
+                            None => {
+                                // No more peers left in the queue
+                                debug!(worker_index = i, "No more peers available, exiting");
+                                break;
                             }
                         }
                     }
