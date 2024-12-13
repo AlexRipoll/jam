@@ -8,7 +8,7 @@ use std::{
 use tokio::{
     io::AsyncWriteExt,
     net::TcpStream,
-    sync::{broadcast, mpsc, watch, Mutex, Semaphore},
+    sync::{broadcast, mpsc, Mutex},
     time::timeout,
 };
 use tracing::{debug, error, info, trace, warn};
@@ -104,14 +104,11 @@ impl Client {
         });
         task_handles.push(bitfield_task);
 
-        // Semaphore to enforce 4 active peer sessions
-        let active_sessions = Arc::new(Semaphore::new(self.max_peer_connections));
         // let peers = Arc::new(Mutex::new(self.peers.clone()));
         let peers_queue = Arc::new(Mutex::new(VecDeque::from(self.peers.clone())));
 
         // Spawn tasks for peer connections
         for i in 0..self.max_peer_connections {
-            let active_sessions = Arc::clone(&active_sessions);
             let peers_queue = Arc::clone(&peers_queue);
             let client_tx = client_tx.clone();
             let disk_tx = disk_tx.clone();
@@ -124,8 +121,6 @@ impl Client {
                 let peer_span = tracing::info_span!("peer_connection", peer_index = i);
                 async move {
                     let _enter = peer_span.enter();
-                    // Acquire a permit to ensure concurrency limit
-                    let _permit = active_sessions.acquire().await;
                     debug!(peer_index = i, "Peer connection task started");
 
                     loop {
@@ -150,8 +145,7 @@ impl Client {
                                 .await
                                 {
                                     Ok(_) => {
-                                        info!(worker_index = i, peer_address = %peer.address(), "Peer session initialized successfully");
-                                        break;
+                                        info!(worker_index = i, peer_address = %peer.address(),  "Peer session completed");
                                     }
                                     Err(e) => {
                                         error!(worker_index = i, peer_address = %peer.address(), error = %e, "Error initializing peer session");
@@ -539,7 +533,6 @@ async fn init_peer_session(
             tracing::error!(peer_addr, error = ?e, "Peer connection task error");
         }
     }
-    tracing::info!(peer_addr, "Peer session completed");
 
     Ok(())
 }
