@@ -1,9 +1,8 @@
-use sha1::{Digest, Sha1};
-use std::{fs::File, io};
+use std::io;
 
 #[derive(Debug)]
 pub struct TorrentBitfield {
-    bytes: Vec<u8>,        // In-memory bitfield
+    pub bytes: Vec<u8>,    // In-memory bitfield
     num_pieces: usize,     // Total number of pieces
     bitfield_file: String, // Path to the persisted bitfield file
 }

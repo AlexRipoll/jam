@@ -517,6 +517,17 @@ async fn init_peer_session(
                             }
                         }
                     } => {}
+                    // Check if the work is complete
+                    _ = async {
+                        let actor = actor.lock().await;
+                        if actor.is_complete().await {
+                            debug!(peer_addr = %peer_addr, "All pieces completed, sending shutdown signal");
+                            // Signal shutdown to all tasks
+                            let _ = shutdown_tx.send(());
+                        }
+                    } => {
+                        break;
+                    }
                     _ = shutdown_rx.recv() => {
                         debug!(peer_addr = %peer_addr, "Piece requester received shutdown signal");
                         break;

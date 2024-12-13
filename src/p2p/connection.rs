@@ -224,6 +224,23 @@ impl Actor {
         }
     }
 
+    pub async fn is_complete(&self) -> bool {
+        let current_bitfield = self
+            .pieces_state
+            .torrent_bitfield
+            .lock()
+            .await
+            .bytes
+            .clone();
+
+        self.state
+            .peer_bitfield
+            .bytes
+            .iter()
+            .zip(current_bitfield.iter())
+            .all(|(x, y)| x == y)
+    }
+
     pub async fn request(&mut self) -> Result<(), P2pError> {
         let (queue_starting_index, block_offset) = (0, 0);
 
