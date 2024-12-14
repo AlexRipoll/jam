@@ -7,9 +7,9 @@ use std::{collections::HashMap, usize};
 use tokio::io::{self, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
-use crate::client::PiecesState;
+use crate::client::DownloadState;
 use crate::p2p::message::{Bitfield, Message, MessageId, PiecePayload, TransferPayload};
 
 use super::piece::{Piece, PieceError};
@@ -23,7 +23,7 @@ pub struct Actor {
     io_wtx: mpsc::Sender<Message>,
     shutdown_tx: broadcast::Sender<()>,
     state: State,
-    pieces_state: Arc<PiecesState>,
+    download_state: Arc<DownloadState>,
 }
 
 #[derive(Debug)]
@@ -57,7 +57,7 @@ impl Actor {
         io_wtx: mpsc::Sender<Message>,
         disk_tx: mpsc::Sender<(Piece, Vec<u8>)>,
         shutdown_tx: broadcast::Sender<()>,
-        pieces_state: Arc<PiecesState>,
+        pieces_state: Arc<DownloadState>,
     ) -> Self {
         Self {
             client_tx,
@@ -65,14 +65,14 @@ impl Actor {
             io_wtx,
             shutdown_tx,
             state: State::default(),
-            pieces_state,
+            download_state: pieces_state,
         }
     }
 
     pub async fn ready_to_request(&self) -> bool {
         !self.state.is_choked
             && self.state.is_interested
-            && !self.pieces_state.queue.lock().await.is_empty()
+            && !self.download_state.pieces_queue.lock().await.is_empty()
     }
 
     pub async fn handle_message(&mut self, message: Message) -> Result<(), P2pError> {
@@ -119,7 +119,7 @@ impl Actor {
                 debug!(bitfield = ?bitfield, "Updated peer bitfield");
 
                 // check if peer has any piece we are interested in downloading
-                if self.pieces_state.has_missing_pieces(&bitfield).await {
+                if self.download_state.has_missing_pieces(&bitfield).await {
                     self.state.peer_bitfield = bitfield.clone();
                     self.client_tx.send(bitfield).await?;
 
@@ -214,7 +214,7 @@ impl Actor {
             }
 
             if let Some(piece) = self
-                .pieces_state
+                .download_state
                 .assign_piece(&self.state.peer_bitfield)
                 .await
             {
@@ -225,8 +225,12 @@ impl Actor {
     }
 
     pub async fn is_complete(&self) -> bool {
+        if self.state.peer_bitfield.bytes.is_empty() {
+            return false;
+        }
+
         let current_bitfield = self
-            .pieces_state
+            .download_state
             .torrent_bitfield
             .lock()
             .await
@@ -254,7 +258,9 @@ impl Actor {
             let piece = self.state.download_queue[i].clone();
             self.state
                 .pieces_status
-                .insert(piece.index() as usize, piece.clone());
+                .entry(piece.index() as usize)
+                .or_insert_with(|| piece.clone());
+
             self.request_from_offset(&piece, block_offset).await?;
         }
         debug!("Completed piece requests");
@@ -534,7 +540,7 @@ mod test {
     use std::{collections::HashMap, sync::Arc, time::Duration};
 
     use crate::{
-        client::PiecesState,
+        client::DownloadState,
         p2p::{
             connection::{client_version, generate_peer_id, Actor, P2pError},
             message::{Bitfield, Message, MessageId, PiecePayload, TransferPayload},
@@ -555,7 +561,7 @@ mod test {
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
-        let pieces_state = Arc::new(PiecesState::new(pieces_map, "bitfield_path"));
+        let pieces_state = Arc::new(DownloadState::new(pieces_map, "bitfield_path"));
 
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
 
@@ -566,8 +572,8 @@ mod test {
         actor.state.is_choked = false;
         actor.state.is_interested = true;
         actor
-            .pieces_state
-            .queue
+            .download_state
+            .pieces_queue
             .lock()
             .await
             .push(Piece::new(1, 512, [0u8; 20]));
@@ -582,7 +588,7 @@ mod test {
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
-        let pieces_state = Arc::new(PiecesState::new(pieces_map, "bitfield_path"));
+        let pieces_state = Arc::new(DownloadState::new(pieces_map, "bitfield_path"));
 
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
         actor
@@ -600,7 +606,7 @@ mod test {
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
-        let pieces_state = Arc::new(PiecesState::new(pieces_map, "bitfield_path"));
+        let pieces_state = Arc::new(DownloadState::new(pieces_map, "bitfield_path"));
 
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
         actor
@@ -618,7 +624,7 @@ mod test {
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
-        let pieces_state = Arc::new(PiecesState::new(pieces_map, "bitfield_path"));
+        let pieces_state = Arc::new(DownloadState::new(pieces_map, "bitfield_path"));
 
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
         actor
@@ -636,7 +642,7 @@ mod test {
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
-        let pieces_state = Arc::new(PiecesState::new(pieces_map, "bitfield_path"));
+        let pieces_state = Arc::new(DownloadState::new(pieces_map, "bitfield_path"));
 
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
 
@@ -661,14 +667,14 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_download_valid_piece() {
+    async fn test_handle_piece_message_valid_piece() {
         let (client_tx, mut client_rx) = mpsc::channel(10);
         let (io_wtx, mut io_rx) = mpsc::channel(10);
         let (disk_tx, mut disk_rx) = mpsc::channel(10);
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
-        let pieces_state = Arc::new(PiecesState::new(pieces_map, "bitfield_path"));
+        let pieces_state = Arc::new(DownloadState::new(pieces_map, "bitfield_path"));
 
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
 
@@ -732,14 +738,81 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_download_invalid_piece() {
+    async fn test_download_valid_piece() {
         let (client_tx, mut client_rx) = mpsc::channel(10);
         let (io_wtx, mut io_rx) = mpsc::channel(10);
         let (disk_tx, mut disk_rx) = mpsc::channel(10);
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
-        let pieces_state = Arc::new(PiecesState::new(pieces_map, "bitfield_path"));
+        let pieces_state = Arc::new(DownloadState::new(pieces_map, "bitfield_path"));
+
+        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
+
+        // Set up a valid piece (index 1, size 32KB, with a dummy hash)
+        let piece_index = 1;
+        let piece_size = 32 * 1024; // 32 KB
+        let piece_hash = [
+            169, 175, 32, 2, 79, 197, 5, 67, 22, 59, 107, 230, 111, 228, 102, 11, 226, 23, 15, 108,
+        ];
+        let piece = Piece::new(piece_index, piece_size, piece_hash);
+
+        // Simulate downloading blocks and adding them to the piece
+        let block_size = 16384; // 16 KB blocks
+        let block_0 = vec![0u8; block_size];
+        let block_1 = vec![1u8; block_size];
+
+        // Add the piece to the actor's state
+        actor
+            .state
+            .pieces_status
+            .insert(piece_index as usize, piece);
+
+        let payload = PiecePayload::new(piece_index, 0, block_0.clone()).serialize();
+        actor.download(Some(&payload)).await.unwrap();
+
+        let piece = actor
+            .state
+            .pieces_status
+            .get_mut(&(piece_index as usize))
+            .unwrap();
+
+        assert_eq!(piece.blocks[0], block_0.clone());
+        assert!(!piece.is_ready());
+        assert!(!piece.is_finalized());
+
+        let payload = PiecePayload::new(piece_index, 16384, block_1.clone()).serialize();
+        actor.download(Some(&payload)).await.unwrap();
+
+        let piece = actor
+            .state
+            .pieces_status
+            .get_mut(&(piece_index as usize))
+            .unwrap();
+
+        assert_eq!(piece.blocks[0], block_0.clone());
+        assert_eq!(piece.blocks[1], block_1.clone());
+        assert!(piece.is_ready());
+        assert!(piece.is_finalized());
+
+        // Verify that the disk_tx received the piece
+        if let Some((received_piece, assembled_blocks)) = disk_rx.recv().await {
+            assert_eq!(received_piece.index(), piece_index);
+            assert_eq!(assembled_blocks, vec![block_0, block_1].concat());
+        } else {
+            panic!("Expected disk_tx to receive the finalized piece, but none was received");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_piece_message_invalid_piece() {
+        let (client_tx, mut client_rx) = mpsc::channel(10);
+        let (io_wtx, mut io_rx) = mpsc::channel(10);
+        let (disk_tx, mut disk_rx) = mpsc::channel(10);
+        let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
+
+        let pieces_map = HashMap::new();
+        let pieces_state = Arc::new(DownloadState::new(pieces_map, "bitfield_path"));
 
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
 
@@ -801,7 +874,7 @@ mod test {
 
         // Create a PiecesState
         let pieces_map = HashMap::new();
-        let pieces_state = Arc::new(PiecesState::new(pieces_map, "bitfield_path"));
+        let pieces_state = Arc::new(DownloadState::new(pieces_map, "bitfield_path"));
 
         // Set up mpsc channels
         let (client_tx, mut client_rx) = mpsc::channel(10);
@@ -836,7 +909,7 @@ mod test {
         let client_tx = mpsc::channel(10).0;
         let disk_tx = mpsc::channel(10).0;
         let pieces_map = HashMap::new();
-        let pieces_state = Arc::new(PiecesState::new(pieces_map, "bitfield_path"));
+        let pieces_state = Arc::new(DownloadState::new(pieces_map, "bitfield_path"));
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
 
         // Pre-fill the pieces queue with the dummy piece
@@ -886,7 +959,7 @@ mod test {
         let client_tx = mpsc::channel(10).0;
         let disk_tx = mpsc::channel(10).0;
         let pieces_map = HashMap::new();
-        let pieces_state = Arc::new(PiecesState::new(pieces_map, "bitfield_path"));
+        let pieces_state = Arc::new(DownloadState::new(pieces_map, "bitfield_path"));
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
 
         // Request blocks starting from offset 0

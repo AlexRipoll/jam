@@ -5,7 +5,7 @@ pub struct Piece {
     index: u32,
     size: usize,
     hash: [u8; 20],
-    blocks: Vec<Vec<u8>>,
+    pub blocks: Vec<Vec<u8>>,
     is_finalized: bool,
 }
 

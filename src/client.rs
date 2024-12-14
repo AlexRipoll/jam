@@ -14,7 +14,7 @@ use tokio::{
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
-    bitfield::TorrentBitfield,
+    bitfield::{self, TorrentBitfield},
     p2p::{
         connection::{self, Actor},
         io::{read_message, send_message},
@@ -34,7 +34,7 @@ pub struct Client {
     peer_id: [u8; 20],
     peers: Vec<Peer>,
     max_peer_connections: usize,
-    pieces_state: Arc<PiecesState>,
+    pieces_state: Arc<DownloadState>,
     // TODO: move to config
     timeout_duration: u64,
     connection_retries: u32,
@@ -63,7 +63,7 @@ impl Client {
             peer_id,
             peers,
             max_peer_connections: peer_total,
-            pieces_state: Arc::new(PiecesState::new(pieces, &bitfield_path)),
+            pieces_state: Arc::new(DownloadState::new(pieces, &bitfield_path)),
             timeout_duration,
             connection_retries,
         }
@@ -124,6 +124,11 @@ impl Client {
                     debug!(peer_index = i, "Peer connection task started");
 
                     loop {
+                        // check if all pieces are downloaded
+                        // if pieces_state.torrent_bitfield.lock().await.has_all_pieces() {
+                        //     break;
+                        // }
+
                         let peer = {
                             let mut queue = peers_queue.lock().await;
                             queue.pop_front()
@@ -222,15 +227,15 @@ impl Client {
 }
 
 #[derive(Debug)]
-pub struct PiecesState {
+pub struct DownloadState {
     pub pieces_map: HashMap<u32, Piece>,
     pub torrent_bitfield: Mutex<TorrentBitfield>,
     pub bitfield_rarity_map: Mutex<HashMap<u32, u16>>, // piece index -> piece count in bitfields
-    pub queue: Mutex<Vec<Piece>>,
-    pub assigned: Mutex<HashSet<Piece>>,
+    pub pieces_queue: Mutex<Vec<Piece>>,
+    pub assigned_pieces: Mutex<HashSet<Piece>>,
 }
 
-impl PiecesState {
+impl DownloadState {
     pub fn new(pieces_map: HashMap<u32, Piece>, bitfield_path: &str) -> Self {
         let pieces_amount = pieces_map.len();
         Self {
@@ -241,14 +246,14 @@ impl PiecesState {
                 bitfield_path,
             )),
             bitfield_rarity_map: Mutex::new(HashMap::new()),
-            queue: Mutex::new(Vec::new()),
-            assigned: Mutex::new(HashSet::new()),
+            pieces_queue: Mutex::new(Vec::new()),
+            assigned_pieces: Mutex::new(HashSet::new()),
         }
     }
 
     /// Add a new piece to the remaining queue
     pub async fn add_piece(&self, piece: Piece) {
-        let mut queue = self.queue.lock().await;
+        let mut queue = self.pieces_queue.lock().await;
         queue.push(piece);
     }
 
@@ -265,7 +270,7 @@ impl PiecesState {
     }
 
     pub async fn update_queue(&self) {
-        let mut queue = self.queue.lock().await;
+        let mut queue = self.pieces_queue.lock().await;
         // remaining.clear(); // Clear previous state
 
         // Sort pieces based on rarity in `bitfield_rariry_map`
@@ -300,8 +305,8 @@ impl PiecesState {
 
     /// Extract the rarest piece available for a peer
     pub async fn assign_piece(&self, peer_bitfield: &Bitfield) -> Option<Piece> {
-        let mut queue = self.queue.lock().await;
-        let mut assigned = self.assigned.lock().await;
+        let mut queue = self.pieces_queue.lock().await;
+        let mut assigned = self.assigned_pieces.lock().await;
 
         if let Some(pos) = queue.iter().position(|piece| {
             !assigned.contains(piece) && peer_bitfield.has_piece(piece.index() as usize)
@@ -316,7 +321,7 @@ impl PiecesState {
 
     /// Mark a piece as completed
     pub async fn complete_piece(&self, piece: Piece) {
-        let mut assigned = self.assigned.lock().await;
+        let mut assigned = self.assigned_pieces.lock().await;
         assigned.remove(&piece);
     }
 }
@@ -362,7 +367,7 @@ async fn init_peer_session(
     peer_id: [u8; 20],
     client_tx: mpsc::Sender<Bitfield>,
     disk_tx: mpsc::Sender<(Piece, Vec<u8>)>,
-    pieces_state: Arc<PiecesState>,
+    pieces_state: Arc<DownloadState>,
     // TODO: move to config
     timeout_duration: u64,
     connection_retries: u32,
@@ -518,16 +523,16 @@ async fn init_peer_session(
                         }
                     } => {}
                     // Check if the work is complete
-                    _ = async {
-                        let actor = actor.lock().await;
-                        if actor.is_complete().await {
-                            debug!(peer_addr = %peer_addr, "All pieces completed, sending shutdown signal");
-                            // Signal shutdown to all tasks
-                            let _ = shutdown_tx.send(());
-                        }
-                    } => {
-                        break;
-                    }
+                    // _ = async {
+                    //     let actor = actor.lock().await;
+                    //     if actor.is_complete().await {
+                    //         debug!(peer_addr = %peer_addr, "All pieces completed, sending shutdown signal");
+                    //         // Signal shutdown to all tasks
+                    //         let _ = shutdown_tx.send(());
+                    //     }
+                    // } => {
+                    //     break;
+                    // }
                     _ = shutdown_rx.recv() => {
                         debug!(peer_addr = %peer_addr, "Piece requester received shutdown signal");
                         break;
@@ -553,7 +558,7 @@ mod test {
     use std::collections::HashMap;
 
     use crate::{
-        client::PiecesState,
+        client::DownloadState,
         p2p::{message::Bitfield, piece::Piece},
     };
 
@@ -570,7 +575,7 @@ mod test {
         pieces_map.insert(7, Piece::new(7, 16384, [0u8; 20]));
 
         // Create a PiecesState instance
-        let pieces_state = PiecesState::new(pieces_map, "torrent_path");
+        let pieces_state = DownloadState::new(pieces_map, "torrent_path");
 
         // Add bitfield with pieces 0, 2 and 5 available
         let bitfield = Bitfield::new(&[0b10100100]); // Bits 0, 2 and 5 are set
@@ -601,7 +606,7 @@ mod test {
         pieces_map.insert(7, Piece::new(7, 16384, [0u8; 20]));
 
         // Create a PiecesState instance
-        let pieces_state = PiecesState::new(pieces_map, "torrent_path");
+        let pieces_state = DownloadState::new(pieces_map, "torrent_path");
 
         // Add bitfield with pieces 0, 2 and 5 available
         let bitfield = Bitfield::new(&[0b10100100]); // Bits 0, 2 and 5 are set
