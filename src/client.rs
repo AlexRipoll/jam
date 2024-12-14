@@ -14,7 +14,7 @@ use tokio::{
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
-    bitfield::{self, TorrentBitfield},
+    bitfield::TorrentBitfield,
     p2p::{
         connection::{self, Actor},
         io::{read_message, send_message},
@@ -34,7 +34,7 @@ pub struct Client {
     peer_id: [u8; 20],
     peers: Vec<Peer>,
     max_peer_connections: usize,
-    pieces_state: Arc<DownloadState>,
+    download_state: Arc<DownloadState>,
     // TODO: move to config
     timeout_duration: u64,
     connection_retries: u32,
@@ -63,7 +63,7 @@ impl Client {
             peer_id,
             peers,
             max_peer_connections: peer_total,
-            pieces_state: Arc::new(DownloadState::new(pieces, &bitfield_path)),
+            download_state: Arc::new(DownloadState::new(pieces, &bitfield_path)),
             timeout_duration,
             connection_retries,
         }
@@ -72,6 +72,7 @@ impl Client {
     pub async fn run(self, info_hash: [u8; 20]) -> io::Result<()> {
         let (client_tx, client_rx) = mpsc::channel(50);
         let (disk_tx, disk_rx) = mpsc::channel(50);
+        let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         // Vector to keep track of task handles
         let mut task_handles = Vec::new();
@@ -80,26 +81,33 @@ impl Client {
         let _enter = client_span.enter();
 
         // Bitfield receiver task
-        let pieces_state = Arc::clone(&self.pieces_state);
+        let download_state = Arc::clone(&self.download_state);
         let bitfield_task = tokio::spawn({
             let bitfield_span = tracing::info_span!("bitfield_listener");
+            let mut shutdown_rx = shutdown_tx.subscribe();
             async move {
                 let _enter = bitfield_span.enter();
                 debug!("Bitfield receiver task initialized");
 
                 let mut receiver = client_rx;
 
-                while let Some(bitfield) = receiver.recv().await {
-                    trace!("Bitfield received: {:?}", bitfield);
-                    pieces_state.add_bitfield_rarity(bitfield).await;
+                loop {
+                    tokio::select! {
+                        Some(bitfield) = receiver.recv() => {
+                            trace!("Bitfield received: {:?}", bitfield);
+                            download_state.add_bitfield_rarity(bitfield).await;
 
-                    if pieces_state.bitfield_rarity_map.lock().await.len() >= 3 {
-                        debug!("Updating remaining pieces state...");
-                        pieces_state.update_queue().await;
+                            if download_state.bitfield_rarity_map.lock().await.len() >= 3 {
+                                debug!("Updating remaining pieces state...");
+                                download_state.update_queue().await;
+                            }
+                        }
+                        _ = shutdown_rx.recv() => {
+                            info!("Bitfield receiver task shutting down");
+                            break;
+                        }
                     }
                 }
-
-                info!("Bitfield receiver task shutting down");
             }
         });
         task_handles.push(bitfield_task);
@@ -113,9 +121,11 @@ impl Client {
             let client_tx = client_tx.clone();
             let disk_tx = disk_tx.clone();
             let peer_id = self.peer_id;
-            let pieces_state = Arc::clone(&self.pieces_state);
+            let download_state = Arc::clone(&self.download_state);
             let timeout_duration = self.timeout_duration;
             let connection_retries = self.connection_retries;
+            let shutdown_tx = shutdown_tx.clone();
+            let mut shutdown_rx = shutdown_tx.subscribe();
 
             let peer_task = tokio::spawn({
                 let peer_span = tracing::info_span!("peer_connection", peer_index = i);
@@ -124,42 +134,44 @@ impl Client {
                     debug!(peer_index = i, "Peer connection task started");
 
                     loop {
-                        // check if all pieces are downloaded
-                        // if pieces_state.torrent_bitfield.lock().await.has_all_pieces() {
-                        //     break;
-                        // }
+                        tokio::select! {
+                            _ = async {
+                            // check if all pieces are downloaded
+                                if download_state.torrent_bitfield.lock().await.has_all_pieces() {
+                                    let _ = shutdown_tx.send(()); // Send shutdown signal
+                                }
+                                let peer = {
+                                    let mut queue = peers_queue.lock().await;
+                                    queue.pop_front()
+                                };
 
-                        let peer = {
-                            let mut queue = peers_queue.lock().await;
-                            queue.pop_front()
-                        };
-
-                        match peer {
-                            Some(peer) => {
-                                // Try to initialize the peer session
-                                match init_peer_session(
-                                    &peer.address().to_string(),
-                                    info_hash,
-                                    peer_id,
-                                    client_tx.clone(),
-                                    disk_tx.clone(),
-                                    Arc::clone(&pieces_state),
-                                    timeout_duration,
-                                    connection_retries,
-                                )
-                                .await
-                                {
-                                    Ok(_) => {
-                                        info!(worker_index = i, peer_address = %peer.address(),  "Peer session completed");
+                                match peer {
+                                    Some(peer) => {
+                                        match init_peer_session(
+                                            &peer.address().to_string(),
+                                            info_hash,
+                                            peer_id,
+                                            client_tx.clone(),
+                                            disk_tx.clone(),
+                                            Arc::clone(&download_state),
+                                            timeout_duration,
+                                            connection_retries,
+                                        ).await {
+                                            Ok(_) => {
+                                                info!(worker_index = i, peer_address = %peer.address(),  "Peer session completed");
+                                            }
+                                            Err(e) => {
+                                                error!(worker_index = i, peer_address = %peer.address(), error = %e, "Error initializing peer session");
+                                            }
+                                        }
                                     }
-                                    Err(e) => {
-                                        error!(worker_index = i, peer_address = %peer.address(), error = %e, "Error initializing peer session");
+                                    None => {
+                                        debug!(worker_index = i, "No more peers available, exiting");
                                     }
                                 }
-                            }
-                            None => {
-                                // No more peers left in the queue
-                                debug!(worker_index = i, "No more peers available, exiting");
+                            } => {}
+                            _ = shutdown_rx.recv() => {
+                                debug!(worker_index = i, "Peer connection task shutting down");
                                 break;
                             }
                         }
@@ -173,6 +185,7 @@ impl Client {
         let disk_wirter = Writer::new(&format!("{}/{}", &self.download_path, &self.file_name))?;
         let file_size = self.file_size;
         let piece_standard_size = self.piece_standard_size;
+        let mut shutdown_rx = shutdown_tx.subscribe();
 
         let disk_task = tokio::spawn({
             let disk_span = tracing::info_span!("disk_writer");
@@ -180,37 +193,43 @@ impl Client {
                 let _enter = disk_span.enter();
                 debug!("Disk writer task initialized");
                 let mut receiver = disk_rx;
-                while let Some((piece, assembled_piece)) = receiver.recv().await {
-                    let piece_index = piece.index();
-                    trace!(
-                        piece_index = piece.index(),
-                        "Received piece for writing to disk"
-                    );
-                    match disk_wirter.write_piece_to_disk(
-                        piece,
-                        file_size,
-                        piece_standard_size,
-                        &assembled_piece,
-                    ) {
-                        Ok(_) => {
-                            debug!(
-                                piece_index = piece_index,
-                                "Piece written to disk successfully"
+
+                loop {
+                    tokio::select! {
+                        Some((piece, assembled_piece)) = receiver.recv() => {
+                            let piece_index = piece.index();
+                            trace!(
+                                piece_index = piece.index(),
+                                "Received piece for writing to disk"
                             );
-                            // Update torrent_bitfield
-                            {
-                                let mut bitfield = self.pieces_state.torrent_bitfield.lock().await;
-                                bitfield.set_piece(piece_index as usize);
+                            match disk_wirter.write_piece_to_disk(
+                                piece,
+                                file_size,
+                                piece_standard_size,
+                                &assembled_piece,
+                            ) {
+                                Ok(_) => {
+                                    debug!(
+                                        piece_index = piece_index,
+                                        "Piece written to disk successfully"
+                                    );
+                                    let mut bitfield = self.download_state.torrent_bitfield.lock().await;
+                                    bitfield.set_piece(piece_index as usize);
+                                    debug!(piece_index = piece_index, "Bitfield piece index updated");
+                                }
+                                Err(e) => {
+                                    error!(piece_index = piece_index, error = %e, "Error writing piece to disk")
+                                }
                             }
-                            debug!(piece_index = piece_index, "Bitfield piece index updated");
                         }
-                        Err(e) => {
-                            error!(piece_index = piece_index, error = %e, "Error writing piece to disk")
+                        _ = shutdown_rx.recv() => {
+                            debug!("Disk writer task shutting down");
+                            break;
                         }
                     }
                 }
 
-                info!("Disk writer task shutting down");
+                info!("Disk writer task completed");
             }
         });
         task_handles.push(disk_task);
@@ -367,7 +386,7 @@ async fn init_peer_session(
     peer_id: [u8; 20],
     client_tx: mpsc::Sender<Bitfield>,
     disk_tx: mpsc::Sender<(Piece, Vec<u8>)>,
-    pieces_state: Arc<DownloadState>,
+    download_state: Arc<DownloadState>,
     // TODO: move to config
     timeout_duration: u64,
     connection_retries: u32,
@@ -407,7 +426,7 @@ async fn init_peer_session(
         io_wtx,
         disk_tx,
         shutdown_tx.clone(),
-        pieces_state,
+        download_state,
     )));
 
     // Reader task
@@ -569,11 +588,11 @@ mod test {
         pieces_map.insert(7, Piece::new(7, 16384, [0u8; 20]));
 
         // Create a PiecesState instance
-        let pieces_state = DownloadState::new(pieces_map, "torrent_path");
+        let download_state = DownloadState::new(pieces_map, "torrent_path");
 
         // Add bitfield with pieces 0, 2 and 5 available
         let bitfield = Bitfield::new(&[0b10100100]); // Bits 0, 2 and 5 are set
-        let mut client_bitfield = pieces_state.torrent_bitfield.lock().await;
+        let mut client_bitfield = download_state.torrent_bitfield.lock().await;
         client_bitfield.set_piece(0);
         client_bitfield.set_piece(2);
         client_bitfield.set_piece(5);
@@ -581,7 +600,7 @@ mod test {
 
         // check if new bitfield has pieces the rarity map does not have (in this case piece 5 is missing)
         let bitfield = Bitfield::new(&[0b10101100]); // Bits 0, 2, 4 and 5 are set
-        let result = pieces_state.has_missing_pieces(&bitfield).await;
+        let result = download_state.has_missing_pieces(&bitfield).await;
 
         // Assert that piece 4 is missing since it is marked in the bitfield but not in the rarity_map
         assert!(result);
@@ -600,11 +619,11 @@ mod test {
         pieces_map.insert(7, Piece::new(7, 16384, [0u8; 20]));
 
         // Create a PiecesState instance
-        let pieces_state = DownloadState::new(pieces_map, "torrent_path");
+        let download_state = DownloadState::new(pieces_map, "torrent_path");
 
         // Add bitfield with pieces 0, 2 and 5 available
         let bitfield = Bitfield::new(&[0b10100100]); // Bits 0, 2 and 5 are set
-        let mut client_bitfield = pieces_state.torrent_bitfield.lock().await;
+        let mut client_bitfield = download_state.torrent_bitfield.lock().await;
         client_bitfield.set_piece(0);
         client_bitfield.set_piece(2);
         client_bitfield.set_piece(5);
@@ -612,7 +631,7 @@ mod test {
 
         // check if new bitfield has pieces the rarity map does not have
         let bitfield = Bitfield::new(&[0b10000100]); // Bits 0 and 5 are set
-        let result = pieces_state.has_missing_pieces(&bitfield).await;
+        let result = download_state.has_missing_pieces(&bitfield).await;
 
         // Assert that no new pieces are found in this bitfield
         assert!(!result);
