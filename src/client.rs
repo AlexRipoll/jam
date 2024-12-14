@@ -521,18 +521,12 @@ async fn init_peer_session(
                                 error!(peer_addr = %peer_addr, error = %e, "Piece request error");
                             }
                         }
+                        // Check if the client has all the peer pieces
+                        if actor.is_complete().await {
+                            debug!(peer_addr = %peer_addr, "All pieces downloaded. Sending shutdown signal...");
+                            let _ = shutdown_tx.send(()); // Send shutdown signal
+                        }
                     } => {}
-                    // Check if the work is complete
-                    // _ = async {
-                    //     let actor = actor.lock().await;
-                    //     if actor.is_complete().await {
-                    //         debug!(peer_addr = %peer_addr, "All pieces completed, sending shutdown signal");
-                    //         // Signal shutdown to all tasks
-                    //         let _ = shutdown_tx.send(());
-                    //     }
-                    // } => {
-                    //     break;
-                    // }
                     _ = shutdown_rx.recv() => {
                         debug!(peer_addr = %peer_addr, "Piece requester received shutdown signal");
                         break;
