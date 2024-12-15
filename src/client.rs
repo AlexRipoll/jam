@@ -14,11 +14,11 @@ use tokio::{
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
-    bitfield::TorrentBitfield,
+    bitfield::Bitfield,
     p2p::{
         connection::{self, Actor},
         io::{read_message, send_message},
-        message::{Bitfield, Message},
+        message::Message,
         piece::Piece,
     },
     store::Writer,
@@ -63,7 +63,7 @@ impl Client {
             peer_id,
             peers,
             max_peer_connections: peer_total,
-            download_state: Arc::new(DownloadState::new(pieces, &bitfield_path)),
+            download_state: Arc::new(DownloadState::new(pieces)),
             timeout_duration,
             connection_retries,
         }
@@ -248,22 +248,18 @@ impl Client {
 #[derive(Debug)]
 pub struct DownloadState {
     pub pieces_map: HashMap<u32, Piece>,
-    pub torrent_bitfield: Mutex<TorrentBitfield>,
+    pub torrent_bitfield: Mutex<Bitfield>,
     pub bitfield_rarity_map: Mutex<HashMap<u32, u16>>, // piece index -> piece count in bitfields
     pub pieces_queue: Mutex<Vec<Piece>>,
     pub assigned_pieces: Mutex<HashSet<Piece>>,
 }
 
 impl DownloadState {
-    pub fn new(pieces_map: HashMap<u32, Piece>, bitfield_path: &str) -> Self {
+    pub fn new(pieces_map: HashMap<u32, Piece>) -> Self {
         let pieces_amount = pieces_map.len();
         Self {
             pieces_map,
-            torrent_bitfield: Mutex::new(TorrentBitfield::new(
-                pieces_amount,
-                // FIX: bad design
-                bitfield_path,
-            )),
+            torrent_bitfield: Mutex::new(Bitfield::from_empty(pieces_amount)),
             bitfield_rarity_map: Mutex::new(HashMap::new()),
             pieces_queue: Mutex::new(Vec::new()),
             assigned_pieces: Mutex::new(HashSet::new()),
@@ -570,10 +566,7 @@ async fn init_peer_session(
 mod test {
     use std::collections::HashMap;
 
-    use crate::{
-        client::DownloadState,
-        p2p::{message::Bitfield, piece::Piece},
-    };
+    use crate::{bitfield::Bitfield, client::DownloadState, p2p::piece::Piece};
 
     #[tokio::test]
     async fn test_has_missing_pieces() {
@@ -588,7 +581,7 @@ mod test {
         pieces_map.insert(7, Piece::new(7, 16384, [0u8; 20]));
 
         // Create a PiecesState instance
-        let download_state = DownloadState::new(pieces_map, "torrent_path");
+        let download_state = DownloadState::new(pieces_map);
 
         // Add bitfield with pieces 0, 2 and 5 available
         let bitfield = Bitfield::new(&[0b10100100]); // Bits 0, 2 and 5 are set
@@ -619,7 +612,7 @@ mod test {
         pieces_map.insert(7, Piece::new(7, 16384, [0u8; 20]));
 
         // Create a PiecesState instance
-        let download_state = DownloadState::new(pieces_map, "torrent_path");
+        let download_state = DownloadState::new(pieces_map);
 
         // Add bitfield with pieces 0, 2 and 5 available
         let bitfield = Bitfield::new(&[0b10100100]); // Bits 0, 2 and 5 are set

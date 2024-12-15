@@ -96,39 +96,6 @@ impl Message {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Bitfield {
-    pub bytes: Vec<u8>,
-}
-
-impl Bitfield {
-    pub fn new(bitfield: &[u8]) -> Self {
-        Self {
-            bytes: bitfield.to_vec(),
-        }
-    }
-
-    pub fn has_piece(&self, index: usize) -> bool {
-        let byte_index = index / 8;
-        let bit_index = index % 8;
-
-        if byte_index >= self.bytes.len() {
-            return false;
-        }
-
-        (&self.bytes[byte_index] & (1 << (7 - bit_index))) != 0
-    }
-
-    pub fn set_piece(&mut self, index: usize) {
-        let byte_index = index / 8;
-        let bit_index = index % 8;
-
-        if byte_index < self.bytes.len() {
-            self.bytes[byte_index] |= 1 << (7 - bit_index);
-        }
-    }
-}
-
 // struct sued for Request and Cancel message payloads
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TransferPayload {
@@ -207,39 +174,7 @@ impl PiecePayload {
 
 #[cfg(test)]
 mod test {
-    use super::{Bitfield, Message};
-
-    #[test]
-    fn test_has_piece() {
-        let bitfield = Bitfield::new(&vec![0b0, 0b0, 0b00001000, 0b0]);
-        //check that it has the only piece available at index 20
-        assert!(bitfield.has_piece(20));
-    }
-
-    #[test]
-    fn test_has_piece_out_of_range() {
-        let bitfield = Bitfield::new(&vec![0b0, 0b0, 0b00001000, 0b0]);
-        // should return false when checking for a piece index out of range
-        assert!(!bitfield.has_piece(50));
-    }
-
-    #[test]
-    fn test_set_piece() {
-        let mut bitfield = Bitfield::new(&vec![0b0, 0b0, 0b0, 0b0]);
-        bitfield.set_piece(20);
-
-        assert_eq!(bitfield.bytes, vec![0b0, 0b0, 0b00001000, 0b0]);
-    }
-
-    #[test]
-    fn test_set_piece_out_of_range() {
-        let mut bitfield = Bitfield::new(&vec![0b0, 0b0, 0b0, 0b0]);
-        // out of range
-        bitfield.set_piece(50);
-
-        // no change in bitfield
-        assert_eq!(bitfield.bytes, vec![0b0, 0b0, 0b0, 0b0]);
-    }
+    use super::Message;
 
     #[test]
     fn test_bitfield_message_deserialize() {
