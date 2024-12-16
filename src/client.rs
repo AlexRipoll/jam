@@ -19,7 +19,7 @@ pub struct Client {
     piece_standard_size: u64,
     peer_id: [u8; 20],
     peers: Vec<Peer>,
-    max_peer_connections: usize,
+    max_peer_connections: u32,
     download_state: Arc<DownloadState>,
     // TODO: move to config
     timeout_duration: u64,
@@ -29,13 +29,12 @@ pub struct Client {
 impl Client {
     pub fn new(
         download_path: String,
-        bitfield_path: String,
         file_name: String,
         file_size: u64,
         piece_standard_size: u64,
         peer_id: [u8; 20],
         peers: Vec<Peer>,
-        peer_total: usize,
+        max_peer_connections: u32,
         pieces: HashMap<u32, Piece>,
         // TODO: move to config
         timeout_duration: u64,
@@ -48,7 +47,7 @@ impl Client {
             piece_standard_size,
             peer_id,
             peers,
-            max_peer_connections: peer_total,
+            max_peer_connections,
             download_state: Arc::new(DownloadState::new(pieces)),
             timeout_duration,
             connection_retries,

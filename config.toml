@@ -1,0 +1,8 @@
+[disk]
+download_path = "./downloads"
+
+[p2p]
+max_peer_connections = 2
+timeout_duration = 3
+connection_retries = 2
+piece_standard_size = 16384

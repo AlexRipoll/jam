@@ -5,6 +5,7 @@ use std::{
 };
 
 use client::Client;
+use config::Config;
 use metainfo::Metainfo;
 use p2p::{connection::generate_peer_id, piece::Piece};
 use tracing::{debug, error, info, trace, warn, Level};
@@ -13,6 +14,7 @@ use tracker::get;
 
 pub mod bitfield;
 pub mod client;
+pub mod config;
 pub mod metainfo;
 mod p2p;
 pub mod session;
@@ -99,14 +101,6 @@ async fn main() -> io::Result<()> {
     })?;
     info!(peer_count = peers.len(), "Successfully decoded peer list");
 
-    // config data
-    let download_path = "./downloads".to_string();
-    let torrent_path = "./downloads".to_string();
-    let piece_standard_size = 16384;
-    let max_peer_connections: usize = 2;
-    let timeout_duration = 3;
-    let connection_retries = 2;
-
     trace!("Creating piece map...");
     let mut pieces = HashMap::new();
 
@@ -116,10 +110,17 @@ async fn main() -> io::Result<()> {
         pieces.insert(index as u32, piece);
     }
 
+    trace!("Loading config...");
+    let config = Config::load().unwrap();
+    let download_path = config.disk.download_path;
+    let timeout_duration = config.p2p.timeout_duration;
+    let max_peer_connections = config.p2p.max_peer_connections;
+    let piece_standard_size = config.p2p.piece_standard_size;
+    let connection_retries = config.p2p.connection_retries;
+
     info!("Initializing client...");
     let client = Client::new(
         download_path,
-        torrent_path,
         metainfo.info.name,
         metainfo.info.length.unwrap(),
         piece_standard_size,
