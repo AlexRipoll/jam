@@ -11,6 +11,11 @@ use crate::{
     bitfield::Bitfield, p2p::piece::Piece, session::new_peer_session, store::Writer, tracker::Peer,
 };
 
+// Configuration constants
+const CLIENT_CHANNEL_BUFFER: usize = 50;
+const DISK_CHANNEL_BUFFER: usize = 50;
+const SHUTDOWN_CHANNEL_BUFFER: usize = 1;
+
 #[derive(Debug)]
 pub struct Client {
     download_path: String,
@@ -21,7 +26,6 @@ pub struct Client {
     peers: Vec<Peer>,
     max_peer_connections: u32,
     download_state: Arc<DownloadState>,
-    // TODO: move to config
     timeout_duration: u64,
     connection_retries: u32,
 }
@@ -36,7 +40,6 @@ impl Client {
         peers: Vec<Peer>,
         max_peer_connections: u32,
         pieces: HashMap<u32, Piece>,
-        // TODO: move to config
         timeout_duration: u64,
         connection_retries: u32,
     ) -> Self {
@@ -55,9 +58,9 @@ impl Client {
     }
 
     pub async fn run(self, info_hash: [u8; 20]) -> io::Result<()> {
-        let (client_tx, client_rx) = mpsc::channel(50);
-        let (disk_tx, disk_rx) = mpsc::channel(50);
-        let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
+        let (client_tx, client_rx) = mpsc::channel(CLIENT_CHANNEL_BUFFER);
+        let (disk_tx, disk_rx) = mpsc::channel(DISK_CHANNEL_BUFFER);
+        let (shutdown_tx, _) = broadcast::channel::<()>(SHUTDOWN_CHANNEL_BUFFER); // Shutdown signal
 
         // Vector to keep track of task handles
         let mut task_handles = Vec::new();
@@ -65,36 +68,13 @@ impl Client {
         let client_span = tracing::info_span!("client");
         let _enter = client_span.enter();
 
-        // Bitfield receiver task
         let download_state = Arc::clone(&self.download_state);
-        let bitfield_task = tokio::spawn({
-            let bitfield_span = tracing::info_span!("bitfield_listener");
-            let mut shutdown_rx = shutdown_tx.subscribe();
-            async move {
-                let _enter = bitfield_span.enter();
-                debug!("Bitfield receiver task initialized");
 
-                let mut receiver = client_rx;
-
-                loop {
-                    tokio::select! {
-                        Some(bitfield) = receiver.recv() => {
-                            trace!("Bitfield received: {:?}", bitfield);
-                            download_state.add_bitfield_rarity(bitfield).await;
-
-                            if download_state.bitfield_rarity_map.lock().await.len() >= 3 {
-                                debug!("Updating remaining pieces state...");
-                                download_state.update_queue().await;
-                            }
-                        }
-                        _ = shutdown_rx.recv() => {
-                            info!("Bitfield receiver task shutting down");
-                            break;
-                        }
-                    }
-                }
-            }
-        });
+        let bitfield_task = tokio::spawn(Client::bitfield_listener(
+            client_rx,
+            Arc::clone(&download_state),
+            shutdown_tx.subscribe(),
+        ));
         task_handles.push(bitfield_task);
 
         // let peers = Arc::new(Mutex::new(self.peers.clone()));
@@ -110,113 +90,37 @@ impl Client {
             let timeout_duration = self.timeout_duration;
             let connection_retries = self.connection_retries;
             let shutdown_tx = shutdown_tx.clone();
-            let mut shutdown_rx = shutdown_tx.subscribe();
 
-            let peer_task = tokio::spawn({
-                let peer_span = tracing::info_span!("peer_connection", peer_index = i);
-                async move {
-                    let _enter = peer_span.enter();
-                    debug!(peer_index = i, "Peer connection task started");
-
-                    loop {
-                        tokio::select! {
-                            _ = async {
-                            // check if all pieces are downloaded
-                                if download_state.torrent_bitfield.lock().await.has_all_pieces() {
-                                    let _ = shutdown_tx.send(()); // Send shutdown signal
-                                }
-                                let peer = {
-                                    let mut queue = peers_queue.lock().await;
-                                    queue.pop_front()
-                                };
-
-                                match peer {
-                                    Some(peer) => {
-                                        match new_peer_session(
-                                            &peer.address().to_string(),
-                                            info_hash,
-                                            peer_id,
-                                            client_tx.clone(),
-                                            disk_tx.clone(),
-                                            Arc::clone(&download_state),
-                                            timeout_duration,
-                                            connection_retries,
-                                        ).await {
-                                            Ok(_) => {
-                                                info!(worker_index = i, peer_address = %peer.address(),  "Peer session completed");
-                                            }
-                                            Err(e) => {
-                                                error!(worker_index = i, peer_address = %peer.address(), error = %e, "Error initializing peer session");
-                                            }
-                                        }
-                                    }
-                                    None => {
-                                        debug!(worker_index = i, "No more peers available, exiting");
-                                    }
-                                }
-                            } => {}
-                            _ = shutdown_rx.recv() => {
-                                debug!(worker_index = i, "Peer connection task shutting down");
-                                break;
-                            }
-                        }
-                    }
-                }
-            });
+            let peer_task = tokio::spawn(Client::run_peer_connection(
+                // TODO: generate peer id
+                i,
+                peers_queue,
+                client_tx,
+                disk_tx,
+                peer_id,
+                download_state,
+                info_hash,
+                timeout_duration,
+                connection_retries,
+                shutdown_tx,
+            ));
             task_handles.push(peer_task);
         }
 
         // Disk writer task
-        let disk_wirter = Writer::new(&format!("{}/{}", &self.download_path, &self.file_name))?;
+        let disk_writer = Writer::new(&format!("{}/{}", &self.download_path, &self.file_name))?;
         let file_size = self.file_size;
         let piece_standard_size = self.piece_standard_size;
-        let mut shutdown_rx = shutdown_tx.subscribe();
+        let shutdown_rx = shutdown_tx.subscribe();
 
-        let disk_task = tokio::spawn({
-            let disk_span = tracing::info_span!("disk_writer");
-            async move {
-                let _enter = disk_span.enter();
-                debug!("Disk writer task initialized");
-                let mut receiver = disk_rx;
-
-                loop {
-                    tokio::select! {
-                        Some((piece, assembled_piece)) = receiver.recv() => {
-                            let piece_index = piece.index();
-                            trace!(
-                                piece_index = piece.index(),
-                                "Received piece for writing to disk"
-                            );
-                            match disk_wirter.write_piece_to_disk(
-                                piece,
-                                file_size,
-                                piece_standard_size,
-                                &assembled_piece,
-                            ) {
-                                Ok(_) => {
-                                    debug!(
-                                        piece_index = piece_index,
-                                        "Piece written to disk successfully"
-                                    );
-                                    let mut bitfield = self.download_state.torrent_bitfield.lock().await;
-                                    bitfield.set_piece(piece_index as usize);
-                                    debug!(piece_index = piece_index, "Bitfield piece index updated");
-                                }
-                                Err(e) => {
-                                    error!(piece_index = piece_index, error = %e, "Error writing piece to disk")
-                                }
-                            }
-                        }
-                        _ = shutdown_rx.recv() => {
-                            debug!("Disk writer task shutting down");
-                            break;
-                        }
-                    }
-                }
-
-                info!("Disk writer task completed");
-            }
-        });
+        let disk_task = tokio::spawn(Client::disk_listener(
+            disk_rx,
+            disk_writer,
+            file_size,
+            piece_standard_size,
+            Arc::clone(&self.download_state),
+            shutdown_rx,
+        ));
         task_handles.push(disk_task);
 
         // Await tasks
@@ -227,6 +131,162 @@ impl Client {
         }
 
         Ok(())
+    }
+
+    async fn bitfield_listener(
+        mut receiver: mpsc::Receiver<Bitfield>,
+        download_state: Arc<DownloadState>,
+        mut shutdown_rx: broadcast::Receiver<()>,
+    ) {
+        let bitfield_span = tracing::info_span!("bitfield_listener");
+        let _enter = bitfield_span.enter();
+        debug!("Bitfield receiver task initialized");
+
+        loop {
+            tokio::select! {
+                Some(bitfield) = receiver.recv() => {
+                    trace!("Bitfield received: {:?}", bitfield);
+                    download_state.add_bitfield_rarity(bitfield).await;
+
+                    if download_state.bitfield_rarity_map.lock().await.len() >= 3 {
+                        debug!("Updating remaining pieces state...");
+                        download_state.update_queue().await;
+                    }
+                }
+                _ = shutdown_rx.recv() => {
+                    info!("Bitfield receiver task shutting down");
+                    break;
+                }
+            }
+        }
+    }
+
+    async fn run_peer_connection(
+        id: u32,
+        peers_queue: Arc<Mutex<VecDeque<Peer>>>,
+        client_tx: mpsc::Sender<Bitfield>,
+        disk_tx: mpsc::Sender<(Piece, Vec<u8>)>,
+        peer_id: [u8; 20],
+        download_state: Arc<DownloadState>,
+        info_hash: [u8; 20],
+        timeout_duration: u64,
+        connection_retries: u32,
+        // mut shutdown_rx: broadcast::Receiver<()>,
+        shutdown_tx: broadcast::Sender<()>,
+    ) {
+        let peer_span = tracing::info_span!("peer_connection", peer_id = id);
+        let _enter = peer_span.enter();
+        debug!(peer_id = id, "Peer connection task started");
+
+        let mut shutdown_rx = shutdown_tx.subscribe();
+        loop {
+            tokio::select! {
+                _ = async {
+                    // Check if all pieces are downloaded
+                    if download_state.torrent_bitfield.lock().await.has_all_pieces() {
+                        let _ = shutdown_tx.send(()); // Send shutdown signal
+                    }
+                    // Get a peer from the queue
+                    let peer = {
+                        let mut queue = peers_queue.lock().await;
+                        queue.pop_front()
+                    };
+
+                    match peer {
+                        Some(peer) => {
+                            match new_peer_session(
+                                &peer.address().to_string(),
+                                info_hash,
+                                peer_id,
+                                client_tx.clone(),
+                                disk_tx.clone(),
+                                Arc::clone(&download_state),
+                                timeout_duration,
+                                connection_retries,
+                            ).await {
+                                Ok(_) => {
+                                    info!(
+
+                                        peer_id = id,
+                                        peer_address = %peer.address(),
+                                        "Peer session completed"
+                                    );
+                                }
+                                Err(e) => {
+                                    error!(
+                                        peer_id = id,
+                                        peer_address = %peer.address(),
+                                        error = %e,
+                                        "Error initializing peer session"
+                                    );
+                                }
+                            }
+                        }
+                        None => {
+                            debug!(peer_id = id, "No more peers available, exiting");
+                        }
+                    }
+                } => {}
+                _ = shutdown_rx.recv() => {
+                    debug!(peer_id = id, "Peer connection task shutting down");
+                    break;
+                }
+            }
+        }
+    }
+
+    async fn disk_listener(
+        mut receiver: mpsc::Receiver<(Piece, Vec<u8>)>,
+        disk_writer: Writer,
+        file_size: u64,
+        piece_standard_size: u64,
+        download_state: Arc<DownloadState>,
+        mut shutdown_rx: broadcast::Receiver<()>,
+    ) {
+        let disk_span = tracing::info_span!("disk_writer");
+        let _enter = disk_span.enter();
+        debug!("Disk writer task initialized");
+
+        loop {
+            tokio::select! {
+                Some((piece, assembled_piece)) = receiver.recv() => {
+                    let piece_index = piece.index();
+                    trace!(
+                        piece_index = piece_index,
+                        "Received piece for writing to disk"
+                    );
+                    match disk_writer.write_piece_to_disk(
+                        piece,
+                        file_size,
+                        piece_standard_size,
+                        &assembled_piece,
+                    ) {
+                        Ok(_) => {
+                            debug!(
+                                piece_index = piece_index,
+                                "Piece written to disk successfully"
+                            );
+                            let mut bitfield = download_state.torrent_bitfield.lock().await;
+                            bitfield.set_piece(piece_index as usize);
+                            debug!(piece_index = piece_index, "Bitfield piece index updated");
+                        }
+                        Err(e) => {
+                            error!(
+                                piece_index = piece_index,
+                                error = %e,
+                                "Error writing piece to disk"
+                            );
+                        }
+                    }
+                }
+                _ = shutdown_rx.recv() => {
+                    debug!("Disk writer task shutting down");
+                    break;
+                }
+            }
+        }
+
+        info!("Disk writer task completed");
     }
 }
 
