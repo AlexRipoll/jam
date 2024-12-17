@@ -5,7 +5,7 @@ use std::{
 };
 
 use tokio::sync::{broadcast, mpsc, Mutex};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, trace};
 
 use crate::{
     bitfield::Bitfield, p2p::piece::Piece, session::new_peer_session, store::Writer, tracker::Peer,
@@ -68,6 +68,9 @@ impl Client {
         let client_span = tracing::info_span!("client");
         let _enter = client_span.enter();
 
+        let client_tx = Arc::new(client_tx);
+        let disk_tx = Arc::new(disk_tx);
+        let shutdown_tx = Arc::new(shutdown_tx);
         let download_state = Arc::clone(&self.download_state);
 
         let bitfield_task = tokio::spawn(Client::bitfield_listener(
@@ -77,19 +80,18 @@ impl Client {
         ));
         task_handles.push(bitfield_task);
 
-        // let peers = Arc::new(Mutex::new(self.peers.clone()));
         let peers_queue = Arc::new(Mutex::new(VecDeque::from(self.peers.clone())));
 
         // Spawn tasks for peer connections
         for i in 0..self.max_peer_connections {
             let peers_queue = Arc::clone(&peers_queue);
-            let client_tx = client_tx.clone();
-            let disk_tx = disk_tx.clone();
             let peer_id = self.peer_id;
             let download_state = Arc::clone(&self.download_state);
             let timeout_duration = self.timeout_duration;
             let connection_retries = self.connection_retries;
-            let shutdown_tx = shutdown_tx.clone();
+            let client_tx = Arc::clone(&client_tx);
+            let disk_tx = Arc::clone(&disk_tx);
+            let shutdown_tx = Arc::clone(&shutdown_tx);
 
             let peer_task = tokio::spawn(Client::run_peer_connection(
                 // TODO: generate peer id
@@ -164,15 +166,14 @@ impl Client {
     async fn run_peer_connection(
         id: u32,
         peers_queue: Arc<Mutex<VecDeque<Peer>>>,
-        client_tx: mpsc::Sender<Bitfield>,
-        disk_tx: mpsc::Sender<(Piece, Vec<u8>)>,
+        client_tx: Arc<mpsc::Sender<Bitfield>>,
+        disk_tx: Arc<mpsc::Sender<(Piece, Vec<u8>)>>,
         peer_id: [u8; 20],
         download_state: Arc<DownloadState>,
         info_hash: [u8; 20],
         timeout_duration: u64,
         connection_retries: u32,
-        // mut shutdown_rx: broadcast::Receiver<()>,
-        shutdown_tx: broadcast::Sender<()>,
+        shutdown_tx: Arc<broadcast::Sender<()>>,
     ) {
         let peer_span = tracing::info_span!("peer_connection", peer_id = id);
         let _enter = peer_span.enter();
@@ -198,8 +199,8 @@ impl Client {
                                 &peer.address().to_string(),
                                 info_hash,
                                 peer_id,
-                                client_tx.clone(),
-                                disk_tx.clone(),
+                                Arc::clone(&client_tx),
+                                Arc::clone(&disk_tx),
                                 Arc::clone(&download_state),
                                 timeout_duration,
                                 connection_retries,

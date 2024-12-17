@@ -23,8 +23,8 @@ pub async fn new_peer_session(
     peer_addr: &str,
     info_hash: [u8; 20],
     peer_id: [u8; 20],
-    client_tx: mpsc::Sender<Bitfield>,
-    disk_tx: mpsc::Sender<(Piece, Vec<u8>)>,
+    client_tx: Arc<mpsc::Sender<Bitfield>>,
+    disk_tx: Arc<mpsc::Sender<(Piece, Vec<u8>)>>,
     download_state: Arc<DownloadState>,
     // TODO: move to config
     timeout_duration: u64,

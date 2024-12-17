@@ -19,8 +19,8 @@ const PSTR: &str = "BitTorrent protocol";
 
 #[derive(Debug)]
 pub struct Actor {
-    client_tx: mpsc::Sender<Bitfield>,
-    disk_tx: mpsc::Sender<(Piece, Vec<u8>)>,
+    client_tx: Arc<mpsc::Sender<Bitfield>>,
+    disk_tx: Arc<mpsc::Sender<(Piece, Vec<u8>)>>,
     io_wtx: mpsc::Sender<Message>,
     shutdown_tx: broadcast::Sender<()>,
     state: State,
@@ -54,9 +54,9 @@ impl Default for State {
 
 impl Actor {
     pub fn new(
-        client_tx: mpsc::Sender<Bitfield>,
+        client_tx: Arc<mpsc::Sender<Bitfield>>,
         io_wtx: mpsc::Sender<Message>,
-        disk_tx: mpsc::Sender<(Piece, Vec<u8>)>,
+        disk_tx: Arc<mpsc::Sender<(Piece, Vec<u8>)>>,
         shutdown_tx: broadcast::Sender<()>,
         pieces_state: Arc<DownloadState>,
     ) -> Self {
@@ -563,6 +563,8 @@ mod test {
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
+        let client_tx = Arc::new(client_tx);
+        let disk_tx = Arc::new(disk_tx);
         let pieces_state = Arc::new(DownloadState::new(pieces_map));
 
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
@@ -590,6 +592,8 @@ mod test {
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
+        let client_tx = Arc::new(client_tx);
+        let disk_tx = Arc::new(disk_tx);
         let pieces_state = Arc::new(DownloadState::new(pieces_map));
 
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
@@ -608,6 +612,8 @@ mod test {
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
+        let client_tx = Arc::new(client_tx);
+        let disk_tx = Arc::new(disk_tx);
         let pieces_state = Arc::new(DownloadState::new(pieces_map));
 
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
@@ -626,6 +632,8 @@ mod test {
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
+        let client_tx = Arc::new(client_tx);
+        let disk_tx = Arc::new(disk_tx);
         let pieces_state = Arc::new(DownloadState::new(pieces_map));
 
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
@@ -644,6 +652,8 @@ mod test {
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
+        let client_tx = Arc::new(client_tx);
+        let disk_tx = Arc::new(disk_tx);
         let pieces_state = Arc::new(DownloadState::new(pieces_map));
 
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
@@ -676,6 +686,8 @@ mod test {
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
+        let client_tx = Arc::new(client_tx);
+        let disk_tx = Arc::new(disk_tx);
         let pieces_state = Arc::new(DownloadState::new(pieces_map));
 
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
@@ -747,6 +759,8 @@ mod test {
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
+        let client_tx = Arc::new(client_tx);
+        let disk_tx = Arc::new(disk_tx);
         let pieces_state = Arc::new(DownloadState::new(pieces_map));
 
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
@@ -814,6 +828,8 @@ mod test {
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
+        let client_tx = Arc::new(client_tx);
+        let disk_tx = Arc::new(disk_tx);
         let pieces_state = Arc::new(DownloadState::new(pieces_map));
 
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
@@ -884,6 +900,9 @@ mod test {
         let (io_wtx, _) = mpsc::channel(10);
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
+        let client_tx = Arc::new(client_tx);
+        let disk_tx = Arc::new(disk_tx);
+
         // Initialize the Actor
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
         actor.state.peer_bitfield = initial_bitfield.clone();
@@ -911,6 +930,8 @@ mod test {
         let client_tx = mpsc::channel(10).0;
         let disk_tx = mpsc::channel(10).0;
         let pieces_map = HashMap::new();
+        let client_tx = Arc::new(client_tx);
+        let disk_tx = Arc::new(disk_tx);
         let pieces_state = Arc::new(DownloadState::new(pieces_map));
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
 
@@ -961,6 +982,8 @@ mod test {
         let client_tx = mpsc::channel(10).0;
         let disk_tx = mpsc::channel(10).0;
         let pieces_map = HashMap::new();
+        let client_tx = Arc::new(client_tx);
+        let disk_tx = Arc::new(disk_tx);
         let pieces_state = Arc::new(DownloadState::new(pieces_map));
         let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
 
