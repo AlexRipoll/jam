@@ -1,7 +1,7 @@
-use std::{io, sync::Arc, time::Duration};
+use std::{io, os::unix::process, sync::Arc, time::Duration};
 
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::{broadcast, mpsc, Mutex},
     time::timeout,
@@ -49,7 +49,7 @@ pub async fn new_peer_session(
     }
     info!(peer_addr, "Handshake completed");
 
-    let (mut read_half, mut write_half) = tokio::io::split(stream);
+    let (read_half, write_half) = tokio::io::split(stream);
 
     // Create channels for communication
     let (io_rtx, io_rrx) = mpsc::channel(50);
@@ -67,132 +67,37 @@ pub async fn new_peer_session(
         download_state,
     )));
 
-    // Reader task
-    let reader_task = tokio::spawn({
-        let io_rtx = io_rtx.clone();
-        let peer_addr = peer_addr.to_string();
-        let reader_span = tracing::info_span!("reader_task", peer_addr = %peer_addr);
-        let mut shutdown_rx = shutdown_tx.subscribe();
-        async move {
-            let _enter = reader_span.enter();
-            debug!(peer_addr = %peer_addr, "Initializing peer IO reader...");
-            loop {
-                tokio::select! {
-                    result = read_message(&mut read_half) => {
-                        match result {
-                            Ok(message) => {
-                                if io_rtx.send(message).await.is_err() {
-                                    error!(peer_addr = %peer_addr, "Receiver dropped; stopping reader task");
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                error!(peer_addr = %peer_addr, error = %e, "Error reading message");
-                                break;
-                            }
-                        }
-                    }
-                    _ = shutdown_rx.recv() => {
-                        debug!(peer_addr = %peer_addr, "Reader task received shutdown signal");
-                            drop(read_half);
-                        break;
-                    }
-                }
-            }
-        }
-    });
+    let reader_task = tokio::spawn(message_reader(
+        read_half,
+        io_rtx.clone(),
+        peer_addr.to_string(),
+        shutdown_tx.subscribe(),
+    ));
     task_handles.push(reader_task);
 
-    // Writer task
-    let writer_task = tokio::spawn({
-        let peer_addr = peer_addr.to_string();
-        let writer_span = tracing::info_span!("writer_task", peer_addr = %peer_addr);
-        let mut receiver: mpsc::Receiver<Message> = io_wrx;
-        let mut shutdown_rx = shutdown_tx.subscribe();
-        async move {
-            let _enter = writer_span.enter();
-            debug!(peer_addr = %peer_addr, "Initializing peer IO writer...");
-            loop {
-                tokio::select! {
-                    Some(message) = receiver.recv() => {
-                        if let Err(e) = send_message(&mut write_half, message).await {
-                            error!(peer_addr = %peer_addr, error = %e, "Error sending message");
-                        }
-                    }
-                    _ = shutdown_rx.recv() => {
-                        debug!(peer_addr = %peer_addr, "Writer task received shutdown signal");
-                        let _ = write_half.shutdown().await;
-                        drop(write_half);
-                        info!(peer_addr = %peer_addr, "TCP stream closed");
-                        break;
-                    }
-                }
-            }
-        }
-    });
+    let writer_task = tokio::spawn(message_writer(
+        write_half,
+        io_wrx,
+        shutdown_tx.subscribe(),
+        peer_addr.to_string(),
+    ));
     task_handles.push(writer_task);
 
-    // Actor handler task
-    let actor_task = tokio::spawn({
-        let actor = Arc::clone(&actor);
-        let actor_span = tracing::info_span!("actor_task", peer_addr = %peer_addr);
-        let mut receiver = io_rrx;
-        let peer_addr = peer_addr.to_string();
-        let mut shutdown_rx = shutdown_tx.subscribe();
-        async move {
-            let _enter = actor_span.enter();
-            debug!(peer_addr = %peer_addr, "Initializing peer actor handler...");
-            loop {
-                tokio::select! {
-                    Some(message) = receiver.recv() => {
-                        let mut actor = actor.lock().await;
-                        if let Err(e) = actor.handle_message(message).await {
-                            error!(peer_addr = %peer_addr, error = %e, "Actor handler error");
-                        }
-                    }
-                    _ = shutdown_rx.recv() => {
-                        debug!(peer_addr = %peer_addr, "Actor task received shutdown signal");
-                        break;
-                    }
-                }
-            }
-        }
-    });
-    task_handles.push(actor_task);
+    let message_processor_task = tokio::spawn(process_message(
+        Arc::clone(&actor),
+        io_rrx,
+        shutdown_tx.subscribe(),
+        peer_addr.to_string(),
+    ));
+    task_handles.push(message_processor_task);
 
-    // Piece request task
-    let piece_request_handle = tokio::spawn({
-        let actor = Arc::clone(&actor);
-        let peer_addr = peer_addr.to_string();
-        let request_span = tracing::info_span!("piece_request_task", peer_addr = %peer_addr);
-        let mut shutdown_rx = shutdown_tx.subscribe();
-        async move {
-            let _enter = request_span.enter();
-            debug!(peer_addr = %peer_addr, "Initializing piece requester...");
-            loop {
-                tokio::select! {
-                    _ = async {
-                        let mut actor = actor.lock().await;
-                        if actor.ready_to_request().await {
-                            if let Err(e) = actor.request().await {
-                                error!(peer_addr = %peer_addr, error = %e, "Piece request error");
-                            }
-                        }
-                        // Check if the client has all the peer pieces
-                        if actor.is_complete().await {
-                            debug!(peer_addr = %peer_addr, "All pieces downloaded. Sending shutdown signal...");
-                            let _ = shutdown_tx.send(()); // Send shutdown signal
-                        }
-                    } => {}
-                    _ = shutdown_rx.recv() => {
-                        debug!(peer_addr = %peer_addr, "Piece requester received shutdown signal");
-                        break;
-                    }
-                }
-            }
-        }
-    });
-    task_handles.push(piece_request_handle);
+    let piece_request_task = tokio::spawn(piece_requester(
+        Arc::clone(&actor),
+        shutdown_tx.subscribe(),
+        shutdown_tx.clone(),
+        peer_addr.to_string(),
+    ));
+    task_handles.push(piece_request_task);
 
     // Await tasks
     for handle in task_handles {
@@ -237,4 +142,139 @@ async fn connect_to_peer_with_retries(
         io::ErrorKind::TimedOut,
         "All connection attempts timed out",
     ))
+}
+
+async fn message_reader(
+    mut read_half: tokio::io::ReadHalf<TcpStream>,
+    io_rtx: mpsc::Sender<Message>,
+    peer_addr: String,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) {
+    let reader_span = tracing::info_span!("reader_task", peer_addr = %peer_addr);
+    let _enter = reader_span.enter();
+    debug!(peer_addr = %peer_addr, "Initializing peer IO reader...");
+
+    loop {
+        tokio::select! {
+            result = read_message(&mut read_half) => {
+                match result {
+                    Ok(message) => {
+                        if io_rtx.send(message).await.is_err() {
+                            error!(peer_addr = %peer_addr, "Receiver dropped; stopping reader task");
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        error!(peer_addr = %peer_addr, error = %e, "Error reading message");
+                        break;
+                    }
+                }
+            }
+            _ = shutdown_rx.recv() => {
+                debug!(peer_addr = %peer_addr, "Reader task received shutdown signal");
+                drop(read_half);
+                break;
+            }
+        }
+    }
+}
+
+async fn message_writer(
+    mut write_half: tokio::io::WriteHalf<tokio::net::TcpStream>,
+    mut io_wrx: mpsc::Receiver<Message>,
+    mut shutdown_rx: broadcast::Receiver<()>,
+    peer_addr: String,
+) {
+    let writer_span = tracing::info_span!("writer_task", peer_addr = %peer_addr);
+    let _enter = writer_span.enter();
+    debug!(peer_addr = %peer_addr, "Initializing peer IO writer...");
+
+    loop {
+        tokio::select! {
+            // Receive message and send it over the TCP stream
+            Some(message) = io_wrx.recv() => {
+                if let Err(e) = send_message(&mut write_half, message).await {
+                    error!(peer_addr = %peer_addr, error = %e, "Error sending message");
+                }
+            }
+
+            // Handle shutdown signal
+            _ = shutdown_rx.recv() => {
+                debug!(peer_addr = %peer_addr, "Writer task received shutdown signal");
+                if let Err(e) = write_half.shutdown().await {
+                    error!(peer_addr = %peer_addr, error = %e, "Error shutting down TCP stream");
+                }
+                drop(write_half);
+                info!(peer_addr = %peer_addr, "TCP stream closed");
+                break;
+            }
+        }
+    }
+}
+
+async fn process_message(
+    actor: Arc<tokio::sync::Mutex<Actor>>,
+    mut io_rrx: mpsc::Receiver<Message>,
+    mut shutdown_rx: broadcast::Receiver<()>,
+    peer_addr: String,
+) {
+    let actor_span = tracing::info_span!("actor_task", peer_addr = %peer_addr);
+    let _enter = actor_span.enter();
+    debug!(peer_addr = %peer_addr, "Initializing peer actor handler...");
+
+    loop {
+        tokio::select! {
+            // Process incoming messages
+            Some(message) = io_rrx.recv() => {
+                let mut actor = actor.lock().await;
+                if let Err(e) = actor.handle_message(message).await {
+                    error!(peer_addr = %peer_addr, error = %e, "Actor handler error");
+                }
+            }
+
+            // Handle shutdown signal
+            _ = shutdown_rx.recv() => {
+                debug!(peer_addr = %peer_addr, "Actor task received shutdown signal");
+                break;
+            }
+        }
+    }
+}
+
+async fn piece_requester(
+    actor: Arc<tokio::sync::Mutex<Actor>>, // Shared actor instance
+    mut shutdown_rx: broadcast::Receiver<()>, // Shutdown signal
+    shutdown_tx: broadcast::Sender<()>,    // Shutdown signal sender
+    peer_addr: String,                     // Peer address for logging
+) {
+    let request_span = tracing::info_span!("piece_request_task", peer_addr = %peer_addr);
+    let _enter = request_span.enter();
+    debug!(peer_addr = %peer_addr, "Initializing piece requester...");
+
+    loop {
+        tokio::select! {
+            // Perform piece request handling
+            _ = async {
+                let mut actor = actor.lock().await;
+
+                if actor.ready_to_request().await {
+                    if let Err(e) = actor.request().await {
+                        error!(peer_addr = %peer_addr, error = %e, "Piece request error");
+                    }
+                }
+
+                // Check if all pieces have been downloaded
+                if actor.is_complete().await {
+                    debug!(peer_addr = %peer_addr, "All pieces downloaded. Sending shutdown signal...");
+                    let _ = shutdown_tx.send(()); // Send shutdown signal
+                }
+            } => {}
+
+            // Handle shutdown signal
+            _ = shutdown_rx.recv() => {
+                debug!(peer_addr = %peer_addr, "Piece requester received shutdown signal");
+                break;
+            }
+        }
+    }
 }
