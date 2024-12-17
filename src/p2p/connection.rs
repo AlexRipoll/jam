@@ -10,7 +10,7 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info};
 
 use crate::bitfield::Bitfield;
-use crate::client::DownloadState;
+use crate::download_state::DownloadState;
 use crate::p2p::message::{Message, MessageId, PiecePayload, TransferPayload};
 
 use super::piece::{Piece, PieceError};
@@ -73,7 +73,13 @@ impl Actor {
     pub async fn ready_to_request(&self) -> bool {
         !self.state.is_choked
             && self.state.is_interested
-            && !self.download_state.pieces_queue.lock().await.is_empty()
+            && !self
+                .download_state
+                .pieces_queue
+                .queue
+                .lock()
+                .await
+                .is_empty()
     }
 
     pub async fn handle_message(&mut self, message: Message) -> Result<(), P2pError> {
@@ -120,7 +126,12 @@ impl Actor {
                 debug!(bitfield = ?bitfield, "Updated peer bitfield");
 
                 // check if peer has any piece we are interested in downloading
-                if self.download_state.has_missing_pieces(&bitfield).await {
+                if self
+                    .download_state
+                    .metadata
+                    .has_missing_pieces(&bitfield)
+                    .await
+                {
                     self.state.peer_bitfield = bitfield.clone();
                     self.client_tx.send(bitfield).await?;
 
@@ -232,7 +243,8 @@ impl Actor {
 
         let current_bitfield = self
             .download_state
-            .torrent_bitfield
+            .metadata
+            .bitfield
             .lock()
             .await
             .bytes
@@ -542,7 +554,7 @@ mod test {
 
     use crate::{
         bitfield::Bitfield,
-        client::DownloadState,
+        download_state::DownloadState,
         p2p::{
             connection::{client_version, generate_peer_id, Actor, P2pError},
             message::{Message, MessageId, PiecePayload},
@@ -578,6 +590,7 @@ mod test {
         actor
             .download_state
             .pieces_queue
+            .queue
             .lock()
             .await
             .push(Piece::new(1, 512, [0u8; 20]));

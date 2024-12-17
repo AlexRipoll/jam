@@ -10,7 +10,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     bitfield::Bitfield,
-    client::DownloadState,
+    download_state::DownloadState,
     p2p::{
         connection::{self, Actor},
         io::{read_message, send_message},
@@ -26,7 +26,6 @@ pub async fn new_peer_session(
     client_tx: Arc<mpsc::Sender<Bitfield>>,
     disk_tx: Arc<mpsc::Sender<(Piece, Vec<u8>)>>,
     download_state: Arc<DownloadState>,
-    // TODO: move to config
     timeout_duration: u64,
     connection_retries: u32,
 ) -> io::Result<()> {

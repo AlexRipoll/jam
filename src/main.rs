@@ -15,6 +15,7 @@ use tracker::get;
 pub mod bitfield;
 pub mod client;
 pub mod config;
+pub mod download_state;
 pub mod metainfo;
 mod p2p;
 pub mod session;
