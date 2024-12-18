@@ -264,4 +264,210 @@ mod test {
         // Test that `has_missing_pieces` returns false because all pieces are downloaded
         assert!(!download_metadata.has_missing_pieces(&peer_bitfield).await);
     }
+
+    #[tokio::test]
+    async fn test_populate_queue() {
+        let pieces_queue = PiecesQueue::new();
+
+        // Create sample pieces
+        let pieces = vec![
+            create_sample_piece(4, 16384),
+            create_sample_piece(1, 16384),
+            create_sample_piece(2, 16384),
+        ];
+
+        // Populate queue
+        pieces_queue.populate_queue(pieces.clone()).await;
+
+        // Verify the queue contains the expected pieces
+        let queue = pieces_queue.queue.lock().await;
+        assert_eq!(queue.len(), 3);
+        assert_eq!(*queue, pieces);
+    }
+
+    #[tokio::test]
+    async fn test_populate_queue_already_populated() {
+        let pieces_queue = PiecesQueue::new();
+
+        // Create sample pieces
+        let pieces = vec![create_sample_piece(3, 16384), create_sample_piece(2, 16384)];
+
+        // Populate queue
+        pieces_queue.populate_queue(pieces.clone()).await;
+
+        // Create new sample pieces
+        let pieces = vec![
+            create_sample_piece(4, 16384),
+            create_sample_piece(1, 16384),
+            create_sample_piece(2, 16384),
+        ];
+
+        // Populate queue
+        pieces_queue.populate_queue(pieces.clone()).await;
+
+        // Verify the queue contains the expected pieces
+        let queue = pieces_queue.queue.lock().await;
+        assert_eq!(queue.len(), 3);
+        assert_eq!(*queue, pieces);
+    }
+
+    #[tokio::test]
+    async fn test_assign_piece() {
+        let pieces_queue = PiecesQueue::new();
+
+        // Create sample pieces
+        let pieces = vec![
+            create_sample_piece(4, 16384),
+            create_sample_piece(1, 16384),
+            create_sample_piece(2, 16384),
+        ];
+
+        // Populate the queue
+        pieces_queue.populate_queue(pieces.clone()).await;
+
+        // Create a bitfield where peer has pieces 0 and 2
+        let mut peer_bitfield = Bitfield::from_empty(4);
+        peer_bitfield.set_piece(0);
+        peer_bitfield.set_piece(2);
+
+        // Assign a piece
+        let assigned_piece = pieces_queue.assign_piece(&peer_bitfield).await;
+
+        // Verify the assigned piece is piece 1 (index 1)
+        assert!(assigned_piece.is_some());
+        assert_eq!(assigned_piece.unwrap().index(), 2);
+
+        // Verify that the piece is removed from the queue and added to assigned pieces
+        let queue = pieces_queue.queue.lock().await;
+        assert_eq!(queue.len(), 2);
+        let assigned = pieces_queue.assigned_pieces.lock().await;
+        assert!(assigned.contains(&create_sample_piece(2, 16384)));
+    }
+
+    #[tokio::test]
+    async fn test_assign_piece_no_match() {
+        let pieces_queue = PiecesQueue::new();
+
+        // Create sample pieces
+        let pieces = vec![
+            create_sample_piece(4, 16384),
+            create_sample_piece(1, 16384),
+            create_sample_piece(2, 16384),
+        ];
+
+        // Populate the queue
+        pieces_queue.populate_queue(pieces.clone()).await;
+
+        // Create a bitfield where peer has no matching pieces
+        let mut peer_bitfield = Bitfield::from_empty(4);
+        peer_bitfield.set_piece(0);
+
+        // Attempt to assign a piece
+        let assigned_piece = pieces_queue.assign_piece(&peer_bitfield).await;
+
+        // Verify no piece is assigned
+        assert!(assigned_piece.is_none());
+
+        // Verify the queue remains unchanged
+        let queue = pieces_queue.queue.lock().await;
+        assert_eq!(queue.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_mark_piece_complete() {
+        let pieces_queue = PiecesQueue::new();
+
+        // Create a sample piece
+        let piece = create_sample_piece(0, 16384);
+
+        // Manually insert the piece into assigned_pieces
+        {
+            let mut assigned = pieces_queue.assigned_pieces.lock().await;
+            assigned.insert(piece.clone());
+        }
+
+        // Mark the piece as complete
+        pieces_queue.mark_piece_complete(piece.clone()).await;
+
+        // Verify the piece is removed from assigned_pieces
+        let assigned = pieces_queue.assigned_pieces.lock().await;
+        assert!(!assigned.contains(&piece));
+    }
+
+    #[tokio::test]
+    async fn test_assign_piece_many() {
+        let pieces_queue = PiecesQueue::new();
+
+        // Create sample pieces
+        let pieces = vec![
+            create_sample_piece(4, 16384),
+            create_sample_piece(1, 16384),
+            create_sample_piece(2, 16384),
+        ];
+
+        // Populate the queue
+        pieces_queue.populate_queue(pieces.clone()).await;
+
+        // Create a bitfield where peer has pieces 1 and 2
+        let mut peer_bitfield = Bitfield::from_empty(4);
+        peer_bitfield.set_piece(1);
+        peer_bitfield.set_piece(2);
+
+        // Assign a piece
+        let first_assignment = pieces_queue.assign_piece(&peer_bitfield).await;
+
+        // Assign the same piece again
+        let second_assignment = pieces_queue.assign_piece(&peer_bitfield).await;
+
+        // Verify the first assigned piece is piece 1
+        assert!(first_assignment.is_some());
+        assert_eq!(first_assignment.unwrap().index(), 1);
+
+        // Verify the second assigned piece is piece 2 (not already assigned)
+        assert!(second_assignment.is_some());
+        assert_eq!(second_assignment.unwrap().index(), 2);
+
+        // Verify that both pieces 1 and 2 are in assigned_pieces
+        let assigned = pieces_queue.assigned_pieces.lock().await;
+        assert!(assigned.contains(&create_sample_piece(1, 16384)));
+        assert!(assigned.contains(&create_sample_piece(2, 16384)));
+    }
+
+    #[tokio::test]
+    async fn test_assign_piece_already_assigned() {
+        let pieces_queue = PiecesQueue::new();
+
+        // Create sample pieces
+        let pieces = vec![
+            create_sample_piece(4, 16384),
+            create_sample_piece(1, 16384),
+            create_sample_piece(2, 16384),
+        ];
+
+        // Populate the queue
+        pieces_queue.populate_queue(pieces.clone()).await;
+
+        // Create a bitfield where peer has pieces 1 and 2
+        let mut peer_bitfield = Bitfield::from_empty(4);
+        peer_bitfield.set_piece(1);
+        peer_bitfield.set_piece(3);
+
+        // Assign a piece
+        let first_assignment = pieces_queue.assign_piece(&peer_bitfield).await;
+
+        // Assign the same piece again
+        let second_assignment = pieces_queue.assign_piece(&peer_bitfield).await;
+
+        // Verify the first assigned piece is piece 1
+        assert!(first_assignment.is_some());
+        assert_eq!(first_assignment.unwrap().index(), 1);
+
+        // Verify the second assigned piece is piece 2 (not already assigned)
+        assert!(second_assignment.is_none());
+
+        // Verify that both pieces 1 and 2 are in assigned_pieces
+        let assigned = pieces_queue.assigned_pieces.lock().await;
+        assert!(assigned.contains(&create_sample_piece(1, 16384)));
+        assert_eq!(assigned.len(), 1);
+    }
 }
