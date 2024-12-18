@@ -23,8 +23,7 @@ impl DownloadMetadata {
     }
 
     pub async fn has_piece(&self, index: usize) -> bool {
-        let bitfield = self.bitfield.lock().await;
-        bitfield.has_piece(index)
+        self.bitfield.lock().await.has_piece(index)
     }
 
     pub async fn mark_piece_downloaded(&self, index: usize) {
@@ -163,5 +162,106 @@ impl DownloadState {
             .mark_piece_downloaded(piece.index() as usize)
             .await;
         self.pieces_queue.mark_piece_complete(piece).await;
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use std::collections::HashMap;
+    use tokio::sync::Mutex;
+
+    // Helper function to create a sample Piece
+    fn create_sample_piece(index: u32, size: usize) -> Piece {
+        let hash = [0u8; 20]; // Placeholder hash
+        Piece::new(index, size, hash)
+    }
+
+    #[tokio::test]
+    async fn test_download_metadata_has_piece() {
+        let mut pieces_map = HashMap::new();
+        pieces_map.insert(0, create_sample_piece(0, 16384)); // Piece 0
+        pieces_map.insert(1, create_sample_piece(1, 16384)); // Piece 1
+        pieces_map.insert(2, create_sample_piece(2, 16384)); // Piece 2
+        pieces_map.insert(3, create_sample_piece(3, 16384)); // Piece 3
+        let download_metadata = DownloadMetadata::new(pieces_map);
+
+        // Mark piece 0 as downloaded
+        download_metadata.mark_piece_downloaded(0).await;
+
+        // Test that `has_piece` returns true for piece 0 (downloaded)
+        assert!(download_metadata.has_piece(0).await);
+
+        // Test that `has_piece` returns false for piece 1 (not downloaded)
+        assert!(!download_metadata.has_piece(1).await);
+    }
+
+    #[tokio::test]
+    async fn test_mark_piece_downloaded() {
+        let mut pieces_map = HashMap::new();
+        pieces_map.insert(0, create_sample_piece(0, 16384)); // Piece 0
+        pieces_map.insert(1, create_sample_piece(1, 16384)); // Piece 1
+        let download_metadata = DownloadMetadata::new(pieces_map);
+
+        // Test that `has_piece` returns false initially
+        assert!(!download_metadata.has_piece(0).await);
+
+        // Mark piece 0 as downloaded
+        download_metadata.mark_piece_downloaded(0).await;
+
+        // Test that `has_piece` now returns true for piece 0
+        assert!(download_metadata.has_piece(0).await);
+    }
+
+    #[tokio::test]
+    async fn test_has_missing_pieces() {
+        let mut pieces_map = HashMap::new();
+        pieces_map.insert(0, create_sample_piece(0, 16384)); // Piece 0
+        pieces_map.insert(1, create_sample_piece(1, 16384)); // Piece 1
+        pieces_map.insert(2, create_sample_piece(2, 16384)); // Piece 2
+        pieces_map.insert(3, create_sample_piece(3, 16384)); // Piece 3
+        let download_metadata = DownloadMetadata::new(pieces_map);
+
+        // Peer bitfield where piece 1 is available
+        let mut peer_bitfield = Bitfield::from_empty(4);
+        peer_bitfield.set_piece(0);
+        peer_bitfield.set_piece(1);
+        peer_bitfield.set_piece(2);
+
+        // Test that `has_missing_pieces` returns true because piece 0 is missing
+        assert!(download_metadata.has_missing_pieces(&peer_bitfield).await);
+
+        // Mark piece 0 as downloaded
+        download_metadata.mark_piece_downloaded(0).await;
+        download_metadata.mark_piece_downloaded(2).await;
+
+        // Test that `has_missing_pieces` returns true because it has piece 1 for download
+        assert!(download_metadata.has_missing_pieces(&peer_bitfield).await);
+    }
+
+    #[tokio::test]
+    async fn test_does_not_have_missing_pieces() {
+        let mut pieces_map = HashMap::new();
+        pieces_map.insert(0, create_sample_piece(0, 16384)); // Piece 0
+        pieces_map.insert(1, create_sample_piece(1, 16384)); // Piece 1
+        pieces_map.insert(2, create_sample_piece(2, 16384)); // Piece 2
+        pieces_map.insert(3, create_sample_piece(3, 16384)); // Piece 3
+        let download_metadata = DownloadMetadata::new(pieces_map);
+
+        // Peer bitfield where piece 1 is available
+        let mut peer_bitfield = Bitfield::from_empty(4);
+        peer_bitfield.set_piece(0);
+        peer_bitfield.set_piece(2);
+
+        // Test that `has_missing_pieces` returns true because piece 0 is missing
+        assert!(download_metadata.has_missing_pieces(&peer_bitfield).await);
+
+        // Mark piece 0 as downloaded
+        download_metadata.mark_piece_downloaded(0).await;
+        download_metadata.mark_piece_downloaded(1).await;
+        download_metadata.mark_piece_downloaded(2).await;
+
+        // Test that `has_missing_pieces` returns false because all pieces are downloaded
+        assert!(!download_metadata.has_missing_pieces(&peer_bitfield).await);
     }
 }
