@@ -242,10 +242,10 @@ async fn process_message(
 }
 
 async fn piece_requester(
-    actor: Arc<tokio::sync::Mutex<Actor>>, // Shared actor instance
-    mut shutdown_rx: broadcast::Receiver<()>, // Shutdown signal
-    shutdown_tx: broadcast::Sender<()>,    // Shutdown signal sender
-    peer_addr: String,                     // Peer address for logging
+    actor: Arc<tokio::sync::Mutex<Actor>>,
+    mut shutdown_rx: broadcast::Receiver<()>,
+    shutdown_tx: broadcast::Sender<()>,
+    peer_addr: String,
 ) {
     let request_span = tracing::info_span!("piece_request_task", peer_addr = %peer_addr);
     let _enter = request_span.enter();

@@ -90,7 +90,7 @@ impl Piece {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum PieceError {
     MissingBlocks,
     OutOfBounds,

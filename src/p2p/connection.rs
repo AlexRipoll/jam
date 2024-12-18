@@ -414,10 +414,11 @@ pub async fn handshake(
     Ok(buffer)
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum P2pError {
     EmptyPayload,
     InvalidHandshake,
+    IncompleteMessage,
     DeserializationError(&'static str),
     PieceMissingBlocks(PieceError),
     PieceOutOfBounds(PieceError),
@@ -426,8 +427,8 @@ pub enum P2pError {
     DiskTxError(mpsc::error::SendError<(Piece, Vec<u8>)>),
     IoTxError(mpsc::error::SendError<Message>),
     ClientTxError(mpsc::error::SendError<Bitfield>),
-    ShutdownError(broadcast::error::SendError<()>),
-    IoError(io::Error),
+    ShutdownError(BroadcastSendError),
+    IoError(IoErrorWrapper),
 }
 
 impl Display for P2pError {
@@ -435,6 +436,9 @@ impl Display for P2pError {
         match self {
             P2pError::EmptyPayload => write!(f, "Empty payload"),
             P2pError::InvalidHandshake => write!(f, "Handshake response was not 68 bytes"),
+            P2pError::IncompleteMessage => {
+                write!(f, "Connection closed before reading full message")
+            }
             P2pError::DeserializationError(err) => write!(f, "Deserialization error: {}", err),
             P2pError::PieceNotFound => write!(f, "Piece not found in map"),
             P2pError::PieceInvalid => write!(f, "Invalid piece, hash mismatch"),
@@ -443,8 +447,10 @@ impl Display for P2pError {
             P2pError::DiskTxError(err) => write!(f, "Disk tx error: {}", err),
             P2pError::IoTxError(err) => write!(f, "IO tx error: {}", err),
             P2pError::ClientTxError(err) => write!(f, "Client tx error: {}", err),
-            P2pError::IoError(err) => write!(f, "IO error: {}", err),
-            P2pError::ShutdownError(err) => write!(f, "Shutdown tx error: {}", err),
+            P2pError::IoError(IoErrorWrapper(err)) => write!(f, "IO error: {}", err),
+            P2pError::ShutdownError(BroadcastSendError(err)) => {
+                write!(f, "Shutdown tx error: {}", err)
+            }
         }
     }
 }
@@ -484,13 +490,13 @@ impl From<mpsc::error::SendError<Bitfield>> for P2pError {
 
 impl From<broadcast::error::SendError<()>> for P2pError {
     fn from(err: broadcast::error::SendError<()>) -> Self {
-        P2pError::ShutdownError(err)
+        P2pError::ShutdownError(BroadcastSendError(err))
     }
 }
 
 impl From<io::Error> for P2pError {
     fn from(err: io::Error) -> Self {
-        P2pError::IoError(err)
+        P2pError::IoError(IoErrorWrapper(err))
     }
 }
 
@@ -502,12 +508,36 @@ impl Error for P2pError {
             P2pError::DiskTxError(err) => Some(err),
             P2pError::IoTxError(err) => Some(err),
             P2pError::ClientTxError(err) => Some(err),
-            P2pError::IoError(err) => Some(err),
-            P2pError::ShutdownError(err) => Some(err),
+            P2pError::IoError(IoErrorWrapper(err)) => Some(err),
+            P2pError::ShutdownError(BroadcastSendError(err)) => Some(err),
             _ => None,
         }
     }
 }
+
+#[derive(Debug)]
+pub struct BroadcastSendError(pub broadcast::error::SendError<()>);
+
+impl PartialEq for BroadcastSendError {
+    fn eq(&self, _other: &Self) -> bool {
+        // You can define custom equality logic if needed. For simplicity, we treat all errors as equal.
+        true
+    }
+}
+
+impl Eq for BroadcastSendError {}
+
+#[derive(Debug)]
+pub struct IoErrorWrapper(pub io::Error);
+
+impl PartialEq for IoErrorWrapper {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare the `kind` of the error as `io::Error` does not support equality checks.
+        self.0.kind() == other.0.kind()
+    }
+}
+
+impl Eq for IoErrorWrapper {}
 
 fn client_version() -> String {
     let version_tag = env!("CARGO_PKG_VERSION").replace(".", "");

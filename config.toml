@@ -1,5 +1,5 @@
 [disk]
-download_path = "./downloads"
+download_path = "./tmp/downloads"
 
 [p2p]
 max_peer_connections = 2

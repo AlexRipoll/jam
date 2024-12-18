@@ -47,7 +47,7 @@ mod tests {
                     config,
                     Config {
                         disk: DiskConfig {
-                            download_path: "./downloads".to_string()
+                            download_path: "./tmp/downloads".to_string()
                         },
                         p2p: P2pConfig {
                             max_peer_connections: 2,

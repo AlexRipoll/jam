@@ -1,6 +1,6 @@
 use std::io;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Bitfield {
     pub bytes: Vec<u8>, // In-memory bitfield
     num_pieces: usize,  // Total number of pieces
