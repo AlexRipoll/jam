@@ -101,12 +101,12 @@ impl PiecesRarity {
         }
     }
 
-    pub async fn update_rarity_from_bitfield(&self, bitfield: &Bitfield) {
+    pub async fn update_rarity_from_bitfield(&self, peer_bitfield: &Bitfield) {
         let mut rarity_map = self.rarity_map.lock().await;
-        for byte_index in 0..bitfield.bytes.len() {
+        for byte_index in 0..peer_bitfield.bytes.len() {
             for bit_index in 0..8 {
                 let piece_index = (byte_index * 8 + bit_index) as u32;
-                if bitfield.has_piece(piece_index as usize) {
+                if peer_bitfield.has_piece(piece_index as usize) {
                     *rarity_map.entry(piece_index).or_insert(0) += 1;
                 }
             }
@@ -115,8 +115,12 @@ impl PiecesRarity {
 
     pub async fn get_sorted_pieces(&self) -> Vec<(u32, u16)> {
         let rarity_map = self.rarity_map.lock().await;
-        let mut sorted_pieces: Vec<_> = rarity_map.iter().map(|(&k, &v)| (k, v)).collect();
-        sorted_pieces.sort_by(|a, b| b.1.cmp(&a.1)); // Most rare first
+        let mut sorted_pieces: Vec<_> = rarity_map
+            .iter()
+            .map(|(&piece_index, &count)| (piece_index, count))
+            .collect();
+        sorted_pieces.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0))); // Most rare first
+
         sorted_pieces
     }
 }
@@ -469,5 +473,93 @@ mod test {
         let assigned = pieces_queue.assigned_pieces.lock().await;
         assert!(assigned.contains(&create_sample_piece(1, 16384)));
         assert_eq!(assigned.len(), 1);
+    }
+
+    fn create_sample_bitfield(pieces: &[usize], num_pieces: usize) -> Bitfield {
+        let mut bitfield = Bitfield::from_empty(num_pieces);
+        for &piece in pieces {
+            bitfield.set_piece(piece);
+        }
+
+        bitfield
+    }
+
+    #[tokio::test]
+    async fn test_update_rarity_from_bitfield() {
+        let pieces_rarity = PiecesRarity::new();
+        let peer_bitfield = create_sample_bitfield(&[0, 1, 3], 4);
+
+        pieces_rarity
+            .update_rarity_from_bitfield(&peer_bitfield)
+            .await;
+
+        let rarity_map = pieces_rarity.rarity_map.lock().await;
+        assert_eq!(rarity_map.len(), 3, "Rarity map should have 3 entries");
+
+        assert_eq!(rarity_map.get(&0), Some(&1), "Piece 0 rarity should be 1");
+        assert_eq!(rarity_map.get(&1), Some(&1), "Piece 1 rarity should be 1");
+        assert_eq!(rarity_map.get(&3), Some(&1), "Piece 3 rarity should be 1");
+        assert!(
+            rarity_map.get(&2).is_none(),
+            "Piece 2 should not exist in rarity map"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_rarity_from_multiple_bitfields() {
+        let pieces_rarity = PiecesRarity::new();
+        let peer_bitfield1 = create_sample_bitfield(&[0, 1, 2], 5);
+        let peer_bitfield2 = create_sample_bitfield(&[1, 2, 3], 5);
+
+        // Update with the first bitfield
+        pieces_rarity
+            .update_rarity_from_bitfield(&peer_bitfield1)
+            .await;
+
+        // Update with the second bitfield
+        pieces_rarity
+            .update_rarity_from_bitfield(&peer_bitfield2)
+            .await;
+
+        let rarity_map = pieces_rarity.rarity_map.lock().await;
+
+        assert_eq!(rarity_map.len(), 4, "Rarity map should have 4 entries");
+        assert_eq!(rarity_map.get(&0), Some(&1), "Piece 0 rarity should be 1");
+        assert_eq!(rarity_map.get(&1), Some(&2), "Piece 1 rarity should be 2");
+        assert_eq!(rarity_map.get(&2), Some(&2), "Piece 2 rarity should be 2");
+        assert_eq!(rarity_map.get(&3), Some(&1), "Piece 3 rarity should be 1");
+        assert_eq!(
+            rarity_map.get(&4),
+            None,
+            "Piece 4 should not be in rarity map"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_sorted_pieces() {
+        let pieces_rarity = PiecesRarity::new();
+        let peer_bitfield1 = create_sample_bitfield(&[0, 1, 2], 5);
+        let peer_bitfield2 = create_sample_bitfield(&[1, 2, 3], 5);
+
+        // Update with the first and second bitfields
+        pieces_rarity
+            .update_rarity_from_bitfield(&peer_bitfield1)
+            .await;
+        pieces_rarity
+            .update_rarity_from_bitfield(&peer_bitfield2)
+            .await;
+
+        let sorted_pieces = pieces_rarity.get_sorted_pieces().await;
+
+        assert_eq!(
+            sorted_pieces.len(),
+            4,
+            "Sorted pieces should contain 4 entries"
+        );
+        assert_eq!(
+            sorted_pieces,
+            vec![(0, 1), (3, 1), (1, 2), (2, 2)],
+            "Sorted pieces should be ordered by rarity (most rare first) and by index for ties"
+        );
     }
 }
