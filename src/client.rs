@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     io,
     sync::Arc,
 };
@@ -13,8 +13,8 @@ use crate::{
 };
 
 // Configuration constants
-const CLIENT_CHANNEL_BUFFER: usize = 50;
-const DISK_CHANNEL_BUFFER: usize = 50;
+const CLIENT_CHANNEL_BUFFER: usize = 128;
+const DISK_CHANNEL_BUFFER: usize = 128;
 const SHUTDOWN_CHANNEL_BUFFER: usize = 1;
 
 #[derive(Debug)]
