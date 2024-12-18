@@ -12,9 +12,9 @@ use crate::{
     bitfield::Bitfield,
     download_state::DownloadState,
     p2p::{
-        connection::{self, Actor},
         io::{read_message, send_message},
         message::Message,
+        message_handler::{self, handshake, Actor},
         piece::Piece,
     },
 };
@@ -43,7 +43,7 @@ pub async fn new_peer_session(
     info!(peer_addr, "TCP connection established");
 
     // Perform handshake
-    if let Err(e) = connection::handshake(&mut stream, info_hash, peer_id).await {
+    if let Err(e) = handshake(&mut stream, info_hash, peer_id).await {
         error!(peer_addr, error = %e, "Handshake failed");
         return Err(io::Error::new(io::ErrorKind::Other, "Handshake failed"));
     }

@@ -7,7 +7,7 @@ use std::{
 use client::Client;
 use config::Config;
 use metainfo::Metainfo;
-use p2p::{connection::generate_peer_id, piece::Piece};
+use p2p::{message_handler::generate_peer_id, piece::Piece};
 use tracing::{debug, error, info, trace, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 use tracker::get;

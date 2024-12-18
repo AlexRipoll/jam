@@ -586,8 +586,8 @@ mod test {
         bitfield::Bitfield,
         download_state::DownloadState,
         p2p::{
-            connection::{client_version, generate_peer_id, Actor, P2pError},
             message::{Message, MessageId, PiecePayload},
+            message_handler::{client_version, generate_peer_id, Actor, P2pError},
             piece::Piece,
         },
     };
