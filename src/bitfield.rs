@@ -44,23 +44,28 @@ impl Bitfield {
     }
 
     pub fn has_all_pieces(&self) -> bool {
+        if self.bytes.is_empty() {
+            return false;
+        }
+
         // Check all bytes except the last one
-        for &byte in &self.bytes[..self.bytes.len() - 1] {
-            if byte != 0xFF {
-                return false;
-            }
+        if !self.bytes[..self.bytes.len() - 1]
+            .iter()
+            .all(|&byte| byte == 0xFF)
+        {
+            return false;
         }
 
         // Check the last byte
-        if self.num_pieces % 8 != 0 {
-            let last_byte_mask = 0xFFu8 << (8 - (self.num_pieces % 8));
-            let last_byte_index = self.bytes.len() - 1;
-            if self.bytes[last_byte_index] & last_byte_mask != last_byte_mask {
-                return false;
-            }
-        }
+        let last_byte_index = self.bytes.len() - 1;
+        let last_byte = self.bytes[last_byte_index];
+        let last_byte_mask = if self.num_pieces % 8 == 0 {
+            0xFF // All bits must be set if the total pieces are a multiple of 8
+        } else {
+            0xFFu8 << (8 - (self.num_pieces % 8)) // Mask for the remaining bits in the last byte
+        };
 
-        true
+        (last_byte & last_byte_mask) == last_byte_mask
     }
 }
 
@@ -108,5 +113,26 @@ mod test {
 
         // no change in bitfield
         assert_eq!(bitfield.bytes, vec![0b0, 0b0, 0b0, 0b0]);
+    }
+
+    #[test]
+    fn test_has_all_pieces() {
+        // Case 1: Empty bitfield
+        let bitfield = Bitfield::from_empty(8);
+        assert!(!bitfield.has_all_pieces());
+
+        // Case 2: Partially completed bitfield
+        let mut bitfield = Bitfield::from_empty(8);
+        bitfield.set_piece(0);
+        bitfield.set_piece(1);
+        bitfield.set_piece(2);
+        assert!(!bitfield.has_all_pieces());
+
+        // Case 3: Fully completed bitfield for a multiple of 8 pieces
+        let mut bitfield = Bitfield::from_empty(8);
+        for i in 0..8 {
+            bitfield.set_piece(i);
+        }
+        assert!(bitfield.has_all_pieces());
     }
 }
