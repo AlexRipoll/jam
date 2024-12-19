@@ -173,7 +173,6 @@ impl DownloadState {
 mod test {
     use super::*;
     use std::collections::HashMap;
-    use tokio::sync::Mutex;
 
     // Helper function to create a sample Piece
     fn create_sample_piece(index: u32, size: usize) -> Piece {
@@ -561,5 +560,142 @@ mod test {
             vec![(0, 1), (3, 1), (1, 2), (2, 2)],
             "Sorted pieces should be ordered by rarity (most rare first) and by index for ties"
         );
+    }
+
+    #[tokio::test]
+    async fn test_download_state_process_bitfield() {
+        let mut pieces_map = HashMap::new();
+        for i in 0..5 {
+            pieces_map.insert(i, create_sample_piece(i, 16384));
+        }
+
+        let state = DownloadState::new(pieces_map.clone());
+        let bitfield = create_sample_bitfield(&[0, 2, 4], 5);
+
+        state.process_bitfield(&bitfield).await;
+
+        // Verify that rarity map is updated
+        let rarity_map = state.pieces_rarity.rarity_map.lock().await;
+        assert_eq!(rarity_map.get(&0), Some(&1));
+        assert_eq!(rarity_map.get(&2), Some(&1));
+        assert_eq!(rarity_map.get(&4), Some(&1));
+        assert_eq!(rarity_map.len(), 3);
+
+        // Verify that queue is populated
+        let queue = state.pieces_queue.queue.lock().await;
+        assert_eq!(queue.len(), 3);
+        let mut queue = queue.iter();
+        assert_eq!(queue.next().unwrap(), &create_sample_piece(0, 16384));
+        assert_eq!(queue.next().unwrap(), &create_sample_piece(2, 16384));
+        assert_eq!(queue.next().unwrap(), &create_sample_piece(4, 16384));
+    }
+
+    #[tokio::test]
+    async fn test_download_state_process_many_bitfields() {
+        let mut pieces_map = HashMap::new();
+        for i in 0..5 {
+            pieces_map.insert(i, create_sample_piece(i, 16384));
+        }
+
+        let state = DownloadState::new(pieces_map.clone());
+        let bitfield = create_sample_bitfield(&[0, 2, 4], 5);
+
+        state.process_bitfield(&bitfield).await;
+
+        let bitfield = create_sample_bitfield(&[0, 1, 4], 5);
+        state.process_bitfield(&bitfield).await;
+
+        let bitfield = create_sample_bitfield(&[1, 4], 5);
+        state.process_bitfield(&bitfield).await;
+
+        // Verify that rarity map is updated
+        let rarity_map = state.pieces_rarity.rarity_map.lock().await;
+        assert_eq!(rarity_map.get(&0), Some(&2));
+        assert_eq!(rarity_map.get(&1), Some(&2));
+        assert_eq!(rarity_map.get(&2), Some(&1));
+        assert_eq!(rarity_map.get(&4), Some(&3));
+        assert_eq!(rarity_map.len(), 4);
+
+        // Verify that queue is populated
+        let queue = state.pieces_queue.queue.lock().await;
+        assert_eq!(queue.len(), 4);
+        let mut queue = queue.iter();
+        assert_eq!(queue.next().unwrap(), &create_sample_piece(2, 16384));
+        assert_eq!(queue.next().unwrap(), &create_sample_piece(0, 16384));
+        assert_eq!(queue.next().unwrap(), &create_sample_piece(1, 16384));
+        assert_eq!(queue.next().unwrap(), &create_sample_piece(4, 16384));
+        assert_eq!(queue.next(), None);
+    }
+
+    #[tokio::test]
+    async fn test_download_state_assign_piece() {
+        let mut pieces_map = HashMap::new();
+        for i in 0..5 {
+            pieces_map.insert(i, create_sample_piece(i, 16384));
+        }
+
+        let state = DownloadState::new(pieces_map.clone());
+        let bitfield = create_sample_bitfield(&[0, 2, 4], 5);
+
+        state.process_bitfield(&bitfield).await;
+
+        let bitfield = create_sample_bitfield(&[0, 1, 4], 5);
+        state.process_bitfield(&bitfield).await;
+
+        let bitfield = create_sample_bitfield(&[1, 4], 5);
+        state.process_bitfield(&bitfield).await;
+
+        {
+            // Verify that queue is populated
+            let queue = state.pieces_queue.queue.lock().await;
+            assert_eq!(queue.len(), 4);
+            let mut queue = queue.iter();
+            assert_eq!(queue.next().unwrap(), &create_sample_piece(2, 16384));
+            assert_eq!(queue.next().unwrap(), &create_sample_piece(0, 16384));
+            assert_eq!(queue.next().unwrap(), &create_sample_piece(1, 16384));
+            assert_eq!(queue.next().unwrap(), &create_sample_piece(4, 16384));
+        }
+
+        let peer_bitfield = create_sample_bitfield(&[0, 1, 2, 3], 5);
+        let assigned_piece = state.assign_piece(&peer_bitfield).await;
+
+        assert!(assigned_piece.is_some());
+        let assigned_piece = assigned_piece.unwrap();
+        assert_eq!(assigned_piece.index(), 2);
+
+        // Verify that the piece was removed from the queue
+        let queue = state.pieces_queue.queue.lock().await;
+        assert!(!queue.iter().any(|piece| piece.index() == 2));
+
+        // Verify that the piece is in the assigned set
+        let assigned_set = state.pieces_queue.assigned_pieces.lock().await;
+        assert!(assigned_set.contains(&assigned_piece));
+    }
+
+    #[tokio::test]
+    async fn test_download_state_complete_piece() {
+        let mut pieces_map = HashMap::new();
+        for i in 0..5 {
+            pieces_map.insert(i, create_sample_piece(i, 16384));
+        }
+
+        let state = DownloadState::new(pieces_map.clone());
+        let bitfield = create_sample_bitfield(&[0, 2, 4], 5);
+
+        state.process_bitfield(&bitfield).await;
+        let assigned_piece = state.assign_piece(&bitfield).await.unwrap();
+
+        state.complete_piece(assigned_piece.clone()).await;
+
+        // Verify that the piece is marked as downloaded
+        let has_piece = state
+            .metadata
+            .has_piece(assigned_piece.index() as usize)
+            .await;
+        assert!(has_piece);
+
+        // Verify that the piece is removed from the assigned set
+        let assigned_set = state.pieces_queue.assigned_pieces.lock().await;
+        assert!(!assigned_set.contains(&assigned_piece));
     }
 }
