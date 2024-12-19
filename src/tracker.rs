@@ -4,7 +4,7 @@ use serde_bytes::ByteBuf;
 use std::{
     collections::HashMap,
     error::Error,
-    fmt::{self, format, Display},
+    fmt::{self, Display},
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
@@ -90,8 +90,8 @@ pub struct Flags {
 impl Display for Ip {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Ip::IpV4(ipv4) => write!(f, "{}", ipv4.to_string()),
-            Ip::IpV6(ipv6) => write!(f, "{}", ipv6.to_string()),
+            Ip::IpV4(ipv4) => write!(f, "{}", ipv4),
+            Ip::IpV6(ipv6) => write!(f, "{}", ipv6),
             Ip::Dns(dns) => write!(f, "{}", dns),
         }
     }
@@ -158,9 +158,7 @@ impl Display for TrackerError {
 
 impl Error for TrackerError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            _ => None,
-        }
+        None
     }
 }
 

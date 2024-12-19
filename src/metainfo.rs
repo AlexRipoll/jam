@@ -135,7 +135,7 @@ impl Metainfo {
         }
 
         // Extract the path and check if it ends with "announce"
-        let mut path_segments: Vec<&str> = url.as_str().split("/").collect();
+        let mut path_segments: Vec<&str> = url.as_str().split('/').collect();
 
         if let Some(last_segment) = path_segments.last_mut() {
             if last_segment.starts_with("announce") {

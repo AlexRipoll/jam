@@ -7,7 +7,7 @@ use std::{collections::HashMap, usize};
 use tokio::io::{self, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 use crate::bitfield::Bitfield;
 use crate::download_state::DownloadState;
@@ -45,7 +45,7 @@ impl Default for State {
             is_interested: false,
             peer_choked: true,
             peer_interested: false,
-            peer_bitfield: Bitfield::new(&vec![]),
+            peer_bitfield: Bitfield::new(&[]),
             pieces_status: HashMap::new(),
             download_queue: vec![],
         }
@@ -383,13 +383,11 @@ impl Handshake {
     }
 }
 
-pub async fn handshake(
+pub async fn perform_handshake(
     stream: &mut TcpStream,
-    info_hash: [u8; 20],
-    peer_id: [u8; 20],
+    handshake_metadata: Handshake,
 ) -> Result<Vec<u8>, P2pError> {
-    let handshake = Handshake::new(info_hash, peer_id);
-    stream.write_all(&handshake.serialize()).await?;
+    stream.write_all(&handshake_metadata.serialize()).await?;
 
     let mut buffer = vec![0u8; 68];
     stream.readable().await?;
@@ -540,10 +538,10 @@ impl PartialEq for IoErrorWrapper {
 impl Eq for IoErrorWrapper {}
 
 fn client_version() -> String {
-    let version_tag = env!("CARGO_PKG_VERSION").replace(".", "");
+    let version_tag = env!("CARGO_PKG_VERSION").replace('.', "");
     let version = version_tag
         .chars()
-        .filter(|c| c.is_digit(10))
+        .filter(|c| c.is_ascii_digit())
         .take(4)
         .collect::<String>();
 
@@ -572,7 +570,7 @@ pub fn generate_peer_id() -> [u8; 20] {
 
 fn is_valid_piece(piece_hash: [u8; 20], piece_bytes: &[u8]) -> bool {
     let mut hasher = Sha1::new();
-    hasher.update(&piece_bytes);
+    hasher.update(piece_bytes);
     let hash = hasher.finalize();
 
     piece_hash == hash.as_slice()

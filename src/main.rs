@@ -65,7 +65,7 @@ async fn main() -> io::Result<()> {
     debug!("Computing info hash...");
     let info_hash = Metainfo::compute_info_hash(&buffer)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-    debug!(info_hash = ?hex::encode(&info_hash), "Info hash computed");
+    debug!(info_hash = ?hex::encode(info_hash), "Info hash computed");
 
     trace!("Deserializing matainfo file");
     let metainfo = Metainfo::deserialize(&buffer).map_err(|e| {

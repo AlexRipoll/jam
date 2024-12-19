@@ -24,6 +24,7 @@ impl Writer {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(file_path)
             .expect("Failed to open file");
 

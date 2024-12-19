@@ -89,6 +89,12 @@ impl PiecesQueue {
     }
 }
 
+impl Default for PiecesQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug)]
 pub struct PiecesRarity {
     pub rarity_map: Mutex<HashMap<u32, u16>>, // piece index -> piece count
@@ -122,6 +128,12 @@ impl PiecesRarity {
         sorted_pieces.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0))); // Most rare first
 
         sorted_pieces
+    }
+}
+
+impl Default for PiecesRarity {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

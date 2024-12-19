@@ -40,7 +40,7 @@ impl Bitfield {
             return false;
         }
 
-        (&self.bytes[byte_index] & (1 << (7 - bit_index))) != 0
+        (self.bytes[byte_index] & (1 << (7 - bit_index))) != 0
     }
 
     pub fn has_all_pieces(&self) -> bool {
