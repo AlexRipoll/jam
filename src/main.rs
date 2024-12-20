@@ -108,14 +108,18 @@ async fn main() -> io::Result<()> {
     trace!("Loading config...");
     let config = Config::load().unwrap();
 
-    let torrent_metadata =
-        TorrentMetadata::new(metainfo.info.name, metainfo.info.length.unwrap(), pieces);
+    let torrent_metadata = TorrentMetadata::new(
+        metainfo.info.name,
+        metainfo.info.length.unwrap(),
+        info_hash,
+        pieces,
+    );
 
     info!("Initializing client...");
     let client = Client::new(config, torrent_metadata, peers, peer_id);
 
     info!("Starting download...");
-    if let Err(e) = client.run(info_hash).await {
+    if let Err(e) = client.run().await {
         error!("Error during client run: {}", e);
         return Err(e);
     }

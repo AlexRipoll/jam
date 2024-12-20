@@ -27,14 +27,21 @@ const SHUTDOWN_CHANNEL_BUFFER: usize = 1;
 pub struct TorrentMetadata {
     pub file_name: String,
     pub file_size: u64,
+    pub info_hash: [u8; 20],
     pub pieces: HashMap<u32, Piece>,
 }
 
 impl TorrentMetadata {
-    pub fn new(file_name: String, file_size: u64, pieces: HashMap<u32, Piece>) -> Self {
+    pub fn new(
+        file_name: String,
+        file_size: u64,
+        info_hash: [u8; 20],
+        pieces: HashMap<u32, Piece>,
+    ) -> Self {
         Self {
             file_name,
             file_size,
+            info_hash,
             pieces,
         }
     }
@@ -49,6 +56,7 @@ pub struct Client {
     max_peer_connections: u32,
     file_name: String,
     file_size: u64,
+    info_hash: [u8; 20],
     peers: Vec<Peer>,
     peer_id: [u8; 20],
     download_state: Arc<DownloadState>,
@@ -69,13 +77,14 @@ impl Client {
             piece_standard_size: config.p2p.piece_standard_size,
             file_name: torrent_metadata.file_name,
             file_size: torrent_metadata.file_size,
+            info_hash: torrent_metadata.info_hash,
             peers,
             peer_id,
             download_state: Arc::new(DownloadState::new(torrent_metadata.pieces)),
         }
     }
 
-    pub async fn run(self, info_hash: [u8; 20]) -> io::Result<()> {
+    pub async fn run(self) -> io::Result<()> {
         let (client_tx, client_rx) = mpsc::channel(CLIENT_CHANNEL_BUFFER);
         let (disk_tx, disk_rx) = mpsc::channel(DISK_CHANNEL_BUFFER);
         let (shutdown_tx, _) = broadcast::channel::<()>(SHUTDOWN_CHANNEL_BUFFER); // Shutdown signal
@@ -103,25 +112,22 @@ impl Client {
         // Spawn tasks for peer connections
         for i in 0..self.max_peer_connections {
             let peers_queue = Arc::clone(&peers_queue);
-            let peer_id = self.peer_id;
             let download_state = Arc::clone(&self.download_state);
-            let timeout_duration = self.timeout_duration;
-            let connection_retries = self.connection_retries;
-            let client_tx = Arc::clone(&client_tx);
+            let bitfield_tx = Arc::clone(&client_tx);
             let disk_tx = Arc::clone(&disk_tx);
             let shutdown_tx = Arc::clone(&shutdown_tx);
 
             let peer_task = tokio::spawn(Client::run_peer_connection(
                 // TODO: generate peer id
                 i,
+                self.timeout_duration,
+                self.connection_retries,
+                self.peer_id,
+                self.info_hash,
                 peers_queue,
-                client_tx,
-                disk_tx,
-                peer_id,
                 download_state,
-                info_hash,
-                timeout_duration,
-                connection_retries,
+                bitfield_tx,
+                disk_tx,
                 shutdown_tx,
             ));
             task_handles.push(peer_task);
@@ -178,14 +184,14 @@ impl Client {
 
     async fn run_peer_connection(
         id: u32,
-        peers_queue: Arc<Mutex<VecDeque<Peer>>>,
-        client_tx: Arc<mpsc::Sender<Bitfield>>,
-        disk_tx: Arc<mpsc::Sender<(Piece, Vec<u8>)>>,
-        peer_id: [u8; 20],
-        download_state: Arc<DownloadState>,
-        info_hash: [u8; 20],
         timeout_duration: u64,
         connection_retries: u32,
+        peer_id: [u8; 20],
+        info_hash: [u8; 20],
+        peers_queue: Arc<Mutex<VecDeque<Peer>>>,
+        download_state: Arc<DownloadState>,
+        bitfield_tx: Arc<mpsc::Sender<Bitfield>>,
+        disk_tx: Arc<mpsc::Sender<(Piece, Vec<u8>)>>,
         shutdown_tx: Arc<broadcast::Sender<()>>,
     ) {
         let peer_span = tracing::info_span!("peer_connection", peer_id = id);
@@ -209,7 +215,7 @@ impl Client {
                     match peer {
                         Some(peer) => {
                             let handshake_metadata = Handshake::new(info_hash, peer_id);
-                            let peer_session = PeerSession::new(&peer.address(), handshake_metadata,Arc::clone(&download_state),Arc::clone(&client_tx),Arc::clone(&disk_tx));
+                            let peer_session = PeerSession::new(&peer.address(), handshake_metadata,Arc::clone(&download_state),Arc::clone(&bitfield_tx),Arc::clone(&disk_tx));
                             // info!(&peer.address().to_string(), "Starting peer connection...");
 
 
