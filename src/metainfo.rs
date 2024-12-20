@@ -4,7 +4,13 @@ use serde::{Deserialize, Serialize};
 use serde_bencode::{de, ser};
 use serde_bytes::ByteBuf;
 use sha1::{Digest, Sha1};
-use std::{collections::BTreeMap, error::Error, fmt::Display};
+use std::{
+    collections::{BTreeMap, HashMap},
+    error::Error,
+    fmt::Display,
+};
+
+use crate::p2p::piece::Piece;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Metainfo {
@@ -150,11 +156,26 @@ impl Metainfo {
         // If the "announce" convention is not followed, scraping isn't supported
         Err(MetainfoError::ScrapeNotSupported)
     }
+
+    pub fn parse_pieces(&self) -> Result<HashMap<u32, Piece>, MetainfoError> {
+        let mut pieces = HashMap::new();
+
+        for (index, sha1) in self.info.pieces.chunks(20).enumerate() {
+            let sha1: [u8; 20] = sha1
+                .try_into()
+                .map_err(|_| MetainfoError::InvalidPieceLength)?;
+            let piece = Piece::new(index as u32, self.info.piece_length as usize, sha1);
+            pieces.insert(index as u32, piece);
+        }
+
+        Ok(pieces)
+    }
 }
 
 #[derive(Debug)]
 pub enum MetainfoError {
     MissingAnnouceUrl,
+    InvalidPieceLength,
     UrlParseError(url::ParseError),
     DecodeError(serde_bencode::Error),
     EncodeError(serde_bencode::Error),
@@ -166,6 +187,7 @@ impl Display for MetainfoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MetainfoError::MissingAnnouceUrl => write!(f, "No announce URL found"),
+            MetainfoError::InvalidPieceLength => write!(f, "Invalid piece length"),
             MetainfoError::ScrapeNotSupported => write!(f, "Tracker scrape not supported"),
             MetainfoError::MissingInfoField => write!(f, "Missing `info` field in metainfo"),
             MetainfoError::UrlParseError(err) => write!(f, "Failed to parse announce URL: {}", err),

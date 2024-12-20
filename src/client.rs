@@ -9,6 +9,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     bitfield::Bitfield,
+    config::Config,
     download_state::DownloadState,
     p2p::{message_handler::Handshake, piece::Piece},
     session::PeerSession,
@@ -23,43 +24,54 @@ const DISK_CHANNEL_BUFFER: usize = 128;
 const SHUTDOWN_CHANNEL_BUFFER: usize = 1;
 
 #[derive(Debug)]
+pub struct TorrentMetadata {
+    pub file_name: String,
+    pub file_size: u64,
+    pub pieces: HashMap<u32, Piece>,
+}
+
+impl TorrentMetadata {
+    pub fn new(file_name: String, file_size: u64, pieces: HashMap<u32, Piece>) -> Self {
+        Self {
+            file_name,
+            file_size,
+            pieces,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Client {
     download_path: String,
-    file_name: String,
-    file_size: u64,
     piece_standard_size: u64,
-    peer_id: [u8; 20],
-    peers: Vec<Peer>,
-    max_peer_connections: u32,
-    download_state: Arc<DownloadState>,
     timeout_duration: u64,
     connection_retries: u32,
+    max_peer_connections: u32,
+    file_name: String,
+    file_size: u64,
+    peers: Vec<Peer>,
+    peer_id: [u8; 20],
+    download_state: Arc<DownloadState>,
 }
 
 impl Client {
     pub fn new(
-        download_path: String,
-        file_name: String,
-        file_size: u64,
-        piece_standard_size: u64,
-        peer_id: [u8; 20],
-        peers: Vec<Peer>,
-        max_peer_connections: u32,
-        pieces: HashMap<u32, Piece>,
-        timeout_duration: u64,
-        connection_retries: u32,
+        config: Config,
+        torrent_metadata: TorrentMetadata,
+        peers: Vec<Peer>,  // metainfo-tracker
+        peer_id: [u8; 20], // fn output
     ) -> Self {
         Self {
-            download_path,
-            file_name,
-            file_size,
-            piece_standard_size,
-            peer_id,
+            download_path: config.disk.download_path,
+            connection_retries: config.p2p.connection_retries,
+            timeout_duration: config.p2p.timeout_duration,
+            max_peer_connections: config.p2p.max_peer_connections,
+            piece_standard_size: config.p2p.piece_standard_size,
+            file_name: torrent_metadata.file_name,
+            file_size: torrent_metadata.file_size,
             peers,
-            max_peer_connections,
-            download_state: Arc::new(DownloadState::new(pieces)),
-            timeout_duration,
-            connection_retries,
+            peer_id,
+            download_state: Arc::new(DownloadState::new(torrent_metadata.pieces)),
         }
     }
 

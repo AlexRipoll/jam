@@ -1,13 +1,12 @@
 use std::{
-    collections::HashMap,
     fs::File,
     io::{self, Read},
 };
 
-use client::Client;
+use client::{Client, TorrentMetadata};
 use config::Config;
 use metainfo::Metainfo;
-use p2p::{message_handler::generate_peer_id, piece::Piece};
+use p2p::message_handler::generate_peer_id;
 use tracing::{debug, error, info, trace, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 use tracker::get;
@@ -104,36 +103,16 @@ async fn main() -> io::Result<()> {
     info!(peer_count = peers.len(), "Successfully decoded peer list");
 
     trace!("Creating piece map...");
-    let mut pieces = HashMap::new();
-
-    for (index, sha1) in metainfo.info.pieces.chunks(20).enumerate() {
-        let sha1: [u8; 20] = sha1.try_into().expect("Invalid piece length");
-        let piece = Piece::new(index as u32, metainfo.info.piece_length as usize, sha1);
-        pieces.insert(index as u32, piece);
-    }
+    let pieces = metainfo.parse_pieces().unwrap();
 
     trace!("Loading config...");
     let config = Config::load().unwrap();
-    let download_path = config.disk.download_path;
-    let timeout_duration = config.p2p.timeout_duration;
-    let max_peer_connections = config.p2p.max_peer_connections;
-    let piece_standard_size = config.p2p.piece_standard_size;
-    let connection_retries = config.p2p.connection_retries;
+
+    let torrent_metadata =
+        TorrentMetadata::new(metainfo.info.name, metainfo.info.length.unwrap(), pieces);
 
     info!("Initializing client...");
-    let client = Client::new(
-        download_path,
-        metainfo.info.name,
-        metainfo.info.length.unwrap(),
-        piece_standard_size,
-        peer_id,
-        peers,
-        max_peer_connections,
-        pieces,
-        timeout_duration,
-        connection_retries,
-    );
-    debug!("Client initialized");
+    let client = Client::new(config, torrent_metadata, peers, peer_id);
 
     info!("Starting download...");
     if let Err(e) = client.run(info_hash).await {
