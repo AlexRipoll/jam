@@ -51,7 +51,7 @@ mod tests {
                         },
                         p2p: P2pConfig {
                             max_peer_connections: 2,
-                            timeout_duration: 3,
+                            timeout_duration: 3000,
                             connection_retries: 2,
                             piece_standard_size: 16384
                         },

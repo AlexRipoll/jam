@@ -385,7 +385,7 @@ impl Handshake {
 
 pub async fn perform_handshake(
     stream: &mut TcpStream,
-    handshake_metadata: Handshake,
+    handshake_metadata: &Handshake,
 ) -> Result<Vec<u8>, P2pError> {
     stream.write_all(&handshake_metadata.serialize()).await?;
 

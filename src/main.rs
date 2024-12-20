@@ -20,6 +20,7 @@ pub mod metainfo;
 mod p2p;
 pub mod session;
 pub mod store;
+pub mod tcp_connection;
 pub mod tracker;
 
 #[tokio::main]

@@ -5,11 +5,16 @@ use std::{
 };
 
 use tokio::sync::{broadcast, mpsc, Mutex};
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::{
-    bitfield::Bitfield, download_state::DownloadState, p2p::piece::Piece,
-    session::new_peer_session, store::Writer, tracker::Peer,
+    bitfield::Bitfield,
+    download_state::DownloadState,
+    p2p::{message_handler::Handshake, piece::Piece},
+    session::PeerSession,
+    store::Writer,
+    tcp_connection::connect_to_peer,
+    tracker::Peer,
 };
 
 // Configuration constants
@@ -178,29 +183,40 @@ impl Client {
         let mut shutdown_rx = shutdown_tx.subscribe();
         loop {
             tokio::select! {
-                _ = async {
-                    // Check if all pieces are downloaded
-                    if download_state.metadata.bitfield.lock().await.has_all_pieces() {
-                        let _ = shutdown_tx.send(()); // Send shutdown signal
-                    }
-                    // Get a peer from the queue
-                    let peer = {
-                        let mut queue = peers_queue.lock().await;
-                        queue.pop_front()
-                    };
+            _ = async {
+                // Check if all pieces are downloaded
+                if download_state.metadata.bitfield.lock().await.has_all_pieces() {
+                    let _ = shutdown_tx.send(()); // Send shutdown signal
+                }
+                // Get a peer from the queue
+                let peer = {
+                    let mut queue = peers_queue.lock().await;
+                    queue.pop_front()
+                };
 
-                    match peer {
-                        Some(peer) => {
-                            match new_peer_session(
-                                &peer.address().to_string(),
-                                info_hash,
-                                peer_id,
-                                Arc::clone(&client_tx),
-                                Arc::clone(&disk_tx),
-                                Arc::clone(&download_state),
-                                timeout_duration,
-                                connection_retries,
-                            ).await {
+                match peer {
+                    Some(peer) => {
+                        let handshake_metadata = Handshake::new(info_hash, peer_id);
+                        let peer_session = PeerSession::new(&peer.address(), handshake_metadata,Arc::clone(&download_state),Arc::clone(&client_tx),Arc::clone(&disk_tx));
+                        // info!(&peer.address().to_string(), "Starting peer connection...");
+
+
+                        // info!(self.config.peer_addr, "TCP connection established");
+                        let stream = match connect_to_peer(peer.address().to_string(), timeout_duration, connection_retries).await {
+                            Ok(stream) => Some(stream), // Successfully connected, return the stream
+                            Err(e) => {
+                                warn!(
+                                    peer_id = id,
+                                    peer_address = %peer.address(),
+                                    error = %e,
+                                    "Failed to connect to peer after retries"
+                                );
+                                None // Connection failed, return None
+                            }
+                        };
+
+                        if let Some(stream) = stream {
+                            match peer_session.initialize(stream).await {
                                 Ok(_) => {
                                     info!(
 
@@ -219,10 +235,11 @@ impl Client {
                                 }
                             }
                         }
-                        None => {
-                            debug!(peer_id = id, "No more peers available, exiting");
-                        }
                     }
+                    None => {
+                        debug!(peer_id = id, "No more peers available, exiting");
+                    }
+                }
                 } => {}
                 _ = shutdown_rx.recv() => {
                     debug!(peer_id = id, "Peer connection task shutting down");

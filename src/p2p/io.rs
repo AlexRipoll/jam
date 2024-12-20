@@ -5,9 +5,9 @@ use tokio::{
 
 use super::{message::Message, message_handler::P2pError};
 
-pub async fn read_message<R>(read_half: &mut R) -> Result<Message, P2pError>
+pub async fn read_message<T>(read_half: &mut T) -> Result<Message, P2pError>
 where
-    R: AsyncRead + Unpin,
+    T: AsyncRead + Unpin,
 {
     let mut length_buffer = [0u8; 4];
     let mut bytes_read = 0;
