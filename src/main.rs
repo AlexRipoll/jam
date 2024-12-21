@@ -8,7 +8,12 @@ use config::Config;
 use metainfo::Metainfo;
 use p2p::message_handler::generate_peer_id;
 use tracing::{debug, error, info, trace, warn, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing_appender::rolling;
+use tracing_subscriber::{
+    fmt::{self, format::FmtSpan},
+    layer::SubscriberExt,
+    EnvFilter, FmtSubscriber, Registry,
+};
 use tracker::get;
 
 pub mod bitfield;
@@ -25,16 +30,39 @@ pub mod tracker;
 #[tokio::main]
 async fn main() -> io::Result<()> {
     // Initialize tracing
-    let builder = FmtSubscriber::builder();
-    let subscriber = builder
-        // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
-        // will be written to stdout.
-        .with_max_level(Level::INFO)
+    // let builder = FmtSubscriber::builder();
+    // let subscriber = builder
+    //     // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
+    //     // will be written to stdout.
+    //     .with_max_level(Level::DEBUG)
+    //     .with_thread_names(true)
+    //     .with_target(true)
+    //     // completes the builder.
+    //     .finish();
+
+    // File appender: rolling logs daily to "logs/app.log".
+    let file_appender = rolling::daily("logs", "app.log");
+
+    // Logger for terminal output (with colors).
+    let terminal_layer = fmt::layer()
         .with_thread_names(true)
         .with_target(true)
-        // completes the builder.
-        .finish();
+        .with_span_events(FmtSpan::NONE)
+        .with_ansi(true); // Enable ANSI for terminal
 
+    // Logger for file output (no colors or ANSI escape codes).
+    let file_layer = fmt::layer()
+        .with_writer(file_appender)
+        .with_thread_names(true)
+        .with_target(true)
+        .with_span_events(FmtSpan::NONE)
+        .with_ansi(false); // Disable ANSI for file output
+
+    // Combine the layers and apply the subscriber.
+    let subscriber = Registry::default()
+        .with(EnvFilter::from_default_env().add_directive(Level::DEBUG.into()))
+        .with(terminal_layer)
+        .with(file_layer);
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     info!(" Starting BitTorrent client...");
@@ -52,7 +80,7 @@ async fn main() -> io::Result<()> {
     // With DHT or PEX:
     // - archlinux-2024.09.01-x86_64.iso.torrent
     let file_path = "debian-12.7.0-amd64-netinst.iso.torrent";
-    info!("Opening torrent file: {}", file_path);
+    debug!("Opening torrent file: {}", file_path);
     let mut file = File::open(file_path).map_err(|e| {
         warn!("Failed to open torrent file: {}", e);
         e
@@ -86,7 +114,7 @@ async fn main() -> io::Result<()> {
         })?;
     debug!(tracker_url = ?url, "Tracker URL built");
 
-    info!("Querying tracker...");
+    debug!("Querying tracker...");
     let response = get(&url).await.map_err(|e| {
         warn!("Failed to query tracker: {}", e);
         io::Error::new(io::ErrorKind::Other, format!("Tracker query failed: {e}"))
@@ -100,7 +128,7 @@ async fn main() -> io::Result<()> {
             format!("Failed to decode peers: {e}"),
         )
     })?;
-    info!(peer_count = peers.len(), "Successfully decoded peer list");
+    debug!(peer_count = peers.len(), "Successfully decoded peer list");
 
     trace!("Creating piece map...");
     let pieces = metainfo.parse_pieces().unwrap();
