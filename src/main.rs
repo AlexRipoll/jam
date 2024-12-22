@@ -12,7 +12,7 @@ use tracing_appender::rolling;
 use tracing_subscriber::{
     fmt::{self, format::FmtSpan},
     layer::SubscriberExt,
-    EnvFilter, FmtSubscriber, Registry,
+    EnvFilter, Registry,
 };
 use tracker::get;
 
@@ -29,17 +29,6 @@ pub mod tracker;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    // Initialize tracing
-    // let builder = FmtSubscriber::builder();
-    // let subscriber = builder
-    //     // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
-    //     // will be written to stdout.
-    //     .with_max_level(Level::DEBUG)
-    //     .with_thread_names(true)
-    //     .with_target(true)
-    //     // completes the builder.
-    //     .finish();
-
     // File appender: rolling logs daily to "logs/app.log".
     let file_appender = rolling::daily("logs", "app.log");
 
@@ -139,6 +128,7 @@ async fn main() -> io::Result<()> {
     let torrent_metadata = TorrentMetadata::new(
         metainfo.info.name,
         metainfo.info.length.unwrap(),
+        metainfo.info.piece_length,
         info_hash,
         pieces,
     );

@@ -2,9 +2,13 @@ use std::{
     collections::{HashMap, VecDeque},
     io,
     sync::Arc,
+    time::Duration,
 };
 
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::{
+    sync::{broadcast, mpsc, Mutex},
+    time::{self, interval},
+};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
@@ -27,6 +31,7 @@ const SHUTDOWN_CHANNEL_BUFFER: usize = 1;
 pub struct TorrentMetadata {
     pub file_name: String,
     pub file_size: u64,
+    pub piece_standard_size: u64,
     pub info_hash: [u8; 20],
     pub pieces: HashMap<u32, Piece>,
 }
@@ -35,12 +40,14 @@ impl TorrentMetadata {
     pub fn new(
         file_name: String,
         file_size: u64,
+        piece_standard_size: u64,
         info_hash: [u8; 20],
         pieces: HashMap<u32, Piece>,
     ) -> Self {
         Self {
             file_name,
             file_size,
+            piece_standard_size,
             info_hash,
             pieces,
         }
@@ -50,12 +57,13 @@ impl TorrentMetadata {
 #[derive(Debug)]
 pub struct Client {
     download_path: String,
-    piece_standard_size: u64,
+    recovery_path: String,
     timeout_duration: u64,
     connection_retries: u32,
     max_peer_connections: u32,
     file_name: String,
     file_size: u64,
+    piece_standard_size: u64,
     info_hash: [u8; 20],
     peers: Vec<Peer>,
     peer_id: [u8; 20],
@@ -71,12 +79,13 @@ impl Client {
     ) -> Self {
         Self {
             download_path: config.disk.download_path,
+            recovery_path: config.disk.recovery_path,
             connection_retries: config.p2p.connection_retries,
             timeout_duration: config.p2p.timeout_duration,
             max_peer_connections: config.p2p.max_peer_connections,
-            piece_standard_size: config.p2p.piece_standard_size,
             file_name: torrent_metadata.file_name,
             file_size: torrent_metadata.file_size,
+            piece_standard_size: torrent_metadata.piece_standard_size,
             info_hash: torrent_metadata.info_hash,
             peers,
             peer_id,
@@ -91,9 +100,6 @@ impl Client {
 
         // Vector to keep track of task handles
         let mut task_handles = Vec::new();
-
-        let client_span = tracing::info_span!("client");
-        let _enter = client_span.enter();
 
         let client_tx = Arc::new(client_tx);
         let disk_tx = Arc::new(disk_tx);
@@ -134,7 +140,14 @@ impl Client {
         }
 
         // Disk writer task
-        let disk_writer = Writer::new(&format!("{}/{}", &self.download_path, &self.file_name))?;
+        let disk_writer = Writer::new(
+            &format!("{}/{}", &self.download_path, &self.file_name),
+            &format!(
+                "{}/{}.dat",
+                &self.recovery_path,
+                hex::encode(&self.info_hash)
+            ),
+        )?;
         let file_size = self.file_size;
         let piece_standard_size = self.piece_standard_size;
         let shutdown_rx = shutdown_tx.subscribe();
@@ -164,8 +177,6 @@ impl Client {
         download_state: Arc<DownloadState>,
         mut shutdown_rx: broadcast::Receiver<()>,
     ) {
-        let bitfield_span = tracing::info_span!("bitfield_listener");
-        let _enter = bitfield_span.enter();
         debug!("Bitfield receiver task initialized");
 
         loop {
@@ -194,8 +205,6 @@ impl Client {
         disk_tx: Arc<mpsc::Sender<(Piece, Vec<u8>)>>,
         shutdown_tx: Arc<broadcast::Sender<()>>,
     ) {
-        let peer_span = tracing::info_span!("peer_connection", peer_id = id);
-        let _enter = peer_span.enter();
         debug!(peer_id = id, "Peer connection task started");
 
         let mut shutdown_rx = shutdown_tx.subscribe();
@@ -216,10 +225,8 @@ impl Client {
                         Some(peer) => {
                             let handshake_metadata = Handshake::new(info_hash, peer_id);
                             let peer_session = PeerSession::new(&peer.address(), handshake_metadata,Arc::clone(&download_state),Arc::clone(&bitfield_tx),Arc::clone(&disk_tx));
-                            // info!(&peer.address().to_string(), "Starting peer connection...");
 
-
-                            // info!(self.config.peer_addr, "TCP connection established");
+                            info!(peer_address = %peer.address(), "TCP connection established");
                             let stream = match connect_to_peer(peer.address().to_string(), timeout_duration, connection_retries).await {
                                 Ok(stream) => Some(stream), // Successfully connected, return the stream
                                 Err(e) => {
@@ -260,7 +267,7 @@ impl Client {
                     }
                 } => {}
                 _ = shutdown_rx.recv() => {
-                    debug!(peer_id = id, "Peer connection task shutting down");
+                    info!(peer_id = id, "Peer connection task shutting down");
                     break;
                 }
             }
@@ -275,50 +282,50 @@ impl Client {
         download_state: Arc<DownloadState>,
         mut shutdown_rx: broadcast::Receiver<()>,
     ) {
-        let disk_span = tracing::info_span!("disk_writer");
-        let _enter = disk_span.enter();
         debug!("Disk writer task initialized");
 
         loop {
             tokio::select! {
-                    Some((piece, assembled_piece)) = receiver.recv() => {
-                        let piece_index = piece.index();
-                        trace!(
-                            piece_index = piece_index,
-                            "Received piece for writing to disk"
-                        );
-                        match disk_writer.write_piece_to_disk(
-                            piece,
-                            file_size,
-                            piece_standard_size,
-                            &assembled_piece,
-                        ) {
-                            Ok(_) => {
-                                debug!(
-                                    piece_index = piece_index,
-                                    "Piece written to disk successfully"
-                                );
-                                download_state.metadata.bitfield.lock().await.set_piece(piece_index as usize);
-                                debug!(piece_index = piece_index, "Bitfield piece index updated");
-                            }
-                            Err(e) => {
-                                error!(
-                                    piece_index = piece_index,
-                                    error = %e,
-                                    "Error writing piece to disk"
-                                );
-                            }
+                Some((piece, assembled_piece)) = receiver.recv() => {
+                    let piece_index = piece.index();
+                    debug!(
+                        piece_index = piece_index, bytes = piece.size(), blocks = piece.blocks.len(),
+                        "Received piece for writing to disk"
+                    );
+                    match disk_writer.write_piece_to_disk(
+                        piece,
+                        file_size,
+                        piece_standard_size,
+                        &assembled_piece,
+                    ) {
+                        Ok(_) => {
+                            debug!(
+                                piece_index = piece_index,
+                                "Piece written to disk successfully"
+                            );
+                            // download_state.metadata.bitfield.lock().await.set_piece(piece_index as usize);
+                            let mut bitfield = download_state.metadata.bitfield.lock().await;
+                            bitfield.set_piece(piece_index as usize);
+                            let count: u32 = bitfield.bytes.iter().map(|byte| byte.count_ones()).sum();
+                            debug!(piece_index = piece_index, "Bitfield: {:?} ({}/{})", bitfield.bytes, count, bitfield.num_pieces);
+                        }
+                        Err(e) => {
+                            error!(
+                                piece_index = piece_index,
+                                error = %e,
+                                "Error writing piece to disk"
+                            );
                         }
                     }
-                    _ = shutdown_rx.recv() => {
-                        debug!("Disk writer task shutting down");
-                        break;
+                }
+                _ = shutdown_rx.recv() => {
+                    info!("Disk writer task shutting down");
+                    break;
 
                 }
             }
-
-            info!("Disk writer task completed");
         }
+        info!("Disk writer task completed");
     }
 }
 

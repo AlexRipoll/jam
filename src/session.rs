@@ -5,7 +5,7 @@ use tokio::{
     net::TcpStream,
     sync::{broadcast, mpsc, Mutex},
 };
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 use crate::{
     bitfield::Bitfield,
@@ -32,14 +32,14 @@ impl PeerSession {
         peer_addr: &str,
         handshake_metadata: Handshake,
         download_state: Arc<DownloadState>,
-        client_tx: Arc<mpsc::Sender<Bitfield>>,
+        bitfield_tx: Arc<mpsc::Sender<Bitfield>>,
         disk_tx: Arc<mpsc::Sender<(Piece, Vec<u8>)>>,
     ) -> Self {
         Self {
             peer_addr: peer_addr.to_string(),
             handshake_metadata,
             download_state,
-            bitfield_tx: client_tx,
+            bitfield_tx,
             disk_tx,
         }
     }
@@ -124,7 +124,7 @@ impl PeerSession {
     ) {
         let reader_span = tracing::info_span!("reader_task", peer_addr = %peer_addr);
         let _enter = reader_span.enter();
-        debug!(peer_addr = %peer_addr, "Initializing peer IO reader...");
+        info!(peer_addr = %peer_addr, "Initializing peer IO reader...");
 
         loop {
             tokio::select! {
@@ -143,7 +143,7 @@ impl PeerSession {
                     }
                 }
                 _ = shutdown_rx.recv() => {
-                    debug!(peer_addr = %peer_addr, "Reader task received shutdown signal");
+                    info!(peer_addr = %peer_addr, "Reader task received shutdown signal");
                     drop(read_half);
                     break;
                 }
@@ -159,7 +159,7 @@ impl PeerSession {
     ) {
         let writer_span = tracing::info_span!("writer_task", peer_addr = %peer_addr);
         let _enter = writer_span.enter();
-        debug!(peer_addr = %peer_addr, "Initializing peer IO writer...");
+        info!(peer_addr = %peer_addr, "Initializing peer IO writer...");
 
         loop {
             tokio::select! {
@@ -172,7 +172,7 @@ impl PeerSession {
 
                 // Handle shutdown signal
                 _ = shutdown_rx.recv() => {
-                    debug!(peer_addr = %peer_addr, "Writer task received shutdown signal");
+                    info!(peer_addr = %peer_addr, "Writer task received shutdown signal");
                     if let Err(e) = write_half.shutdown().await {
                         error!(peer_addr = %peer_addr, error = %e, "Error shutting down TCP stream");
                     }
@@ -192,7 +192,7 @@ impl PeerSession {
     ) {
         let actor_span = tracing::info_span!("actor_task", peer_addr = %peer_addr);
         let _enter = actor_span.enter();
-        debug!(peer_addr = %peer_addr, "Initializing peer actor handler...");
+        info!(peer_addr = %peer_addr, "Initializing peer actor handler...");
 
         loop {
             tokio::select! {
@@ -206,7 +206,7 @@ impl PeerSession {
 
                 // Handle shutdown signal
                 _ = shutdown_rx.recv() => {
-                    debug!(peer_addr = %peer_addr, "Actor task received shutdown signal");
+                    info!(peer_addr = %peer_addr, "Actor task received shutdown signal");
                     break;
                 }
             }
@@ -221,7 +221,7 @@ impl PeerSession {
     ) {
         let request_span = tracing::info_span!("piece_request_task", peer_addr = %peer_addr);
         let _enter = request_span.enter();
-        debug!(peer_addr = %peer_addr, "Initializing piece requester...");
+        info!(peer_addr = %peer_addr, "Initializing piece requester...");
 
         loop {
             tokio::select! {
@@ -237,14 +237,14 @@ impl PeerSession {
 
                     // Check if all pieces have been downloaded
                     if actor.is_complete().await {
-                        debug!(peer_addr = %peer_addr, "All pieces downloaded. Sending shutdown signal...");
+                        info!(peer_addr = %peer_addr, "All pieces downloaded. Sending shutdown signal...");
                         let _ = shutdown_tx.send(()); // Send shutdown signal
                     }
                 } => {}
 
                 // Handle shutdown signal
                 _ = shutdown_rx.recv() => {
-                    debug!(peer_addr = %peer_addr, "Piece requester received shutdown signal");
+                    info!(peer_addr = %peer_addr, "Piece requester received shutdown signal");
                     break;
                 }
             }

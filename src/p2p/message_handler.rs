@@ -7,7 +7,7 @@ use std::{collections::HashMap, usize};
 use tokio::io::{self, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
-use tracing::{debug, info};
+use tracing::{debug, info, trace, warn};
 
 use crate::bitfield::Bitfield;
 use crate::download_state::DownloadState;
@@ -36,6 +36,7 @@ struct State {
     peer_bitfield: Bitfield,
     pieces_status: HashMap<usize, Piece>,
     download_queue: Vec<Piece>,
+    unconfirmed: Vec<Piece>,
 }
 
 impl Default for State {
@@ -48,6 +49,7 @@ impl Default for State {
             peer_bitfield: Bitfield::new(&[]),
             pieces_status: HashMap::new(),
             download_queue: vec![],
+            unconfirmed: vec![],
         }
     }
 }
@@ -80,32 +82,33 @@ impl Actor {
                 .lock()
                 .await
                 .is_empty()
+            && self.state.unconfirmed.len() < 10
     }
 
     pub async fn handle_message(&mut self, message: Message) -> Result<(), P2pError> {
         // modifies state
         match message.message_id {
             MessageId::KeepAlive => {
-                debug!("Received KeepAlive message");
+                trace!("Received KeepAlive message");
                 // TODO: extend stream alive
             }
             MessageId::Choke => {
                 self.state.is_choked = true;
-                info!("Choked by peer");
+                trace!("Choked by peer");
                 // TODO: logic in case peer chokes but client is still interested
             }
             MessageId::Unchoke => {
                 self.state.is_choked = false;
-                info!("Unchoked by peer");
+                trace!("Unchoked by peer");
             }
             MessageId::Interested => {
                 self.state.peer_interested = true;
-                info!("Peer expressed insterest");
+                trace!("Peer expressed insterest");
 
                 // TODO: logic for unchoking peer
                 if self.state.peer_choked {
                     self.state.peer_choked = false;
-                    info!("Peer unchoked");
+                    trace!("Peer unchoked");
                     self.io_wtx
                         .send(Message::new(MessageId::Unchoke, None))
                         .await?;
@@ -113,15 +116,15 @@ impl Actor {
             }
             MessageId::NotInterested => {
                 self.state.peer_interested = false;
-                info!("Peer no longer insterested");
+                trace!("Peer no longer insterested");
             }
             MessageId::Have => {
-                debug!("'Have' message received from peer");
+                trace!("'Have' message received from peer");
                 self.process_have(&message);
             }
             MessageId::Bitfield => {
                 // Update the peer's bitfield and determine if the client is interested
-                info!("Received 'Bitfield' message from peer");
+                trace!("Received 'Bitfield' message from peer");
                 let bitfield = Bitfield::new(message.payload.as_ref().unwrap());
                 debug!(bitfield = ?bitfield, "Updated peer bitfield");
 
@@ -153,7 +156,7 @@ impl Actor {
             }
             MessageId::Piece => {
                 // store piece block
-                info!("'Piece' message received from peer");
+                trace!("'Piece' message received from peer");
                 self.download(message.payload.as_deref()).await?;
             }
             MessageId::Cancel => {
@@ -201,15 +204,23 @@ impl Actor {
             if is_valid_piece(piece.hash(), &buffer) {
                 debug!(piece_index= ?payload.index, "Piece hash verified. Sending to disk");
                 self.disk_tx.send((piece.clone(), buffer)).await?;
-                // NOTE: consider removing from pieces hashmap instead
-                piece.mark_finalized();
 
-                // remove the finalized piece from the queue
+                // remove the finalized piece from the unconfirmed list
                 self.state
-                    .download_queue
-                    .retain(|piece| piece.index() != piece.index());
+                    .unconfirmed
+                    .retain(|p| p.index() != piece.index());
+                debug!(
+                    "Remove piece with index {} from unconfirmed: {:?}",
+                    piece.index(),
+                    self.state
+                        .unconfirmed
+                        .iter()
+                        .map(|piece| piece.index())
+                        .collect::<Vec<u32>>()
+                );
+                piece.mark_finalized();
             } else {
-                debug!(piece_index= ?payload.index, "Piece hash verification failed");
+                warn!(piece_index= ?payload.index, "Piece hash verification failed");
                 return Err(P2pError::PieceInvalid);
             }
         }
@@ -218,10 +229,10 @@ impl Actor {
     }
 
     pub async fn fill_download_queue(&mut self) {
-        debug!("Filling download queue");
+        trace!("Filling download queue");
         for _ in 0..3 {
             if self.state.download_queue.len() >= 3 {
-                debug!("Download queue max capacity reached");
+                trace!("Download queue max capacity reached");
                 break;
             }
 
@@ -230,7 +241,7 @@ impl Actor {
                 .assign_piece(&self.state.peer_bitfield)
                 .await
             {
-                debug!(piece_index=?piece.index(),"Assigned piece to queue");
+                trace!(piece_index=?piece.index(),"Assigned piece to queue");
                 self.state.download_queue.push(piece);
             }
         }
@@ -262,13 +273,21 @@ impl Actor {
         let (queue_starting_index, block_offset) = (0, 0);
 
         if self.state.download_queue.is_empty() {
-            debug!("Download queue is empty; filling download queue");
+            trace!("Download queue is empty; filling download queue");
             self.fill_download_queue().await;
         }
 
+        let indexes: Vec<u32> = self
+            .state
+            .download_queue
+            .iter()
+            .map(|piece| piece.index())
+            .collect();
+        debug!("Download queue: {:?}", indexes);
         let queue_length = self.state.download_queue.len();
-        for i in queue_starting_index..queue_length {
-            let piece = self.state.download_queue[i].clone();
+        // for i in queue_starting_index..queue_length {
+        for piece in self.state.download_queue.clone().iter() {
+            // let piece = self.state.download_queue[i].clone();
             self.state
                 .pieces_status
                 .entry(piece.index() as usize)
@@ -276,7 +295,7 @@ impl Actor {
 
             self.request_from_offset(&piece, block_offset).await?;
         }
-        debug!("Completed piece requests");
+        debug!("Piece requests completed");
 
         Ok(())
     }
@@ -297,13 +316,37 @@ impl Actor {
             let block_size = 16384.min(piece.size() as u32 - block_offset);
 
             let payload = TransferPayload::new(piece.index(), block_offset, block_size).serialize();
-            debug!(
+            trace!(
                 piece_index = ?piece.index(),block_offset= ?block_offset, block_size= ?block_size, "Sending block request"
             );
             self.io_wtx
                 .send(Message::new(MessageId::Request, Some(payload)))
                 .await?;
         }
+        self.state.unconfirmed.push(piece.clone());
+        debug!(
+            "Add piece with index {} to unconfirmed list: {:?}",
+            piece.index(),
+            self.state
+                .unconfirmed
+                .iter()
+                .map(|piece| piece.index())
+                .collect::<Vec<u32>>()
+        );
+
+        // remove the finalized piece from the queue
+        self.state
+            .download_queue
+            .retain(|p| p.index() != piece.index());
+        debug!(
+            "Remove piece with index {} from download queue: {:?}",
+            piece.index(),
+            self.state
+                .download_queue
+                .iter()
+                .map(|piece| piece.index())
+                .collect::<Vec<u32>>()
+        );
 
         Ok(())
     }
@@ -794,8 +837,8 @@ mod test {
 
     #[tokio::test]
     async fn test_download_valid_piece() {
-        let (client_tx, mut client_rx) = mpsc::channel(10);
-        let (io_wtx, mut io_rx) = mpsc::channel(10);
+        let (client_tx, _) = mpsc::channel(10);
+        let (io_wtx, _) = mpsc::channel(10);
         let (disk_tx, mut disk_rx) = mpsc::channel(10);
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 

@@ -5,4 +5,4 @@ download_path = "./tmp/downloads"
 max_peer_connections = 2
 timeout_duration = 3000
 connection_retries = 2
-piece_standard_size = 16384
+block_size = 16384

@@ -20,7 +20,7 @@ pub struct P2pConfig {
     pub max_peer_connections: u32,
     pub timeout_duration: u64,
     pub connection_retries: u32,
-    pub piece_standard_size: u64,
+    pub block_size: u64,
 }
 
 impl Config {
@@ -47,13 +47,13 @@ mod tests {
                     config,
                     Config {
                         disk: DiskConfig {
-                            download_path: "./tmp/downloads".to_string()
+                            download_path: "./tmp/downloads".to_string(),
                         },
                         p2p: P2pConfig {
                             max_peer_connections: 2,
                             timeout_duration: 3000,
                             connection_retries: 2,
-                            piece_standard_size: 16384
+                            block_size: 16384
                         },
                     }
                 );
