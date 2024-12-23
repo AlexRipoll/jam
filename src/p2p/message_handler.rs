@@ -7,7 +7,7 @@ use std::{collections::HashMap, usize};
 use tokio::io::{self, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 
 use crate::bitfield::Bitfield;
 use crate::download_state::DownloadState;
@@ -60,7 +60,7 @@ impl Actor {
         io_wtx: mpsc::Sender<Message>,
         disk_tx: Arc<mpsc::Sender<(Piece, Vec<u8>)>>,
         shutdown_tx: broadcast::Sender<()>,
-        pieces_state: Arc<DownloadState>,
+        download_state: Arc<DownloadState>,
     ) -> Self {
         Self {
             client_tx,
@@ -68,7 +68,7 @@ impl Actor {
             io_wtx,
             shutdown_tx,
             state: State::default(),
-            download_state: pieces_state,
+            download_state,
         }
     }
 
@@ -243,6 +243,8 @@ impl Actor {
             {
                 trace!(piece_index=?piece.index(),"Assigned piece to queue");
                 self.state.download_queue.push(piece);
+            } else {
+                break;
             }
         }
     }
@@ -266,7 +268,7 @@ impl Actor {
             .bytes
             .iter()
             .zip(current_bitfield.iter())
-            .all(|(x, y)| x == y)
+            .all(|(&x, &y)| (x & y) == x)
     }
 
     pub async fn request(&mut self) -> Result<(), P2pError> {
@@ -275,6 +277,9 @@ impl Actor {
         if self.state.download_queue.is_empty() {
             trace!("Download queue is empty; filling download queue");
             self.fill_download_queue().await;
+            if self.state.download_queue.is_empty() {
+                return Err(P2pError::EndOfWork);
+            }
         }
 
         let indexes: Vec<u32> = self
@@ -284,6 +289,18 @@ impl Actor {
             .map(|piece| piece.index())
             .collect();
         debug!("Download queue: {:?}", indexes);
+        {
+            let indexes: Vec<u32> = self
+                .download_state
+                .pieces_queue
+                .queue
+                .lock()
+                .await
+                .iter()
+                .map(|p| p.index())
+                .collect();
+            debug!("Remaining pieces in download queue: {:?}", indexes);
+        }
         let queue_length = self.state.download_queue.len();
         // for i in queue_starting_index..queue_length {
         for piece in self.state.download_queue.clone().iter() {
@@ -460,6 +477,7 @@ pub enum P2pError {
     EmptyPayload,
     InvalidHandshake,
     IncompleteMessage,
+    EndOfWork,
     DeserializationError(&'static str),
     PieceMissingBlocks(PieceError),
     PieceOutOfBounds(PieceError),
@@ -477,6 +495,7 @@ impl Display for P2pError {
         match self {
             P2pError::EmptyPayload => write!(f, "Empty payload"),
             P2pError::InvalidHandshake => write!(f, "Handshake response was not 68 bytes"),
+            P2pError::EndOfWork => write!(f, "No available pieces to download from peer"),
             P2pError::IncompleteMessage => {
                 write!(f, "Connection closed before reading full message")
             }
@@ -625,10 +644,10 @@ mod test {
 
     use crate::{
         bitfield::Bitfield,
-        download_state::DownloadState,
+        download_state::{DownloadMetadata, DownloadState},
         p2p::{
             message::{Message, MessageId, PiecePayload},
-            message_handler::{client_version, generate_peer_id, Actor, P2pError},
+            message_handler::{client_version, generate_peer_id, Actor, P2pError, State},
             piece::Piece,
         },
     };
@@ -1102,6 +1121,140 @@ mod test {
         }
     }
 
+    // Helper function to create a sample Piece
+    fn create_sample_piece(index: u32, size: usize) -> Piece {
+        let hash = [0u8; 20]; // Placeholder hash
+        Piece::new(index, size, hash)
+    }
+
+    #[tokio::test]
+    async fn test_is_peer_bitfield_complete_exact_pieces() {
+        let peer_bitfield = Bitfield::new(&[0b11000010, 0b10000000]);
+        let mut pieces_map = HashMap::new();
+        for i in 0..10 {
+            pieces_map.insert(i, create_sample_piece(i, 16384));
+        }
+
+        let download_state = Arc::new(DownloadState::new(pieces_map));
+        let actor = Actor {
+            client_tx: Arc::new(tokio::sync::mpsc::channel(1).0),
+            io_wtx: tokio::sync::mpsc::channel(1).0,
+            disk_tx: Arc::new(tokio::sync::mpsc::channel(1).0),
+            shutdown_tx: tokio::sync::broadcast::channel(1).0,
+            state: State {
+                is_choked: false,
+                is_interested: false,
+                peer_choked: false,
+                peer_interested: false,
+                peer_bitfield,
+                pieces_status: HashMap::new(),
+                download_queue: vec![],
+                unconfirmed: vec![],
+            },
+            download_state,
+        };
+
+        {
+            let mut download_state_bitfield = actor.download_state.metadata.bitfield.lock().await;
+            download_state_bitfield.set_piece(0); // in peer's bitfield
+            download_state_bitfield.set_piece(1); // in peer's bitfield
+            download_state_bitfield.set_piece(6); // in peer's bitfield
+            download_state_bitfield.set_piece(8); // in peer's bitfield
+        }
+
+        let completed = actor.is_complete().await;
+
+        // Assert
+        assert!(completed);
+    }
+
+    #[tokio::test]
+    async fn test_is_peer_bitfield_complete_with_more_pieces_set_than_peer() {
+        let peer_bitfield = Bitfield::new(&[0b11000010, 0b10000000]);
+        let mut pieces_map = HashMap::new();
+        for i in 0..10 {
+            pieces_map.insert(i, create_sample_piece(i, 16384));
+        }
+
+        let download_state = Arc::new(DownloadState::new(pieces_map));
+        let actor = Actor {
+            client_tx: Arc::new(tokio::sync::mpsc::channel(1).0),
+            io_wtx: tokio::sync::mpsc::channel(1).0,
+            disk_tx: Arc::new(tokio::sync::mpsc::channel(1).0),
+            shutdown_tx: tokio::sync::broadcast::channel(1).0,
+            state: State {
+                is_choked: false,
+                is_interested: false,
+                peer_choked: false,
+                peer_interested: false,
+                peer_bitfield,
+                pieces_status: HashMap::new(),
+                download_queue: vec![],
+                unconfirmed: vec![],
+            },
+            download_state,
+        };
+
+        {
+            let mut download_state_bitfield = actor.download_state.metadata.bitfield.lock().await;
+            download_state_bitfield.set_piece(0); // in peer's bitfield
+            download_state_bitfield.set_piece(1); // in peer's bitfield
+            download_state_bitfield.set_piece(2);
+            download_state_bitfield.set_piece(6); // in peer's bitfield
+            download_state_bitfield.set_piece(7);
+            download_state_bitfield.set_piece(8); // in peer's bitfield
+            download_state_bitfield.set_piece(9);
+        }
+
+        let completed = actor.is_complete().await;
+
+        // Assert
+        assert!(completed);
+    }
+
+    #[tokio::test]
+    async fn test_peer_bitfield_is_not_completed() {
+        let peer_bitfield = Bitfield::new(&[0b11000010, 0b10000000]);
+        let mut pieces_map = HashMap::new();
+        for i in 0..10 {
+            pieces_map.insert(i, create_sample_piece(i, 16384));
+        }
+
+        let download_state = Arc::new(DownloadState::new(pieces_map));
+        let actor = Actor {
+            client_tx: Arc::new(tokio::sync::mpsc::channel(1).0),
+            io_wtx: tokio::sync::mpsc::channel(1).0,
+            disk_tx: Arc::new(tokio::sync::mpsc::channel(1).0),
+            shutdown_tx: tokio::sync::broadcast::channel(1).0,
+            state: State {
+                is_choked: false,
+                is_interested: false,
+                peer_choked: false,
+                peer_interested: false,
+                peer_bitfield,
+                pieces_status: HashMap::new(),
+                download_queue: vec![],
+                unconfirmed: vec![],
+            },
+            download_state,
+        };
+
+        {
+            let mut download_state_bitfield = actor.download_state.metadata.bitfield.lock().await;
+            // piece 1 is still not downloaded
+            download_state_bitfield.set_piece(0); // in peer's bitfield
+            download_state_bitfield.set_piece(2);
+            download_state_bitfield.set_piece(6); // in peer's bitfield
+            download_state_bitfield.set_piece(7);
+            download_state_bitfield.set_piece(8); // in peer's bitfield
+            download_state_bitfield.set_piece(9);
+        }
+
+        let completed = actor.is_complete().await;
+
+        // Assert
+        assert!(!completed);
+    }
     #[test]
     fn test_generate_peer_id() {
         let version = client_version();
