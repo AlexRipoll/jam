@@ -1,6 +1,7 @@
 use std::{
     fs::File,
     io::{self, Read},
+    time::Instant,
 };
 
 use client::{Client, TorrentMetadata};
@@ -55,6 +56,7 @@ async fn main() -> io::Result<()> {
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     info!(" Starting BitTorrent client...");
+    let start = Instant::now();
 
     // Open the torrent file
     // Torrent file options:
@@ -143,6 +145,9 @@ async fn main() -> io::Result<()> {
     }
 
     info!("Download completed successfully");
+
+    let duration = start.elapsed();
+    println!("Time elapsed: {:.2?}", duration);
 
     Ok(())
 }
