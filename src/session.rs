@@ -13,7 +13,7 @@ use crate::{
     p2p::{
         io::{read_message, send_message},
         message::Message,
-        message_handler::{perform_handshake, Actor, Handshake},
+        message_handler::{perform_handshake, Actor, Handshake, P2pError},
         piece::Piece,
     },
 };
@@ -79,6 +79,7 @@ impl PeerSession {
             self.peer_addr.to_string(),
             io_rtx.clone(),
             shutdown_tx.subscribe(),
+            shutdown_tx.clone(),
         ));
         task_handles.push(reader_task);
 
@@ -121,6 +122,7 @@ impl PeerSession {
         peer_addr: String,
         io_rtx: mpsc::Sender<Message>,
         mut shutdown_rx: broadcast::Receiver<()>,
+        shutdown_tx: broadcast::Sender<()>,
     ) {
         // let reader_span = tracing::info_span!("reader_task", peer_addr = %peer_addr);
         // let _enter = reader_span.enter();
@@ -138,7 +140,9 @@ impl PeerSession {
                         }
                         Err(e) => {
                             error!(peer_addr = %peer_addr, error = %e, "Error reading message");
-                            break;
+                            if e == P2pError::IncompleteMessage {
+                                let _ = shutdown_tx.send(()); // Send shutdown signal
+                            }
                         }
                     }
                 }
@@ -246,6 +250,9 @@ impl PeerSession {
                 // Handle shutdown signal
                 _ = shutdown_rx.recv() => {
                     info!(peer_addr = %peer_addr, "Piece requester received shutdown signal");
+                    let mut actor = actor.lock().await;
+                    actor.release_unconfirmed_pieces().await;
+
                     break;
                 }
             }

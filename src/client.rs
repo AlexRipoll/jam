@@ -254,6 +254,7 @@ impl Client {
                         }
                         None => {
                             debug!(peer_id = id, "No more peers available, exiting");
+                            let _ = shutdown_tx.send(());
                         }
                     }
                 } => {}

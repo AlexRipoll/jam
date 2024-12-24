@@ -204,6 +204,12 @@ impl DownloadState {
         self.pieces_queue.unassign_piece(piece).await;
     }
 
+    pub async fn unassign_pieces(&self, pieces: Vec<Piece>) {
+        for piece in pieces {
+            self.pieces_queue.unassign_piece(piece).await;
+        }
+    }
+
     pub async fn complete_piece(&self, piece: Piece) {
         self.metadata
             .mark_piece_downloaded(piece.index() as usize)

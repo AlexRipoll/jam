@@ -25,7 +25,7 @@ pub struct Actor {
     io_wtx: mpsc::Sender<Message>,
     shutdown_tx: broadcast::Sender<()>,
     state: State,
-    download_state: Arc<DownloadState>,
+    pub download_state: Arc<DownloadState>,
 }
 
 #[derive(Debug)]
@@ -93,6 +93,13 @@ impl Actor {
 
     pub fn has_pending_pieces(&self) -> bool {
         !self.state.unconfirmed.is_empty()
+    }
+
+    pub async fn release_unconfirmed_pieces(&mut self) {
+        self.download_state
+            .unassign_pieces(self.state.unconfirmed.clone())
+            .await;
+        self.state.unconfirmed.clear();
     }
 
     pub fn all_finalized(&self) -> bool {
