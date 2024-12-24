@@ -1,5 +1,6 @@
 use rand::{distributions::Alphanumeric, Rng};
 use sha1::{Digest, Sha1};
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::Display;
 use std::sync::Arc;
@@ -7,7 +8,7 @@ use std::{collections::HashMap, usize};
 use tokio::io::{self, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::bitfield::Bitfield;
 use crate::download_state::DownloadState;
@@ -82,7 +83,23 @@ impl Actor {
                 .lock()
                 .await
                 .is_empty()
+            && self.has_assignable_pieces().await
             && self.state.unconfirmed.len() < 10
+    }
+
+    pub fn has_peer_bitfield(&self) -> bool {
+        !self.state.peer_bitfield.bytes.is_empty()
+    }
+
+    pub fn has_pending_pieces(&self) -> bool {
+        !self.state.unconfirmed.is_empty()
+    }
+
+    pub fn all_finalized(&self) -> bool {
+        self.state
+            .pieces_status
+            .iter()
+            .all(|(_, piece)| piece.is_finalized())
     }
 
     pub async fn handle_message(&mut self, message: Message) -> Result<(), P2pError> {
@@ -94,12 +111,12 @@ impl Actor {
             }
             MessageId::Choke => {
                 self.state.is_choked = true;
-                trace!("Choked by peer");
+                debug!("Choked by peer");
                 // TODO: logic in case peer chokes but client is still interested
             }
             MessageId::Unchoke => {
                 self.state.is_choked = false;
-                trace!("Unchoked by peer");
+                debug!("Unchoked by peer");
             }
             MessageId::Interested => {
                 self.state.peer_interested = true;
@@ -221,6 +238,11 @@ impl Actor {
                 piece.mark_finalized();
             } else {
                 warn!(piece_index= ?payload.index, "Piece hash verification failed");
+                self.download_state.unassign_piece(piece.clone()).await;
+                // remove the finalized piece from the unconfirmed list
+                self.state
+                    .unconfirmed
+                    .retain(|p| p.index() != piece.index());
                 return Err(P2pError::PieceInvalid);
             }
         }
@@ -244,6 +266,7 @@ impl Actor {
                 trace!(piece_index=?piece.index(),"Assigned piece to queue");
                 self.state.download_queue.push(piece);
             } else {
+                debug!("No more pieces available to assign");
                 break;
             }
         }
@@ -271,6 +294,33 @@ impl Actor {
             .all(|(&x, &y)| (x & y) == x)
     }
 
+    pub async fn has_assignable_pieces(&self) -> bool {
+        // Lock the current bitfield to get the downloaded pieces
+        let client_bitfield = self.download_state.metadata.bitfield.lock().await;
+
+        // Iterate over the peer's bitfield to identify missing pieces
+        let missing_pieces: Vec<usize> = (0..self.state.peer_bitfield.num_pieces)
+            .filter(|&index| {
+                self.state.peer_bitfield.has_piece(index) && !client_bitfield.has_piece(index)
+            })
+            .collect();
+
+        // Check if any missing piece is already assigned to another task
+        let assigned_piece_indexes: Vec<usize> = self
+            .download_state
+            .pieces_queue
+            .assigned_pieces
+            .lock()
+            .await
+            .iter()
+            .map(|piece| piece.index() as usize)
+            .collect();
+
+        missing_pieces
+            .into_iter()
+            .any(|piece_index| !assigned_piece_indexes.contains(&piece_index))
+    }
+
     pub async fn request(&mut self) -> Result<(), P2pError> {
         let (queue_starting_index, block_offset) = (0, 0);
 
@@ -282,13 +332,6 @@ impl Actor {
             }
         }
 
-        let indexes: Vec<u32> = self
-            .state
-            .download_queue
-            .iter()
-            .map(|piece| piece.index())
-            .collect();
-        debug!("Download queue: {:?}", indexes);
         {
             let indexes: Vec<u32> = self
                 .download_state
@@ -301,6 +344,13 @@ impl Actor {
                 .collect();
             debug!("Remaining pieces in download queue: {:?}", indexes);
         }
+        let indexes: Vec<u32> = self
+            .state
+            .download_queue
+            .iter()
+            .map(|piece| piece.index())
+            .collect();
+        debug!("Download queue: {:?}", indexes);
         let queue_length = self.state.download_queue.len();
         // for i in queue_starting_index..queue_length {
         for piece in self.state.download_queue.clone().iter() {
@@ -333,7 +383,7 @@ impl Actor {
             let block_size = 16384.min(piece.size() as u32 - block_offset);
 
             let payload = TransferPayload::new(piece.index(), block_offset, block_size).serialize();
-            trace!(
+            debug!(
                 piece_index = ?piece.index(),block_offset= ?block_offset, block_size= ?block_size, "Sending block request"
             );
             self.io_wtx
@@ -351,7 +401,7 @@ impl Actor {
                 .collect::<Vec<u32>>()
         );
 
-        // remove the finalized piece from the queue
+        // remove the piece from the download queue
         self.state
             .download_queue
             .retain(|p| p.index() != piece.index());
@@ -659,17 +709,42 @@ mod test {
 
     #[tokio::test]
     async fn test_actor_ready_to_request() {
-        let (client_tx, _) = mpsc::channel(10);
-        let (io_wtx, _) = mpsc::channel(10);
-        let (disk_tx, _) = mpsc::channel(10);
-        let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
+        let peer_bitfield = Bitfield::new(&[0b11000010, 0b10000000]);
+        let mut pieces_map = HashMap::new();
+        for i in 0..10 {
+            pieces_map.insert(i, create_sample_piece(i, 16384));
+        }
 
-        let pieces_map = HashMap::new();
-        let client_tx = Arc::new(client_tx);
-        let disk_tx = Arc::new(disk_tx);
-        let pieces_state = Arc::new(DownloadState::new(pieces_map));
+        let download_state = Arc::new(DownloadState::new(pieces_map));
+        let mut actor = Actor {
+            client_tx: Arc::new(tokio::sync::mpsc::channel(1).0),
+            io_wtx: tokio::sync::mpsc::channel(1).0,
+            disk_tx: Arc::new(tokio::sync::mpsc::channel(1).0),
+            shutdown_tx: tokio::sync::broadcast::channel(1).0,
+            state: State {
+                is_choked: false,
+                is_interested: false,
+                peer_choked: false,
+                peer_interested: false,
+                peer_bitfield,
+                pieces_status: HashMap::new(),
+                download_queue: vec![],
+                unconfirmed: vec![],
+            },
+            download_state,
+        };
 
-        let mut actor = Actor::new(client_tx, io_wtx, disk_tx, shutdown_tx, pieces_state);
+        {
+            // let download_state = actor.download_state;
+            let mut download_state_bitfield = actor.download_state.metadata.bitfield.lock().await;
+            // piece 1 is still not downloaded
+            download_state_bitfield.set_piece(0); // in peer's bitfield
+            download_state_bitfield.set_piece(2);
+            download_state_bitfield.set_piece(6); // in peer's bitfield
+            download_state_bitfield.set_piece(7);
+            download_state_bitfield.set_piece(8); // in peer's bitfield
+            download_state_bitfield.set_piece(9);
+        }
 
         // Test when actor is choked
         assert!(!actor.ready_to_request().await);
@@ -1255,6 +1330,117 @@ mod test {
         // Assert
         assert!(!completed);
     }
+
+    #[tokio::test]
+    async fn test_does_not_have_pieces() {
+        let peer_bitfield = Bitfield::new(&[0b11000010, 0b10000000]);
+        let mut pieces_map = HashMap::new();
+        for i in 0..10 {
+            pieces_map.insert(i, create_sample_piece(i, 16384));
+        }
+
+        let download_state = Arc::new(DownloadState::new(pieces_map));
+        let actor = Actor {
+            client_tx: Arc::new(tokio::sync::mpsc::channel(1).0),
+            io_wtx: tokio::sync::mpsc::channel(1).0,
+            disk_tx: Arc::new(tokio::sync::mpsc::channel(1).0),
+            shutdown_tx: tokio::sync::broadcast::channel(1).0,
+            state: State {
+                is_choked: false,
+                is_interested: false,
+                peer_choked: false,
+                peer_interested: false,
+                peer_bitfield,
+                pieces_status: HashMap::new(),
+                download_queue: vec![],
+                unconfirmed: vec![],
+            },
+            download_state,
+        };
+
+        {
+            // let download_state = actor.download_state;
+            let mut download_state_bitfield = actor.download_state.metadata.bitfield.lock().await;
+            // piece 1 is still not downloaded
+            download_state_bitfield.set_piece(0); // in peer's bitfield
+            download_state_bitfield.set_piece(2);
+            download_state_bitfield.set_piece(6); // in peer's bitfield
+            download_state_bitfield.set_piece(7);
+            download_state_bitfield.set_piece(8); // in peer's bitfield
+            download_state_bitfield.set_piece(9);
+
+            let mut assigned_pieces = actor
+                .download_state
+                .pieces_queue
+                .assigned_pieces
+                .lock()
+                .await;
+            assigned_pieces.insert(create_sample_piece(9, 16384));
+            assigned_pieces.insert(create_sample_piece(7, 16384));
+            // piece 1 can be downloaded from peer but it is already assigned
+            assigned_pieces.insert(create_sample_piece(1, 16384));
+        }
+
+        let unassigned = actor.has_assignable_pieces().await;
+
+        // Assert
+        assert!(!unassigned);
+    }
+
+    #[tokio::test]
+    async fn test_has_assignable_pieces() {
+        let peer_bitfield = Bitfield::new(&[0b11000010, 0b10000000]);
+        let mut pieces_map = HashMap::new();
+        for i in 0..10 {
+            pieces_map.insert(i, create_sample_piece(i, 16384));
+        }
+
+        let download_state = Arc::new(DownloadState::new(pieces_map));
+        let actor = Actor {
+            client_tx: Arc::new(tokio::sync::mpsc::channel(1).0),
+            io_wtx: tokio::sync::mpsc::channel(1).0,
+            disk_tx: Arc::new(tokio::sync::mpsc::channel(1).0),
+            shutdown_tx: tokio::sync::broadcast::channel(1).0,
+            state: State {
+                is_choked: false,
+                is_interested: false,
+                peer_choked: false,
+                peer_interested: false,
+                peer_bitfield,
+                pieces_status: HashMap::new(),
+                download_queue: vec![],
+                unconfirmed: vec![],
+            },
+            download_state,
+        };
+
+        {
+            // let download_state = actor.download_state;
+            let mut download_state_bitfield = actor.download_state.metadata.bitfield.lock().await;
+            // piece 1 is still not downloaded
+            download_state_bitfield.set_piece(0); // in peer's bitfield
+            download_state_bitfield.set_piece(2);
+            download_state_bitfield.set_piece(6); // in peer's bitfield
+            download_state_bitfield.set_piece(7);
+            download_state_bitfield.set_piece(8); // in peer's bitfield
+            download_state_bitfield.set_piece(9);
+
+            let mut assigned_pieces = actor
+                .download_state
+                .pieces_queue
+                .assigned_pieces
+                .lock()
+                .await;
+            // piece one is neither downloaded and nor assigned
+            assigned_pieces.insert(create_sample_piece(9, 16384));
+        }
+
+        let unassigned = actor.has_assignable_pieces().await;
+
+        // Assert
+        assert!(unassigned);
+    }
+
     #[test]
     fn test_generate_peer_id() {
         let version = client_version();

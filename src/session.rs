@@ -5,7 +5,7 @@ use tokio::{
     net::TcpStream,
     sync::{broadcast, mpsc, Mutex},
 };
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::{
     bitfield::Bitfield,
@@ -45,8 +45,8 @@ impl PeerSession {
     }
 
     pub async fn initialize(&self, mut stream: TcpStream) -> io::Result<()> {
-        let session_span = tracing::info_span!("peer_session", peer_addr = %self.peer_addr);
-        let _enter = session_span.enter();
+        // let session_span = tracing::info_span!("peer_session", peer_addr = %self.peer_addr);
+        // let _enter = session_span.enter();
 
         // Perform handshake
         if let Err(e) = perform_handshake(&mut stream, &self.handshake_metadata).await {
@@ -122,8 +122,8 @@ impl PeerSession {
         io_rtx: mpsc::Sender<Message>,
         mut shutdown_rx: broadcast::Receiver<()>,
     ) {
-        let reader_span = tracing::info_span!("reader_task", peer_addr = %peer_addr);
-        let _enter = reader_span.enter();
+        // let reader_span = tracing::info_span!("reader_task", peer_addr = %peer_addr);
+        // let _enter = reader_span.enter();
         info!(peer_addr = %peer_addr, "Initializing peer IO reader...");
 
         loop {
@@ -157,8 +157,8 @@ impl PeerSession {
         mut io_wrx: mpsc::Receiver<Message>,
         mut shutdown_rx: broadcast::Receiver<()>,
     ) {
-        let writer_span = tracing::info_span!("writer_task", peer_addr = %peer_addr);
-        let _enter = writer_span.enter();
+        // let writer_span = tracing::info_span!("writer_task", peer_addr = %peer_addr);
+        // let _enter = writer_span.enter();
         info!(peer_addr = %peer_addr, "Initializing peer IO writer...");
 
         loop {
@@ -235,8 +235,9 @@ impl PeerSession {
                         }
                     }
 
-                    // Check if all pieces have been downloaded
-                    if actor.is_complete().await {
+                    // Check if all pieces have been downloaded or if no more pieces can be
+                    // downloaded from this peer
+                    if actor.is_complete().await  || (actor.has_peer_bitfield() && !actor.has_assignable_pieces().await && !actor.has_pending_pieces()) {
                         info!(peer_addr = %peer_addr, "All pieces downloaded. Sending shutdown signal...");
                         let _ = shutdown_tx.send(()); // Send shutdown signal
                     }

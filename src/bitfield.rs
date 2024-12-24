@@ -2,8 +2,8 @@ use std::io;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Bitfield {
-    pub bytes: Vec<u8>, // In-memory bitfield
-    num_pieces: usize,  // Total number of pieces
+    pub bytes: Vec<u8>,    // In-memory bitfield
+    pub num_pieces: usize, // Total number of pieces
 }
 
 impl Bitfield {
@@ -73,10 +73,6 @@ pub fn load_from_disk(file_path: &str) -> io::Result<Bitfield> {
     let saved_bitfield = std::fs::read(file_path)?;
 
     Ok(Bitfield::new(&saved_bitfield))
-}
-
-pub fn save_to_disk(file_path: &str, bitfield: Bitfield) -> io::Result<()> {
-    std::fs::write(file_path, bitfield.bytes)
 }
 
 #[cfg(test)]
