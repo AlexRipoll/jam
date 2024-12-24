@@ -57,7 +57,6 @@ impl TorrentMetadata {
 #[derive(Debug)]
 pub struct Client {
     download_path: String,
-    recovery_path: String,
     timeout_duration: u64,
     connection_retries: u32,
     max_peer_connections: u32,
@@ -79,7 +78,6 @@ impl Client {
     ) -> Self {
         Self {
             download_path: config.disk.download_path,
-            recovery_path: config.disk.recovery_path,
             connection_retries: config.p2p.connection_retries,
             timeout_duration: config.p2p.timeout_duration,
             max_peer_connections: config.p2p.max_peer_connections,
@@ -140,14 +138,7 @@ impl Client {
         }
 
         // Disk writer task
-        let disk_writer = Writer::new(
-            &format!("{}/{}", &self.download_path, &self.file_name),
-            &format!(
-                "{}/{}.dat",
-                &self.recovery_path,
-                hex::encode(&self.info_hash)
-            ),
-        )?;
+        let disk_writer = Writer::new(&format!("{}/{}", &self.download_path, &self.file_name))?;
         let file_size = self.file_size;
         let piece_standard_size = self.piece_standard_size;
         let shutdown_rx = shutdown_tx.subscribe();
@@ -293,7 +284,7 @@ impl Client {
                         "Received piece for writing to disk"
                     );
                     match disk_writer.write_piece_to_disk(
-                        piece,
+                        &piece,
                         file_size,
                         piece_standard_size,
                         &assembled_piece,
@@ -303,11 +294,19 @@ impl Client {
                                 piece_index = piece_index,
                                 "Piece written to disk successfully"
                             );
-                            // download_state.metadata.bitfield.lock().await.set_piece(piece_index as usize);
-                            let mut bitfield = download_state.metadata.bitfield.lock().await;
-                            bitfield.set_piece(piece_index as usize);
-                            let count: u32 = bitfield.bytes.iter().map(|byte| byte.count_ones()).sum();
+                            download_state.complete_piece(piece).await;
+                            let count: u32 = download_state.downloaded_pieces_count().await;
+
+                            let bitfield = download_state.metadata.bitfield.lock().await;
                             debug!(piece_index = piece_index, "Bitfield: {:?} ({}/{})", bitfield.bytes, count, bitfield.num_pieces);
+                            debug!(piece_index = piece_index, "{:?}", bitfield.has_piece(piece_index as usize));
+                            drop(bitfield);
+
+                            info!(
+                                "Progress {}%",
+                                 download_state.download_progress_percent().await,
+                            );
+
                         }
                         Err(e) => {
                             error!(

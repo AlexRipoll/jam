@@ -4,6 +4,7 @@ use std::{
 };
 
 use tokio::sync::Mutex;
+use tracing::debug;
 
 use crate::{bitfield::Bitfield, p2p::piece::Piece};
 
@@ -52,7 +53,7 @@ impl DownloadMetadata {
 #[derive(Debug)]
 pub struct PiecesQueue {
     pub queue: Mutex<Vec<Piece>>, // Remaining pieces to be downloaded
-    assigned_pieces: Mutex<HashSet<Piece>>, // Assigned but not yet completed pieces
+    pub assigned_pieces: Mutex<HashSet<Piece>>, // Assigned but not yet completed pieces
 }
 
 impl PiecesQueue {
@@ -82,6 +83,14 @@ impl PiecesQueue {
         }
 
         None
+    }
+
+    pub async fn unassign_piece(&self, piece: Piece) {
+        let mut queue = self.queue.lock().await;
+        let mut assigned = self.assigned_pieces.lock().await;
+
+        assigned.remove(&piece);
+        queue.push(piece);
     }
 
     pub async fn mark_piece_complete(&self, piece: Piece) {
@@ -169,14 +178,38 @@ impl DownloadState {
         self.pieces_queue.populate_queue(sorted_pieces).await;
     }
 
+    pub async fn download_progress_percent(&self) -> u32 {
+        let downloaded_pieces = self.downloaded_pieces_count().await;
+        let bitfield = self.metadata.bitfield.lock().await;
+
+        downloaded_pieces * 100 / bitfield.num_pieces as u32
+    }
+
+    pub async fn downloaded_pieces_count(&self) -> u32 {
+        self.metadata
+            .bitfield
+            .lock()
+            .await
+            .bytes
+            .iter()
+            .map(|byte| byte.count_ones())
+            .sum::<u32>()
+    }
+
     pub async fn assign_piece(&self, peer_bitfield: &Bitfield) -> Option<Piece> {
         self.pieces_queue.assign_piece(peer_bitfield).await
+    }
+
+    pub async fn unassign_piece(&self, piece: Piece) {
+        self.pieces_queue.unassign_piece(piece).await;
     }
 
     pub async fn complete_piece(&self, piece: Piece) {
         self.metadata
             .mark_piece_downloaded(piece.index() as usize)
             .await;
+        debug!("Piece {} marked as completed", piece.index());
+        debug!("Remove piece {} from assigned pieces list", piece.index());
         self.pieces_queue.mark_piece_complete(piece).await;
     }
 }
