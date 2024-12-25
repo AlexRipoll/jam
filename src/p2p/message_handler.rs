@@ -1,9 +1,9 @@
 use rand::{distributions::Alphanumeric, Rng};
 use sha1::{Digest, Sha1};
-use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::Display;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use std::{collections::HashMap, usize};
 use tokio::io::{self, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -38,6 +38,7 @@ struct State {
     pieces_status: HashMap<usize, Piece>,
     download_queue: Vec<Piece>,
     unconfirmed: Vec<Piece>,
+    unconfirmed_timestamps: HashMap<u32, Instant>,
 }
 
 impl Default for State {
@@ -51,6 +52,7 @@ impl Default for State {
             pieces_status: HashMap::new(),
             download_queue: vec![],
             unconfirmed: vec![],
+            unconfirmed_timestamps: HashMap::new(),
         }
     }
 }
@@ -84,7 +86,7 @@ impl Actor {
                 .await
                 .is_empty()
             && self.has_assignable_pieces().await
-            && self.state.unconfirmed.len() < 10
+            && self.state.unconfirmed.len() < 5
     }
 
     pub fn has_peer_bitfield(&self) -> bool {
@@ -95,11 +97,41 @@ impl Actor {
         !self.state.unconfirmed.is_empty()
     }
 
+    pub async fn release_timeout_downloads(&mut self) {
+        let now = Instant::now();
+        let timed_out_pieces: Vec<Piece> = self
+            .state
+            .unconfirmed
+            .iter()
+            .filter(|piece| {
+                if let Some(&request_time) = self.state.unconfirmed_timestamps.get(&piece.index()) {
+                    now.duration_since(request_time) > Duration::new(15, 0)
+                } else {
+                    false
+                }
+            })
+            .cloned()
+            .collect();
+
+        for timedout_pice in timed_out_pieces.iter() {
+            self.release_unconfirmed_piece(timedout_pice.clone()).await;
+        }
+    }
+
     pub async fn release_unconfirmed_pieces(&mut self) {
         self.download_state
             .unassign_pieces(self.state.unconfirmed.clone())
             .await;
         self.state.unconfirmed.clear();
+        self.state.unconfirmed_timestamps.clear();
+    }
+
+    pub async fn release_unconfirmed_piece(&mut self, piece: Piece) {
+        self.state
+            .unconfirmed
+            .retain(|unconfirmed_piece| unconfirmed_piece.index() != piece.index());
+        self.state.unconfirmed_timestamps.remove(&piece.index());
+        self.download_state.unassign_piece(piece).await;
     }
 
     pub fn all_finalized(&self) -> bool {
@@ -218,6 +250,9 @@ impl Actor {
         debug!(piece_index= ?payload.index, block_offset= ?payload.begin, "Downloading piece");
         // Add the block to the piece
         piece.add_block(payload.begin, payload.block.clone())?;
+        self.state
+            .unconfirmed_timestamps
+            .insert(piece.index(), Instant::now());
 
         // Check if the piece is ready and not yet completed
         if piece.is_ready() && !piece.is_finalized() {
@@ -398,6 +433,9 @@ impl Actor {
                 .await?;
         }
         self.state.unconfirmed.push(piece.clone());
+        self.state
+            .unconfirmed_timestamps
+            .insert(piece.index(), Instant::now());
         debug!(
             "Add piece with index {} to unconfirmed list: {:?}",
             piece.index(),
@@ -737,6 +775,7 @@ mod test {
                 pieces_status: HashMap::new(),
                 download_queue: vec![],
                 unconfirmed: vec![],
+                unconfirmed_timestamps: HashMap::new(),
             },
             download_state,
         };
@@ -1232,6 +1271,7 @@ mod test {
                 pieces_status: HashMap::new(),
                 download_queue: vec![],
                 unconfirmed: vec![],
+                unconfirmed_timestamps: HashMap::new(),
             },
             download_state,
         };
@@ -1273,6 +1313,7 @@ mod test {
                 pieces_status: HashMap::new(),
                 download_queue: vec![],
                 unconfirmed: vec![],
+                unconfirmed_timestamps: HashMap::new(),
             },
             download_state,
         };
@@ -1317,6 +1358,7 @@ mod test {
                 pieces_status: HashMap::new(),
                 download_queue: vec![],
                 unconfirmed: vec![],
+                unconfirmed_timestamps: HashMap::new(),
             },
             download_state,
         };
@@ -1361,6 +1403,7 @@ mod test {
                 pieces_status: HashMap::new(),
                 download_queue: vec![],
                 unconfirmed: vec![],
+                unconfirmed_timestamps: HashMap::new(),
             },
             download_state,
         };
@@ -1417,6 +1460,7 @@ mod test {
                 pieces_status: HashMap::new(),
                 download_queue: vec![],
                 unconfirmed: vec![],
+                unconfirmed_timestamps: HashMap::new(),
             },
             download_state,
         };

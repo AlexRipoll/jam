@@ -1,4 +1,4 @@
-use std::{io, sync::Arc};
+use std::{io, sync::Arc, time::Instant};
 
 use tokio::{
     io::AsyncWriteExt,
@@ -106,6 +106,14 @@ impl PeerSession {
             shutdown_tx.clone(),
         ));
         task_handles.push(piece_request_task);
+
+        let unconfirmed_timeout_task = tokio::spawn(PeerSession::timeout_watcher(
+            Arc::clone(&actor),
+            self.peer_addr.to_string(),
+            shutdown_tx.subscribe(),
+            shutdown_tx.clone(),
+        ));
+        task_handles.push(unconfirmed_timeout_task);
 
         // Await tasks
         for handle in task_handles {
@@ -245,6 +253,38 @@ impl PeerSession {
                         info!(peer_addr = %peer_addr, "All pieces downloaded. Sending shutdown signal...");
                         let _ = shutdown_tx.send(()); // Send shutdown signal
                     }
+                } => {}
+
+                // Handle shutdown signal
+                _ = shutdown_rx.recv() => {
+                    info!(peer_addr = %peer_addr, "Piece requester received shutdown signal");
+                    let mut actor = actor.lock().await;
+                    actor.release_unconfirmed_pieces().await;
+
+                    break;
+                }
+            }
+        }
+    }
+
+    async fn timeout_watcher(
+        actor: Arc<tokio::sync::Mutex<Actor>>,
+        peer_addr: String,
+        mut shutdown_rx: broadcast::Receiver<()>,
+        shutdown_tx: broadcast::Sender<()>,
+    ) {
+        info!(peer_addr = %peer_addr, "Initializing timout watcher...");
+
+        loop {
+            tokio::select! {
+                // Perform piece request handling
+                _ = async {
+                    let mut actor = actor.lock().await;
+
+                    if actor.has_pending_pieces() {
+                        actor.release_timeout_downloads().await;
+                    }
+
                 } => {}
 
                 // Handle shutdown signal
