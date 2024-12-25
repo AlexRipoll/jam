@@ -163,8 +163,9 @@ impl DownloadState {
     }
 
     pub async fn process_bitfield(&self, bitfield: &Bitfield) {
+        let bitfield = self.missing_pieces(bitfield).await;
         self.pieces_rarity
-            .update_rarity_from_bitfield(bitfield)
+            .update_rarity_from_bitfield(&bitfield)
             .await;
 
         let sorted_pieces = self
@@ -176,6 +177,17 @@ impl DownloadState {
             .collect();
 
         self.pieces_queue.populate_queue(sorted_pieces).await;
+    }
+
+    async fn missing_pieces(&self, peer_bitfield: &Bitfield) -> Bitfield {
+        let mut missing = Vec::new();
+
+        let bitfield = self.metadata.bitfield.lock().await;
+        for (peer_byte, client_byte) in peer_bitfield.bytes.iter().zip(bitfield.bytes.iter()) {
+            missing.push(peer_byte & !client_byte);
+        }
+
+        Bitfield::new(&missing)
     }
 
     pub async fn download_progress_percent(&self) -> u32 {
@@ -553,6 +565,35 @@ mod test {
             rarity_map.get(&2).is_none(),
             "Piece 2 should not exist in rarity map"
         );
+    }
+
+    #[tokio::test]
+    async fn test_missing_pieces_from_peer_bitfield() {
+        let mut pieces_map = HashMap::new();
+        for i in 0..16 {
+            pieces_map.insert(i, create_sample_piece(i, 16384));
+        }
+
+        let download_state = DownloadState::new(pieces_map.clone());
+        {
+            let mut bitfield = download_state.metadata.bitfield.lock().await;
+            bitfield.set_piece(0);
+            bitfield.set_piece(1);
+            bitfield.set_piece(5);
+            bitfield.set_piece(6);
+            bitfield.set_piece(7);
+            bitfield.set_piece(8);
+            bitfield.set_piece(9);
+            bitfield.set_piece(10);
+            bitfield.set_piece(11);
+            bitfield.set_piece(12);
+            bitfield.set_piece(13);
+            bitfield.set_piece(14);
+        }
+
+        let peer_bitfield = Bitfield::new(&[0b11101000, 0b1100111]);
+        let missing_pieces = download_state.missing_pieces(&peer_bitfield).await;
+        assert_eq!(missing_pieces.bytes, vec![0b00101000, 0b00000001]);
     }
 
     #[tokio::test]

@@ -277,6 +277,12 @@ impl Actor {
                         .map(|piece| piece.index())
                         .collect::<Vec<u32>>()
                 );
+                self.download_state
+                    .pieces_rarity
+                    .rarity_map
+                    .lock()
+                    .await
+                    .remove(&piece.index());
                 piece.mark_finalized();
             } else {
                 warn!(piece_index= ?payload.index, "Piece hash verification failed");
@@ -385,6 +391,10 @@ impl Actor {
                 .map(|p| p.index())
                 .collect();
             debug!("Remaining pieces in download queue: {:?}", indexes);
+        }
+        {
+            let indexes = self.download_state.metadata.bitfield.lock().await;
+            debug!("Bitfield++: {:?}", indexes.bytes);
         }
         let indexes: Vec<u32> = self
             .state
