@@ -17,6 +17,7 @@ use crate::p2p::message::{Message, MessageId, PiecePayload, TransferPayload};
 use super::piece::{Piece, PieceError};
 
 const PSTR: &str = "BitTorrent protocol";
+const MAX_STRIKES: u8 = 3;
 
 #[derive(Debug)]
 pub struct Actor {
@@ -39,6 +40,7 @@ struct State {
     download_queue: Vec<Piece>,
     unconfirmed: Vec<Piece>,
     unconfirmed_timestamps: HashMap<u32, Instant>,
+    strikes: u8,
 }
 
 impl Default for State {
@@ -53,6 +55,7 @@ impl Default for State {
             download_queue: vec![],
             unconfirmed: vec![],
             unconfirmed_timestamps: HashMap::new(),
+            strikes: 0,
         }
     }
 }
@@ -119,7 +122,12 @@ impl Actor {
 
         for timedout_pice in timed_out_pieces.iter() {
             self.release_unconfirmed_piece(timedout_pice.clone()).await;
+            self.state.strikes += 1;
         }
+    }
+
+    pub fn is_strikeout(&self) -> bool {
+        self.state.strikes >= MAX_STRIKES
     }
 
     pub async fn release_unconfirmed_pieces(&mut self) {
@@ -790,6 +798,7 @@ mod test {
                 download_queue: vec![],
                 unconfirmed: vec![],
                 unconfirmed_timestamps: HashMap::new(),
+                strikes: 0,
             },
             download_state,
         };
@@ -1286,6 +1295,7 @@ mod test {
                 download_queue: vec![],
                 unconfirmed: vec![],
                 unconfirmed_timestamps: HashMap::new(),
+                strikes: 0,
             },
             download_state,
         };
@@ -1328,6 +1338,7 @@ mod test {
                 download_queue: vec![],
                 unconfirmed: vec![],
                 unconfirmed_timestamps: HashMap::new(),
+                strikes: 0,
             },
             download_state,
         };
@@ -1373,6 +1384,7 @@ mod test {
                 download_queue: vec![],
                 unconfirmed: vec![],
                 unconfirmed_timestamps: HashMap::new(),
+                strikes: 0,
             },
             download_state,
         };
@@ -1418,6 +1430,7 @@ mod test {
                 download_queue: vec![],
                 unconfirmed: vec![],
                 unconfirmed_timestamps: HashMap::new(),
+                strikes: 0,
             },
             download_state,
         };
@@ -1475,6 +1488,7 @@ mod test {
                 download_queue: vec![],
                 unconfirmed: vec![],
                 unconfirmed_timestamps: HashMap::new(),
+                strikes: 0,
             },
             download_state,
         };

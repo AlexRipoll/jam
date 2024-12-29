@@ -284,6 +284,10 @@ impl PeerSession {
                     if actor.has_pending_pieces() {
                         actor.release_timeout_downloads().await;
                     }
+                    if actor.is_strikeout() {
+                        let _ = shutdown_tx.send(()); // Send shutdown signal
+                        info!(peer_addr = %peer_addr, "Max strikes reached. Sending shutdown signal...");
+                    }
 
                 } => {}
 
