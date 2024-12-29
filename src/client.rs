@@ -2,13 +2,9 @@ use std::{
     collections::{HashMap, VecDeque},
     io,
     sync::Arc,
-    time::Duration,
 };
 
-use tokio::{
-    sync::{broadcast, mpsc, Mutex},
-    time::{self, interval},
-};
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
@@ -240,6 +236,8 @@ impl Client {
                                             peer_address = %peer.address(),
                                             "Peer session completed"
                                         );
+                                        // push back the peer if it has availability
+                                        peers_queue.lock().await.push_back(peer);
                                     }
                                     Err(e) => {
                                         error!(
@@ -295,7 +293,7 @@ impl Client {
                                 piece_index = piece_index,
                                 "Piece written to disk successfully"
                             );
-                            download_state.complete_piece(piece).await;
+                            download_state.mark_piece_downloaded(piece).await;
                             let count: u32 = download_state.downloaded_pieces_count().await;
 
                             let bitfield = download_state.metadata.bitfield.lock().await;

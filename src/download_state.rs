@@ -27,7 +27,7 @@ impl DownloadMetadata {
         self.bitfield.lock().await.has_piece(index)
     }
 
-    pub async fn mark_piece_downloaded(&self, index: usize) {
+    pub async fn set_bitfield_piece(&self, index: usize) {
         let mut bitfield = self.bitfield.lock().await;
         bitfield.set_piece(index);
     }
@@ -89,6 +89,11 @@ impl PiecesQueue {
         let mut queue = self.queue.lock().await;
         let mut assigned = self.assigned_pieces.lock().await;
 
+        debug!(
+            "Unassigning piece {} from assigned pieces list",
+            piece.index()
+        );
+        debug!("Adding piece {} to pieces queue", piece.index());
         assigned.remove(&piece);
         queue.push(piece);
     }
@@ -168,12 +173,19 @@ impl DownloadState {
             .update_rarity_from_bitfield(&bitfield)
             .await;
 
-        let sorted_pieces = self
+        let assigned_pieces = self.pieces_queue.assigned_pieces.lock().await;
+        let sorted_pieces: Vec<Piece> = self
             .pieces_rarity
             .get_sorted_pieces()
             .await
             .into_iter()
-            .filter_map(|(index, _)| self.metadata.pieces_map.get(&index).cloned())
+            .filter_map(|(index, _)| {
+                self.metadata
+                    .pieces_map
+                    .get(&index)
+                    .cloned()
+                    .filter(|piece| !assigned_pieces.contains(piece))
+            })
             .collect();
 
         self.pieces_queue.populate_queue(sorted_pieces).await;
@@ -222,13 +234,13 @@ impl DownloadState {
         }
     }
 
-    pub async fn complete_piece(&self, piece: Piece) {
+    pub async fn mark_piece_downloaded(&self, piece: Piece) {
         self.metadata
-            .mark_piece_downloaded(piece.index() as usize)
+            .set_bitfield_piece(piece.index() as usize)
             .await;
         debug!("Piece {} marked as completed", piece.index());
-        debug!("Remove piece {} from assigned pieces list", piece.index());
-        self.pieces_queue.mark_piece_complete(piece).await;
+        // debug!("Remove piece {} from assigned pieces list", piece.index());
+        // self.pieces_queue.mark_piece_complete(piece).await;
     }
 }
 
@@ -253,7 +265,7 @@ mod test {
         let download_metadata = DownloadMetadata::new(pieces_map);
 
         // Mark piece 0 as downloaded
-        download_metadata.mark_piece_downloaded(0).await;
+        download_metadata.set_bitfield_piece(0).await;
 
         // Test that `has_piece` returns true for piece 0 (downloaded)
         assert!(download_metadata.has_piece(0).await);
@@ -273,7 +285,7 @@ mod test {
         assert!(!download_metadata.has_piece(0).await);
 
         // Mark piece 0 as downloaded
-        download_metadata.mark_piece_downloaded(0).await;
+        download_metadata.set_bitfield_piece(0).await;
 
         // Test that `has_piece` now returns true for piece 0
         assert!(download_metadata.has_piece(0).await);
@@ -298,8 +310,8 @@ mod test {
         assert!(download_metadata.has_missing_pieces(&peer_bitfield).await);
 
         // Mark piece 0 as downloaded
-        download_metadata.mark_piece_downloaded(0).await;
-        download_metadata.mark_piece_downloaded(2).await;
+        download_metadata.set_bitfield_piece(0).await;
+        download_metadata.set_bitfield_piece(2).await;
 
         // Test that `has_missing_pieces` returns true because it has piece 1 for download
         assert!(download_metadata.has_missing_pieces(&peer_bitfield).await);
@@ -323,9 +335,9 @@ mod test {
         assert!(download_metadata.has_missing_pieces(&peer_bitfield).await);
 
         // Mark piece 0 as downloaded
-        download_metadata.mark_piece_downloaded(0).await;
-        download_metadata.mark_piece_downloaded(1).await;
-        download_metadata.mark_piece_downloaded(2).await;
+        download_metadata.set_bitfield_piece(0).await;
+        download_metadata.set_bitfield_piece(1).await;
+        download_metadata.set_bitfield_piece(2).await;
 
         // Test that `has_missing_pieces` returns false because all pieces are downloaded
         assert!(!download_metadata.has_missing_pieces(&peer_bitfield).await);
@@ -777,7 +789,7 @@ mod test {
         state.process_bitfield(&bitfield).await;
         let assigned_piece = state.assign_piece(&bitfield).await.unwrap();
 
-        state.complete_piece(assigned_piece.clone()).await;
+        state.mark_piece_downloaded(assigned_piece.clone()).await;
 
         // Verify that the piece is marked as downloaded
         let has_piece = state
@@ -786,8 +798,8 @@ mod test {
             .await;
         assert!(has_piece);
 
-        // Verify that the piece is removed from the assigned set
+        // Verify that the piece is still in the assigned set
         let assigned_set = state.pieces_queue.assigned_pieces.lock().await;
-        assert!(!assigned_set.contains(&assigned_piece));
+        assert!(assigned_set.contains(&assigned_piece));
     }
 }
