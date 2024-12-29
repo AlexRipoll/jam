@@ -202,8 +202,8 @@ impl PeerSession {
         mut io_rrx: mpsc::Receiver<Message>,
         mut shutdown_rx: broadcast::Receiver<()>,
     ) {
-        let actor_span = tracing::info_span!("actor_task", peer_addr = %peer_addr);
-        let _enter = actor_span.enter();
+        // let actor_span = tracing::info_span!("actor_task", peer_addr = %peer_addr);
+        // let _enter = actor_span.enter();
         info!(peer_addr = %peer_addr, "Initializing peer actor handler...");
 
         loop {
@@ -231,8 +231,8 @@ impl PeerSession {
         mut shutdown_rx: broadcast::Receiver<()>,
         shutdown_tx: broadcast::Sender<()>,
     ) {
-        let request_span = tracing::info_span!("piece_request_task", peer_addr = %peer_addr);
-        let _enter = request_span.enter();
+        // let request_span = tracing::info_span!("piece_request_task", peer_addr = %peer_addr);
+        // let _enter = request_span.enter();
         info!(peer_addr = %peer_addr, "Initializing piece requester...");
 
         loop {
@@ -249,7 +249,7 @@ impl PeerSession {
 
                     // Check if all pieces have been downloaded or if no more pieces can be
                     // downloaded from this peer
-                    if actor.is_complete().await  || (actor.has_peer_bitfield() && !actor.has_assignable_pieces().await && !actor.has_pending_pieces()) {
+                    if actor.is_complete().await  || (actor.has_peer_bitfield() && !actor.download_state.metadata.has_missing_pieces(actor.peer_bitfield()).await) {
                         info!(peer_addr = %peer_addr, "All pieces downloaded. Sending shutdown signal...");
                         let _ = shutdown_tx.send(()); // Send shutdown signal
                     }

@@ -89,6 +89,10 @@ impl Actor {
             && self.state.unconfirmed.len() < 5
     }
 
+    pub fn peer_bitfield(&self) -> &Bitfield {
+        &self.state.peer_bitfield
+    }
+
     pub fn has_peer_bitfield(&self) -> bool {
         !self.state.peer_bitfield.bytes.is_empty()
     }
