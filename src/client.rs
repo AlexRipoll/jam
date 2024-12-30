@@ -5,7 +5,7 @@ use std::{
 };
 
 use tokio::sync::{broadcast, mpsc, Mutex};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     bitfield::Bitfield,

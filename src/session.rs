@@ -1,11 +1,11 @@
-use std::{io, sync::Arc, time::Instant};
+use std::{io, sync::Arc};
 
 use tokio::{
     io::AsyncWriteExt,
     net::TcpStream,
     sync::{broadcast, mpsc, Mutex},
 };
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 use crate::{
     bitfield::Bitfield,

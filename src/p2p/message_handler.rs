@@ -8,7 +8,7 @@ use std::{collections::HashMap, usize};
 use tokio::io::{self, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 
 use crate::bitfield::Bitfield;
 use crate::download_state::DownloadState;
@@ -382,8 +382,6 @@ impl Actor {
     }
 
     pub async fn request(&mut self) -> Result<(), P2pError> {
-        let (queue_starting_index, block_offset) = (0, 0);
-
         if self.state.download_queue.is_empty() {
             trace!("Download queue is empty; filling download queue");
             self.fill_download_queue().await;
@@ -415,8 +413,7 @@ impl Actor {
             .map(|piece| piece.index())
             .collect();
         debug!("Download queue: {:?}", indexes);
-        let queue_length = self.state.download_queue.len();
-        // for i in queue_starting_index..queue_length {
+
         for piece in self.state.download_queue.clone().iter() {
             // let piece = self.state.download_queue[i].clone();
             self.state
@@ -424,7 +421,7 @@ impl Actor {
                 .entry(piece.index() as usize)
                 .or_insert_with(|| piece.clone());
 
-            self.request_from_offset(&piece, block_offset).await?;
+            self.request_from_offset(piece, 0).await?;
         }
         debug!("Piece requests completed");
 
