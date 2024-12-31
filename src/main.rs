@@ -4,10 +4,10 @@ use std::{
     time::Instant,
 };
 
-use client::{Client, TorrentMetadata};
+use client::client::{Client, TorrentMetadata};
 use config::Config;
-use metainfo::Metainfo;
 use p2p::message_handler::generate_peer_id;
+use torrentfile::{metainfo::Metainfo, tracker};
 use tracing::{debug, error, info, trace, warn, Level};
 use tracing_appender::rolling;
 use tracing_subscriber::{
@@ -15,18 +15,15 @@ use tracing_subscriber::{
     layer::SubscriberExt,
     EnvFilter, Registry,
 };
-use tracker::get;
 
 pub mod bitfield;
 pub mod client;
 pub mod config;
-pub mod download_state;
-pub mod metainfo;
+pub mod disk;
+pub mod download;
 mod p2p;
 pub mod session;
-pub mod store;
-pub mod tcp_connection;
-pub mod tracker;
+pub mod torrentfile;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -106,7 +103,7 @@ async fn main() -> io::Result<()> {
     debug!(tracker_url = ?url, "Tracker URL built");
 
     debug!("Querying tracker...");
-    let response = get(&url).await.map_err(|e| {
+    let response = tracker::get(&url).await.map_err(|e| {
         warn!("Failed to query tracker: {}", e);
         io::Error::new(io::ErrorKind::Other, format!("Tracker query failed: {e}"))
     })?;

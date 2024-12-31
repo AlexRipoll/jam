@@ -77,7 +77,7 @@ pub fn load_from_disk(file_path: &str) -> io::Result<Bitfield> {
 
 #[cfg(test)]
 mod test {
-    use crate::bitfield::Bitfield;
+    use crate::bitfield::bitfield::Bitfield;
 
     #[test]
     fn test_has_piece() {

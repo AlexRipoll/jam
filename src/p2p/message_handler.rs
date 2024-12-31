@@ -10,8 +10,8 @@ use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, trace, warn};
 
-use crate::bitfield::Bitfield;
-use crate::download_state::DownloadState;
+use crate::bitfield::bitfield::Bitfield;
+use crate::download::state::DownloadState;
 use crate::p2p::message::{Message, MessageId, PiecePayload, TransferPayload};
 
 use super::piece::{Piece, PieceError};
@@ -757,8 +757,8 @@ mod test {
     use std::{collections::HashMap, sync::Arc, time::Duration};
 
     use crate::{
-        bitfield::Bitfield,
-        download_state::{DownloadMetadata, DownloadState},
+        bitfield::bitfield::Bitfield,
+        download::state::DownloadState,
         p2p::{
             message::{Message, MessageId, PiecePayload},
             message_handler::{client_version, generate_peer_id, Actor, P2pError, State},

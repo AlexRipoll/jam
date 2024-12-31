@@ -8,8 +8,8 @@ use tokio::{
 use tracing::{error, info};
 
 use crate::{
-    bitfield::Bitfield,
-    download_state::DownloadState,
+    bitfield::bitfield::Bitfield,
+    download::state::DownloadState,
     p2p::{
         io::{read_message, send_message},
         message::Message,

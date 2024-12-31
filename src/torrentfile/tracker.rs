@@ -169,7 +169,7 @@ mod test {
     use serde_bencode::de;
     use serde_bytes::ByteBuf;
 
-    use crate::tracker::TrackerError;
+    use crate::torrentfile::tracker::TrackerError;
 
     use super::{Ip, Peer, Response};
 

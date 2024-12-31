@@ -6,7 +6,7 @@ use std::{
 
 use tracing::debug;
 
-use crate::{bitfield::Bitfield, p2p::piece::Piece};
+use crate::{bitfield::bitfield::Bitfield, p2p::piece::Piece};
 
 pub struct Writer {
     download_file: File,
@@ -79,7 +79,7 @@ mod test {
 
     use tempfile::tempdir;
 
-    use crate::{p2p::piece::Piece, store::Writer};
+    use crate::{disk::disk::Writer, p2p::piece::Piece};
 
     #[test]
     fn test_writer_creation_and_file_creation() {

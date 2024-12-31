@@ -8,13 +8,13 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    bitfield::Bitfield,
+    bitfield::bitfield::Bitfield,
     config::Config,
-    download_state::DownloadState,
+    disk::disk::Writer,
+    download::state::DownloadState,
     p2p::{message_handler::Handshake, piece::Piece},
-    session::PeerSession,
-    store::Writer,
-    tcp_connection::connect_to_peer,
+    session::session::PeerSession,
+    session::tcp_connection::connect_to_peer,
     tracker::Peer,
 };
 
@@ -331,7 +331,7 @@ impl Client {
 mod test {
     use std::collections::HashMap;
 
-    use crate::{bitfield::Bitfield, client::DownloadState, p2p::piece::Piece};
+    use crate::{bitfield::bitfield::Bitfield, client::client::DownloadState, p2p::piece::Piece};
 
     #[tokio::test]
     async fn test_has_missing_pieces() {
