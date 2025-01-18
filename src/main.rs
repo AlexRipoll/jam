@@ -21,6 +21,7 @@ pub mod client;
 pub mod config;
 pub mod disk;
 pub mod download;
+pub mod error;
 mod p2p;
 pub mod session;
 pub mod torrentfile;

@@ -10,10 +10,11 @@ use tracing::{error, info};
 use crate::{
     bitfield::bitfield::Bitfield,
     download::state::DownloadState,
+    error::error::P2pError,
     p2p::{
         io::{read_message, send_message},
         message::Message,
-        message_handler::{perform_handshake, Actor, Handshake, P2pError},
+        message_handler::{perform_handshake, Actor, Handshake},
         piece::Piece,
     },
 };

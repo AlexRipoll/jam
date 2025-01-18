@@ -3,7 +3,9 @@ use tokio::{
     net::TcpStream,
 };
 
-use super::{message::Message, message_handler::P2pError};
+use crate::error::error::P2pError;
+
+use super::message::Message;
 
 pub async fn read_message<T>(read_half: &mut T) -> Result<Message, P2pError>
 where
@@ -61,13 +63,12 @@ pub async fn send_message(
 
 #[cfg(test)]
 mod test {
-    use tokio::io::{duplex, AsyncWriteExt};
-
+    use crate::error::error::P2pError;
     use crate::p2p::{
         io::read_message,
         message::{Message, MessageId},
-        message_handler::P2pError,
     };
+    use tokio::io::{duplex, AsyncWriteExt};
 
     #[tokio::test]
     async fn test_read_message() {

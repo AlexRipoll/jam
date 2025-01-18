@@ -1,5 +1,7 @@
 use std::{error::Error, fmt::Display};
 
+use crate::error::error::PieceError;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Piece {
     index: u32,
@@ -87,27 +89,6 @@ impl Piece {
 
     pub fn mark_finalized(&mut self) {
         self.is_finalized = true;
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum PieceError {
-    MissingBlocks,
-    OutOfBounds,
-}
-
-impl Display for PieceError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PieceError::MissingBlocks => write!(f, "Unable to assemble piece, missing blocks"),
-            PieceError::OutOfBounds => write!(f, "Block index out of bounds"),
-        }
-    }
-}
-
-impl Error for PieceError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        None
     }
 }
 
