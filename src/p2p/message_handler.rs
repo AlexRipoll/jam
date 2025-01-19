@@ -10,7 +10,7 @@ use tracing::{debug, trace, warn};
 
 use crate::bitfield::bitfield::Bitfield;
 use crate::download::state::DownloadState;
-use crate::error::error::P2pError;
+use crate::error::error::JamError;
 use crate::p2p::message::{Message, MessageId, PiecePayload, TransferPayload};
 
 use super::piece::Piece;
@@ -152,7 +152,7 @@ impl Actor {
             .all(|(_, piece)| piece.is_finalized())
     }
 
-    pub async fn handle_message(&mut self, message: Message) -> Result<(), P2pError> {
+    pub async fn handle_message(&mut self, message: Message) -> Result<(), JamError> {
         // modifies state
         match message.message_id {
             MessageId::KeepAlive => {
@@ -248,15 +248,15 @@ impl Actor {
         // TODO: check if interested
     }
 
-    async fn download(&mut self, payload: Option<&[u8]>) -> Result<(), P2pError> {
-        let bytes = payload.ok_or(P2pError::EmptyPayload)?;
+    async fn download(&mut self, payload: Option<&[u8]>) -> Result<(), JamError> {
+        let bytes = payload.ok_or(JamError::EmptyPayload)?;
         let payload = PiecePayload::deserialize(bytes)?;
 
         let piece = self
             .state
             .pieces_status
             .get_mut(&(payload.index as usize))
-            .ok_or(P2pError::PieceNotFound)?;
+            .ok_or(JamError::PieceNotFound)?;
 
         debug!(piece_index= ?payload.index, block_offset= ?payload.begin, "Downloading piece");
         // Add the block to the piece
@@ -302,7 +302,7 @@ impl Actor {
                 self.state
                     .unconfirmed
                     .retain(|p| p.index() != piece.index());
-                return Err(P2pError::PieceInvalid);
+                return Err(JamError::PieceInvalid);
             }
         }
 
@@ -380,12 +380,12 @@ impl Actor {
             .any(|piece_index| !assigned_piece_indexes.contains(&piece_index))
     }
 
-    pub async fn request(&mut self) -> Result<(), P2pError> {
+    pub async fn request(&mut self) -> Result<(), JamError> {
         if self.state.download_queue.is_empty() {
             trace!("Download queue is empty; filling download queue");
             self.fill_download_queue().await;
             if self.state.download_queue.is_empty() {
-                return Err(P2pError::EndOfWork);
+                return Err(JamError::EndOfWork);
             }
         }
 
@@ -432,7 +432,7 @@ impl Actor {
         &mut self,
         piece: &Piece,
         start_offset: u32,
-    ) -> Result<(), P2pError> {
+    ) -> Result<(), JamError> {
         let total_blocks = (piece.size() + 16384 - 1) / 16384;
 
         debug!(
@@ -512,7 +512,7 @@ impl Handshake {
         buf
     }
 
-    pub fn deserialize(buffer: Vec<u8>) -> Result<Handshake, P2pError> {
+    pub fn deserialize(buffer: Vec<u8>) -> Result<Handshake, JamError> {
         let mut offset = 0;
 
         // Parse `pstr_length` (1 byte)
@@ -521,12 +521,12 @@ impl Handshake {
 
         // Check if `pstr_length` matches expected length for "BitTorrent protocol"
         if pstr_length as usize != PSTR.len() {
-            return Err(P2pError::DeserializationError("pstr length mismatch"));
+            return Err(JamError::DeserializationError("pstr length mismatch"));
         }
 
         // Parse `pstr` (19 bytes)
         let pstr = std::str::from_utf8(&buffer[offset..offset + pstr_length as usize])
-            .map_err(|_| P2pError::DeserializationError("Invalid UTF-8 in pstr"))?
+            .map_err(|_| JamError::DeserializationError("Invalid UTF-8 in pstr"))?
             .to_string();
 
         offset += pstr_length as usize;
@@ -559,7 +559,7 @@ impl Handshake {
 pub async fn perform_handshake(
     stream: &mut TcpStream,
     handshake_metadata: &Handshake,
-) -> Result<Vec<u8>, P2pError> {
+) -> Result<Vec<u8>, JamError> {
     stream.write_all(&handshake_metadata.serialize()).await?;
 
     let mut buffer = vec![0u8; 68];
@@ -579,7 +579,7 @@ pub async fn perform_handshake(
     }
 
     if bytes_read != 68 {
-        return Err(P2pError::InvalidHandshake);
+        return Err(JamError::InvalidHandshake);
     }
 
     Ok(buffer)
@@ -633,7 +633,7 @@ mod test {
         download::state::DownloadState,
         p2p::{
             message::{Message, MessageId, PiecePayload},
-            message_handler::{client_version, generate_peer_id, Actor, P2pError, State},
+            message_handler::{client_version, generate_peer_id, Actor, JamError, State},
             piece::Piece,
         },
     };
@@ -991,7 +991,7 @@ mod test {
             .handle_message(Message::new(MessageId::Piece, Some(payload)))
             .await;
 
-        assert_matches!(result, Err(P2pError::PieceInvalid));
+        assert_matches!(result, Err(JamError::PieceInvalid));
     }
 
     #[tokio::test]

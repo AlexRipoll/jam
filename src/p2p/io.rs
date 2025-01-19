@@ -3,11 +3,11 @@ use tokio::{
     net::TcpStream,
 };
 
-use crate::error::error::P2pError;
+use crate::error::error::JamError;
 
 use super::message::Message;
 
-pub async fn read_message<T>(read_half: &mut T) -> Result<Message, P2pError>
+pub async fn read_message<T>(read_half: &mut T) -> Result<Message, JamError>
 where
     T: AsyncRead + Unpin,
 {
@@ -19,7 +19,7 @@ where
         match read_half.read(&mut length_buffer[bytes_read..]).await {
             Ok(0) => {
                 // Connection closed before reading the full message
-                return Err(P2pError::IncompleteMessage);
+                return Err(JamError::IncompleteMessage);
             }
             Ok(n) => bytes_read += n,
             Err(e) => return Err(e.into()),
@@ -40,7 +40,7 @@ where
         match read_half.read(&mut message_buffer[4 + bytes_read..]).await {
             Ok(0) => {
                 // Connection closed before reading the full message
-                return Err(P2pError::IncompleteMessage);
+                return Err(JamError::IncompleteMessage);
             }
             Ok(n) => bytes_read += n,
             Err(e) => return Err(e.into()),
@@ -55,7 +55,7 @@ where
 pub async fn send_message(
     write_half: &mut tokio::io::WriteHalf<TcpStream>,
     message: Message,
-) -> Result<(), P2pError> {
+) -> Result<(), JamError> {
     write_half.write_all(&message.serialize()).await?;
 
     Ok(())
@@ -63,7 +63,7 @@ pub async fn send_message(
 
 #[cfg(test)]
 mod test {
-    use crate::error::error::P2pError;
+    use crate::error::error::JamError;
     use crate::p2p::{
         io::read_message,
         message::{Message, MessageId},
@@ -140,7 +140,7 @@ mod test {
         let result = read_message(&mut read_half).await;
 
         // Assertions
-        assert_eq!(result.unwrap_err(), P2pError::IncompleteMessage);
+        assert_eq!(result.unwrap_err(), JamError::IncompleteMessage);
     }
 
     #[tokio::test]
@@ -153,6 +153,6 @@ mod test {
         let result = read_message(&mut read_half).await;
 
         // Assertions
-        assert_eq!(result.unwrap_err(), P2pError::IncompleteMessage);
+        assert_eq!(result.unwrap_err(), JamError::IncompleteMessage);
     }
 }

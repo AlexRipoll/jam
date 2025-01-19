@@ -10,7 +10,7 @@ use tracing::{error, info};
 use crate::{
     bitfield::bitfield::Bitfield,
     download::state::DownloadState,
-    error::error::P2pError,
+    error::error::JamError,
     p2p::{
         io::{read_message, send_message},
         message::Message,
@@ -149,7 +149,7 @@ impl PeerSession {
                         }
                         Err(e) => {
                             error!(peer_addr = %peer_addr, error = %e, "Error reading message");
-                            if e == P2pError::IncompleteMessage {
+                            if e == JamError::IncompleteMessage {
                                 let _ = shutdown_tx.send(()); // Send shutdown signal
                             }
                         }

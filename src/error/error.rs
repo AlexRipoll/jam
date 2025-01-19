@@ -11,7 +11,7 @@ use crate::{
 };
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum P2pError {
+pub enum JamError {
     EmptyPayload,
     InvalidHandshake,
     IncompleteMessage,
@@ -28,77 +28,77 @@ pub enum P2pError {
     IoError(IoErrorWrapper),
 }
 
-impl Display for P2pError {
+impl Display for JamError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            P2pError::EmptyPayload => write!(f, "Empty payload"),
-            P2pError::InvalidHandshake => write!(f, "Handshake response was not 68 bytes"),
-            P2pError::EndOfWork => write!(f, "No available pieces to download from peer"),
-            P2pError::IncompleteMessage => {
+            JamError::EmptyPayload => write!(f, "Empty payload"),
+            JamError::InvalidHandshake => write!(f, "Handshake response was not 68 bytes"),
+            JamError::EndOfWork => write!(f, "No available pieces to download from peer"),
+            JamError::IncompleteMessage => {
                 write!(f, "Connection closed before reading full message")
             }
-            P2pError::DeserializationError(err) => write!(f, "Deserialization error: {}", err),
-            P2pError::PieceNotFound => write!(f, "Piece not found in map"),
-            P2pError::PieceInvalid => write!(f, "Invalid piece, hash mismatch"),
-            P2pError::PieceMissingBlocks => {
+            JamError::DeserializationError(err) => write!(f, "Deserialization error: {}", err),
+            JamError::PieceNotFound => write!(f, "Piece not found in map"),
+            JamError::PieceInvalid => write!(f, "Invalid piece, hash mismatch"),
+            JamError::PieceMissingBlocks => {
                 write!(f, "Unable to assemble piece, missing blocks")
             }
-            P2pError::PieceOutOfBounds => write!(f, "Block index out of bounds"),
-            P2pError::DiskTxError(err) => write!(f, "Disk tx error: {}", err),
-            P2pError::IoTxError(err) => write!(f, "IO tx error: {}", err),
-            P2pError::ClientTxError(err) => write!(f, "Client tx error: {}", err),
-            P2pError::IoError(IoErrorWrapper(err)) => write!(f, "IO error: {}", err),
-            P2pError::ShutdownError(BroadcastSendError(err)) => {
+            JamError::PieceOutOfBounds => write!(f, "Block index out of bounds"),
+            JamError::DiskTxError(err) => write!(f, "Disk tx error: {}", err),
+            JamError::IoTxError(err) => write!(f, "IO tx error: {}", err),
+            JamError::ClientTxError(err) => write!(f, "Client tx error: {}", err),
+            JamError::IoError(IoErrorWrapper(err)) => write!(f, "IO error: {}", err),
+            JamError::ShutdownError(BroadcastSendError(err)) => {
                 write!(f, "Shutdown tx error: {}", err)
             }
         }
     }
 }
 
-impl From<&'static str> for P2pError {
+impl From<&'static str> for JamError {
     fn from(err: &'static str) -> Self {
-        P2pError::DeserializationError(err)
+        JamError::DeserializationError(err)
     }
 }
 
-impl From<mpsc::error::SendError<(Piece, Vec<u8>)>> for P2pError {
+impl From<mpsc::error::SendError<(Piece, Vec<u8>)>> for JamError {
     fn from(err: mpsc::error::SendError<(Piece, Vec<u8>)>) -> Self {
-        P2pError::DiskTxError(err)
+        JamError::DiskTxError(err)
     }
 }
 
-impl From<mpsc::error::SendError<Message>> for P2pError {
+impl From<mpsc::error::SendError<Message>> for JamError {
     fn from(err: mpsc::error::SendError<Message>) -> Self {
-        P2pError::IoTxError(err)
+        JamError::IoTxError(err)
     }
 }
 
-impl From<mpsc::error::SendError<Bitfield>> for P2pError {
+impl From<mpsc::error::SendError<Bitfield>> for JamError {
     fn from(err: mpsc::error::SendError<Bitfield>) -> Self {
-        P2pError::ClientTxError(err)
+        JamError::ClientTxError(err)
     }
 }
 
-impl From<broadcast::error::SendError<()>> for P2pError {
+impl From<broadcast::error::SendError<()>> for JamError {
     fn from(err: broadcast::error::SendError<()>) -> Self {
-        P2pError::ShutdownError(BroadcastSendError(err))
+        JamError::ShutdownError(BroadcastSendError(err))
     }
 }
 
-impl From<io::Error> for P2pError {
+impl From<io::Error> for JamError {
     fn from(err: io::Error) -> Self {
-        P2pError::IoError(IoErrorWrapper(err))
+        JamError::IoError(IoErrorWrapper(err))
     }
 }
 
-impl Error for P2pError {
+impl Error for JamError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            P2pError::DiskTxError(err) => Some(err),
-            P2pError::IoTxError(err) => Some(err),
-            P2pError::ClientTxError(err) => Some(err),
-            P2pError::IoError(IoErrorWrapper(err)) => Some(err),
-            P2pError::ShutdownError(BroadcastSendError(err)) => Some(err),
+            JamError::DiskTxError(err) => Some(err),
+            JamError::IoTxError(err) => Some(err),
+            JamError::ClientTxError(err) => Some(err),
+            JamError::IoError(IoErrorWrapper(err)) => Some(err),
+            JamError::ShutdownError(BroadcastSendError(err)) => Some(err),
             _ => None,
         }
     }
