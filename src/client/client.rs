@@ -349,7 +349,6 @@ mod test {
         let download_state = DownloadState::new(pieces_map);
 
         // Add bitfield with pieces 0, 2 and 5 available
-        let bitfield = Bitfield::new(&[0b10100100]); // Bits 0, 2 and 5 are set
         let mut client_bitfield = download_state.metadata.bitfield.lock().await;
         client_bitfield.set_piece(0);
         client_bitfield.set_piece(2);
@@ -380,7 +379,6 @@ mod test {
         let download_state = DownloadState::new(pieces_map);
 
         // Add bitfield with pieces 0, 2 and 5 available
-        let bitfield = Bitfield::new(&[0b10100100]); // Bits 0, 2 and 5 are set
         let mut client_bitfield = download_state.metadata.bitfield.lock().await;
         client_bitfield.set_piece(0);
         client_bitfield.set_piece(2);

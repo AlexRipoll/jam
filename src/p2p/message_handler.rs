@@ -796,8 +796,8 @@ mod test {
 
     #[tokio::test]
     async fn test_handle_piece_message_valid_piece() {
-        let (client_tx, mut client_rx) = mpsc::channel(10);
-        let (io_wtx, mut io_rx) = mpsc::channel(10);
+        let (client_tx, _) = mpsc::channel(10);
+        let (io_wtx, _) = mpsc::channel(10);
         let (disk_tx, mut disk_rx) = mpsc::channel(10);
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
@@ -938,9 +938,9 @@ mod test {
 
     #[tokio::test]
     async fn test_handle_piece_message_invalid_piece() {
-        let (client_tx, mut client_rx) = mpsc::channel(10);
-        let (io_wtx, mut io_rx) = mpsc::channel(10);
-        let (disk_tx, mut disk_rx) = mpsc::channel(10);
+        let (client_tx, _) = mpsc::channel(10);
+        let (io_wtx, _) = mpsc::channel(10);
+        let (disk_tx, _) = mpsc::channel(10);
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
 
         let pieces_map = HashMap::new();
@@ -1011,7 +1011,7 @@ mod test {
         let pieces_state = Arc::new(DownloadState::new(pieces_map));
 
         // Set up mpsc channels
-        let (client_tx, mut client_rx) = mpsc::channel(10);
+        let (client_tx, _) = mpsc::channel(10);
         let (disk_tx, _) = mpsc::channel(10);
         let (io_wtx, _) = mpsc::channel(10);
         let (shutdown_tx, _) = broadcast::channel::<()>(1); // Shutdown signal
