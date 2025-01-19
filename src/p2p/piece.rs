@@ -1,6 +1,4 @@
-use std::{error::Error, fmt::Display};
-
-use crate::error::error::PieceError;
+use crate::error::error::P2pError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Piece {
@@ -23,18 +21,18 @@ impl Piece {
         }
     }
 
-    pub fn add_block(&mut self, offset: u32, block: Vec<u8>) -> Result<(), PieceError> {
+    pub fn add_block(&mut self, offset: u32, block: Vec<u8>) -> Result<(), P2pError> {
         let block_index = (offset / 16384) as usize;
 
         if block_index >= self.blocks.len() {
-            return Err(PieceError::OutOfBounds);
+            return Err(P2pError::PieceOutOfBounds);
         }
         self.blocks[block_index] = block;
 
         Ok(())
     }
 
-    pub fn assemble(&self) -> Result<Vec<u8>, PieceError> {
+    pub fn assemble(&self) -> Result<Vec<u8>, P2pError> {
         let mut buffer = vec![0u8; self.size];
         let mut position = 0;
 
@@ -43,7 +41,7 @@ impl Piece {
                 buffer[position..position + block.len()].copy_from_slice(block);
                 position += block.len();
             } else {
-                return Err(PieceError::MissingBlocks);
+                return Err(P2pError::PieceMissingBlocks);
             }
         }
 
@@ -64,7 +62,7 @@ impl Piece {
         self.size
     }
 
-    pub fn offset(&self, total_size: u64, standard_piece_size: u64) -> Result<u64, PieceError> {
+    pub fn offset(&self, total_size: u64, standard_piece_size: u64) -> u64 {
         let base_offset = (self.index as u64).saturating_mul(standard_piece_size);
 
         // Calculate the index of the last piece
@@ -73,10 +71,10 @@ impl Piece {
         // If this is the last piece, adjust the offset
         if self.index as u64 == last_piece_index {
             let last_piece_start = last_piece_index.saturating_mul(standard_piece_size);
-            return Ok(std::cmp::min(base_offset, last_piece_start));
+            return std::cmp::min(base_offset, last_piece_start);
         }
 
-        Ok(base_offset)
+        base_offset
     }
 
     pub fn hash(&self) -> [u8; 20] {
@@ -132,7 +130,7 @@ mod tests {
         let block = vec![1u8; 16384];
         let result = piece.add_block(32768, block);
 
-        assert!(matches!(result, Err(PieceError::OutOfBounds)));
+        assert!(matches!(result, Err(P2pError::PieceOutOfBounds)));
     }
 
     #[test]
@@ -160,7 +158,7 @@ mod tests {
 
         let result = piece.assemble();
 
-        assert!(matches!(result, Err(PieceError::MissingBlocks)));
+        assert!(matches!(result, Err(P2pError::PieceMissingBlocks)));
     }
 
     #[test]
@@ -195,7 +193,7 @@ mod tests {
 
         // For index 2 (middle piece), the offset should be 2 * 1024 = 2048
         let offset = piece.offset(total_size, standard_piece_size);
-        assert_eq!(offset.unwrap(), 2048);
+        assert_eq!(offset, 2048);
     }
 
     #[test]
@@ -207,7 +205,7 @@ mod tests {
 
         // The first piece's offset should be 0
         let offset = piece.offset(total_size, standard_piece_size);
-        assert_eq!(offset.unwrap(), 0);
+        assert_eq!(offset, 0);
     }
 
     #[test]
@@ -219,7 +217,7 @@ mod tests {
 
         // The last piece should start at the correct offset
         let offset = piece.offset(total_size, standard_piece_size);
-        assert_eq!(offset.unwrap(), 4096); // 4 * 1024 = 4096
+        assert_eq!(offset, 4096); // 4 * 1024 = 4096
     }
 
     #[test]
@@ -231,7 +229,7 @@ mod tests {
 
         // The last piece should have an offset calculated correctly even with a smaller size
         let offset = piece.offset(total_size, standard_piece_size);
-        assert_eq!(offset.unwrap(), 5120); // Last piece starts at offset 4096
+        assert_eq!(offset, 5120); // Last piece starts at offset 4096
     }
 
     #[test]

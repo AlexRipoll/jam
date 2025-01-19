@@ -39,9 +39,7 @@ impl Writer {
         assembled_piece: &[u8],
     ) -> std::io::Result<()> {
         let mut file = &self.download_file;
-        let offset = piece
-            .offset(file_size, piece_standard_size)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let offset = piece.offset(file_size, piece_standard_size);
 
         // Check if the assembled data surpasses the file size
         let total_written = offset + assembled_piece.len() as u64;

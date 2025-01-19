@@ -11,35 +11,14 @@ use crate::{
 };
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum PieceError {
-    MissingBlocks,
-    OutOfBounds,
-}
-
-impl Display for PieceError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PieceError::MissingBlocks => write!(f, "Unable to assemble piece, missing blocks"),
-            PieceError::OutOfBounds => write!(f, "Block index out of bounds"),
-        }
-    }
-}
-
-impl Error for PieceError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        None
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
 pub enum P2pError {
     EmptyPayload,
     InvalidHandshake,
     IncompleteMessage,
     EndOfWork,
     DeserializationError(&'static str),
-    PieceMissingBlocks(PieceError),
-    PieceOutOfBounds(PieceError),
+    PieceMissingBlocks,
+    PieceOutOfBounds,
     PieceNotFound,
     PieceInvalid,
     DiskTxError(mpsc::error::SendError<(Piece, Vec<u8>)>),
@@ -61,8 +40,10 @@ impl Display for P2pError {
             P2pError::DeserializationError(err) => write!(f, "Deserialization error: {}", err),
             P2pError::PieceNotFound => write!(f, "Piece not found in map"),
             P2pError::PieceInvalid => write!(f, "Invalid piece, hash mismatch"),
-            P2pError::PieceMissingBlocks(err) => write!(f, "{}", err),
-            P2pError::PieceOutOfBounds(err) => write!(f, "{}", err),
+            P2pError::PieceMissingBlocks => {
+                write!(f, "Unable to assemble piece, missing blocks")
+            }
+            P2pError::PieceOutOfBounds => write!(f, "Block index out of bounds"),
             P2pError::DiskTxError(err) => write!(f, "Disk tx error: {}", err),
             P2pError::IoTxError(err) => write!(f, "IO tx error: {}", err),
             P2pError::ClientTxError(err) => write!(f, "Client tx error: {}", err),
@@ -77,15 +58,6 @@ impl Display for P2pError {
 impl From<&'static str> for P2pError {
     fn from(err: &'static str) -> Self {
         P2pError::DeserializationError(err)
-    }
-}
-
-impl From<PieceError> for P2pError {
-    fn from(err: PieceError) -> Self {
-        match err {
-            PieceError::MissingBlocks => P2pError::PieceMissingBlocks(err),
-            PieceError::OutOfBounds => P2pError::PieceOutOfBounds(err),
-        }
     }
 }
 
@@ -122,8 +94,6 @@ impl From<io::Error> for P2pError {
 impl Error for P2pError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            P2pError::PieceMissingBlocks(err) => Some(err),
-            P2pError::PieceOutOfBounds(err) => Some(err),
             P2pError::DiskTxError(err) => Some(err),
             P2pError::IoTxError(err) => Some(err),
             P2pError::ClientTxError(err) => Some(err),
