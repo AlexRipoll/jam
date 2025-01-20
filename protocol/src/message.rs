@@ -151,10 +151,13 @@ impl PiecePayload {
         bytes
     }
 
-    pub fn deserialize(payload: &[u8]) -> Result<Self, &'static str> {
+    pub fn deserialize(payload: &[u8]) -> io::Result<Self> {
         // Check that the payload is at least 8 bytes for `index` and `begin`
         if payload.len() < 8 {
-            return Err("Payload too short for Piece deserialization");
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "Payload too short for Piece deserialization",
+            ));
         }
 
         // Extract the `index` (first 4 bytes) and `begin` (next 4 bytes)
