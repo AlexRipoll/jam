@@ -11,9 +11,9 @@ use tracing::{debug, trace, warn};
 use crate::download::state::DownloadState;
 use crate::error::error::JamError;
 
-use super::piece::Piece;
 use protocol::bitfield::Bitfield;
 use protocol::message::{Message, MessageId, PiecePayload, TransferPayload};
+use protocol::piece::Piece;
 
 const PSTR: &str = "BitTorrent protocol";
 const MAX_STRIKES: u8 = 3;
@@ -521,12 +521,12 @@ impl Handshake {
 
         // Check if `pstr_length` matches expected length for "BitTorrent protocol"
         if pstr_length as usize != PSTR.len() {
-            return Err(JamError::DeserializationError("pstr length mismatch"));
+            return Err(JamError::InvalidPstrLen);
         }
 
         // Parse `pstr` (19 bytes)
         let pstr = std::str::from_utf8(&buffer[offset..offset + pstr_length as usize])
-            .map_err(|_| JamError::DeserializationError("Invalid UTF-8 in pstr"))?
+            .map_err(|_| JamError::InvalidPstr)?
             .to_string();
 
         offset += pstr_length as usize;
@@ -630,14 +630,12 @@ mod test {
 
     use crate::{
         download::state::DownloadState,
-        p2p::{
-            message_handler::{client_version, generate_peer_id, Actor, JamError, State},
-            piece::Piece,
-        },
+        p2p::message_handler::{client_version, generate_peer_id, Actor, JamError, State},
     };
     use assert_matches::assert_matches;
     use protocol::bitfield::Bitfield;
     use protocol::message::{Message, MessageId, PiecePayload};
+    use protocol::piece::Piece;
     use tokio::{
         sync::{broadcast, mpsc},
         time::timeout,

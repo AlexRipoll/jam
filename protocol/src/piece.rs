@@ -1,4 +1,4 @@
-use crate::error::error::JamError;
+use crate::error::ProtocolError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Piece {
@@ -21,18 +21,18 @@ impl Piece {
         }
     }
 
-    pub fn add_block(&mut self, offset: u32, block: Vec<u8>) -> Result<(), JamError> {
+    pub fn add_block(&mut self, offset: u32, block: Vec<u8>) -> Result<(), ProtocolError> {
         let block_index = (offset / 16384) as usize;
 
         if block_index >= self.blocks.len() {
-            return Err(JamError::PieceOutOfBounds);
+            return Err(ProtocolError::PieceOutOfBounds);
         }
         self.blocks[block_index] = block;
 
         Ok(())
     }
 
-    pub fn assemble(&self) -> Result<Vec<u8>, JamError> {
+    pub fn assemble(&self) -> Result<Vec<u8>, ProtocolError> {
         let mut buffer = vec![0u8; self.size];
         let mut position = 0;
 
@@ -41,7 +41,7 @@ impl Piece {
                 buffer[position..position + block.len()].copy_from_slice(block);
                 position += block.len();
             } else {
-                return Err(JamError::PieceMissingBlocks);
+                return Err(ProtocolError::PieceMissingBlocks);
             }
         }
 
@@ -130,7 +130,7 @@ mod tests {
         let block = vec![1u8; 16384];
         let result = piece.add_block(32768, block);
 
-        assert!(matches!(result, Err(JamError::PieceOutOfBounds)));
+        assert!(matches!(result, Err(ProtocolError::PieceOutOfBounds)));
     }
 
     #[test]
@@ -158,7 +158,7 @@ mod tests {
 
         let result = piece.assemble();
 
-        assert!(matches!(result, Err(JamError::PieceMissingBlocks)));
+        assert!(matches!(result, Err(ProtocolError::PieceMissingBlocks)));
     }
 
     #[test]

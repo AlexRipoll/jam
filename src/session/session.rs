@@ -15,9 +15,9 @@ use crate::{
     p2p::{
         io::{read_message, send_message},
         message_handler::{perform_handshake, Actor, Handshake},
-        piece::Piece,
     },
 };
+use protocol::piece::Piece;
 
 #[derive(Debug)]
 pub struct PeerSession {

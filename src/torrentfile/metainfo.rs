@@ -10,7 +10,7 @@ use std::{
     fmt::Display,
 };
 
-use crate::p2p::piece::Piece;
+use protocol::piece::Piece;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Metainfo {

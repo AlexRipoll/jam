@@ -5,19 +5,19 @@ use tokio::{
     sync::{broadcast, mpsc},
 };
 
-use crate::p2p::piece::Piece;
-use protocol::bitfield::Bitfield;
 use protocol::message::Message;
+use protocol::piece::Piece;
+use protocol::{bitfield::Bitfield, error::ProtocolError};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum JamError {
+    Protocol(ProtocolError),
     EmptyPayload,
     InvalidHandshake,
     IncompleteMessage,
+    InvalidPstrLen,
+    InvalidPstr,
     EndOfWork,
-    DeserializationError(&'static str),
-    PieceMissingBlocks,
-    PieceOutOfBounds,
     PieceNotFound,
     PieceInvalid,
     DiskTxError(mpsc::error::SendError<(Piece, Vec<u8>)>),
@@ -30,19 +30,15 @@ pub enum JamError {
 impl Display for JamError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            JamError::Protocol(err) => write!(f, "Protocol error: {}", err),
             JamError::EmptyPayload => write!(f, "Empty payload"),
             JamError::InvalidHandshake => write!(f, "Handshake response was not 68 bytes"),
             JamError::EndOfWork => write!(f, "No available pieces to download from peer"),
             JamError::IncompleteMessage => {
                 write!(f, "Connection closed before reading full message")
             }
-            JamError::DeserializationError(err) => write!(f, "Deserialization error: {}", err),
             JamError::PieceNotFound => write!(f, "Piece not found in map"),
             JamError::PieceInvalid => write!(f, "Invalid piece, hash mismatch"),
-            JamError::PieceMissingBlocks => {
-                write!(f, "Unable to assemble piece, missing blocks")
-            }
-            JamError::PieceOutOfBounds => write!(f, "Block index out of bounds"),
             JamError::DiskTxError(err) => write!(f, "Disk tx error: {}", err),
             JamError::IoTxError(err) => write!(f, "IO tx error: {}", err),
             JamError::ClientTxError(err) => write!(f, "Client tx error: {}", err),
@@ -50,13 +46,15 @@ impl Display for JamError {
             JamError::ShutdownError(BroadcastSendError(err)) => {
                 write!(f, "Shutdown tx error: {}", err)
             }
+            JamError::InvalidPstrLen => write!(f, "pstr length mismatch"),
+            JamError::InvalidPstr => write!(f, "Invalid UTF-8 in pstr"),
         }
     }
 }
 
-impl From<&'static str> for JamError {
-    fn from(err: &'static str) -> Self {
-        JamError::DeserializationError(err)
+impl From<ProtocolError> for JamError {
+    fn from(err: ProtocolError) -> Self {
+        JamError::Protocol(err)
     }
 }
 
@@ -93,6 +91,7 @@ impl From<io::Error> for JamError {
 impl Error for JamError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            JamError::Protocol(err) => Some(err),
             JamError::DiskTxError(err) => Some(err),
             JamError::IoTxError(err) => Some(err),
             JamError::ClientTxError(err) => Some(err),

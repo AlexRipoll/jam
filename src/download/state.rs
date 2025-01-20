@@ -6,8 +6,8 @@ use std::{
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::p2p::piece::Piece;
 use protocol::bitfield::Bitfield;
+use protocol::piece::Piece;
 
 #[derive(Debug)]
 pub struct DownloadMetadata {

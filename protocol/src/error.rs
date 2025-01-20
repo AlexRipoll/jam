@@ -2,7 +2,7 @@ use std::fmt;
 
 use tokio::io;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ProtocolError {
     // Errors from the `Piece` module
     PieceOutOfBounds,
@@ -14,7 +14,8 @@ pub enum ProtocolError {
     UnknownMessageId,
 
     // I/O errors
-    Io(io::Error),
+    // Io(io::Error),
+    Io(String),
 }
 
 // Implement `std::fmt::Display` for `ProtocolError`
@@ -35,15 +36,20 @@ impl fmt::Display for ProtocolError {
 impl std::error::Error for ProtocolError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            ProtocolError::Io(err) => Some(err),
+            // ProtocolError::Io(err) => Some(err),
             _ => None,
         }
     }
 }
 
 // Implement `From<io::Error>` for `ProtocolError`
+// impl From<io::Error> for ProtocolError {
+//     fn from(err: io::Error) -> Self {
+//         ProtocolError::Io(err)
+//     }
+// }
 impl From<io::Error> for ProtocolError {
     fn from(err: io::Error) -> Self {
-        ProtocolError::Io(err)
+        ProtocolError::Io(err.to_string()) // Convert io::Error to a string
     }
 }
