@@ -6,8 +6,8 @@ use std::{
 
 use client::client::{Client, TorrentMetadata};
 use config::Config;
-use p2p::message_handler::generate_peer_id;
-use torrentfile::{metainfo::Metainfo, tracker};
+use download::message_handler::generate_peer_id;
+use torrent::{metainfo::Metainfo, tracker};
 use tracing::{debug, error, info, trace, warn, Level};
 use tracing_appender::rolling;
 use tracing_subscriber::{
@@ -21,9 +21,8 @@ pub mod config;
 pub mod disk;
 pub mod download;
 pub mod error;
-mod p2p;
 pub mod session;
-pub mod torrentfile;
+pub mod torrent;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {

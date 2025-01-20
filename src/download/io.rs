@@ -62,8 +62,8 @@ pub async fn send_message(
 
 #[cfg(test)]
 mod test {
+    use crate::download::io::read_message;
     use crate::error::error::JamError;
-    use crate::p2p::io::read_message;
     use protocol::message::{Message, MessageId};
     use tokio::io::{duplex, AsyncWriteExt};
 

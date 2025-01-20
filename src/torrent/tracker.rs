@@ -4,10 +4,12 @@ use serde_bytes::ByteBuf;
 use std::{
     collections::HashMap,
     error::Error,
-    fmt::{self, Display},
+    fmt::Display,
     io,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr},
 };
+
+use super::peer::{Ip, Peer};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Request {
@@ -47,26 +49,6 @@ pub struct Response {
     peers: Option<ByteBuf>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum Peers {
-    Binary(Vec<u8>),
-    Dictionary(Vec<Peer>),
-}
-
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
-pub struct Peer {
-    pub peer_id: Option<String>,
-    ip: Ip,
-    port: u16,
-}
-
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
-pub enum Ip {
-    IpV4(Ipv4Addr),
-    IpV6(Ipv6Addr),
-    Dns(String),
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ScrapeResponse {
     failure_response: Option<String>,
@@ -85,16 +67,6 @@ struct FileStatus {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Flags {
     min_request_interval: Option<u64>,
-}
-
-impl Display for Ip {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Ip::IpV4(ipv4) => write!(f, "{}", ipv4),
-            Ip::IpV6(ipv6) => write!(f, "{}", ipv6),
-            Ip::Dns(dns) => write!(f, "{}", dns),
-        }
-    }
 }
 
 impl Response {
@@ -169,7 +141,7 @@ mod test {
     use serde_bencode::de;
     use serde_bytes::ByteBuf;
 
-    use crate::torrentfile::tracker::TrackerError;
+    use crate::torrent::tracker::TrackerError;
 
     use super::{Ip, Peer, Response};
 

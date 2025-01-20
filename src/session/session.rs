@@ -11,11 +11,11 @@ use tracing::{error, info};
 
 use crate::{
     download::state::DownloadState,
-    error::error::JamError,
-    p2p::{
+    download::{
         io::{read_message, send_message},
         message_handler::{perform_handshake, Actor, Handshake},
     },
+    error::error::JamError,
 };
 use protocol::piece::Piece;
 

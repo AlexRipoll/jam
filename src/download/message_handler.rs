@@ -629,8 +629,8 @@ mod test {
     use std::{collections::HashMap, sync::Arc, time::Duration};
 
     use crate::{
+        download::message_handler::{client_version, generate_peer_id, Actor, JamError, State},
         download::state::DownloadState,
-        p2p::message_handler::{client_version, generate_peer_id, Actor, JamError, State},
     };
     use assert_matches::assert_matches;
     use protocol::bitfield::Bitfield;

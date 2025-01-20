@@ -8,9 +8,12 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    config::Config, disk::disk::Writer, download::state::DownloadState,
-    p2p::message_handler::Handshake, session::session::PeerSession,
-    session::tcp_connection::connect_to_peer, tracker::Peer,
+    config::Config,
+    disk::disk::Writer,
+    download::message_handler::Handshake,
+    download::state::DownloadState,
+    session::{session::PeerSession, tcp_connection::connect_to_peer},
+    torrent::peer::Peer,
 };
 use protocol::bitfield::Bitfield;
 use protocol::piece::Piece;
