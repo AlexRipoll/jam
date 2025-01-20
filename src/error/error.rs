@@ -5,10 +5,9 @@ use tokio::{
     sync::{broadcast, mpsc},
 };
 
-use crate::{
-    bitfield::bitfield::Bitfield,
-    p2p::{message::Message, piece::Piece},
-};
+use crate::p2p::piece::Piece;
+use protocol::bitfield::Bitfield;
+use protocol::message::Message;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum JamError {

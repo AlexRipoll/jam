@@ -16,7 +16,6 @@ use tracing_subscriber::{
     EnvFilter, Registry,
 };
 
-pub mod bitfield;
 pub mod client;
 pub mod config;
 pub mod disk;

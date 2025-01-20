@@ -8,12 +8,12 @@ use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, trace, warn};
 
-use crate::bitfield::bitfield::Bitfield;
 use crate::download::state::DownloadState;
 use crate::error::error::JamError;
-use crate::p2p::message::{Message, MessageId, PiecePayload, TransferPayload};
 
 use super::piece::Piece;
+use protocol::bitfield::Bitfield;
+use protocol::message::{Message, MessageId, PiecePayload, TransferPayload};
 
 const PSTR: &str = "BitTorrent protocol";
 const MAX_STRIKES: u8 = 3;
@@ -629,15 +629,15 @@ mod test {
     use std::{collections::HashMap, sync::Arc, time::Duration};
 
     use crate::{
-        bitfield::bitfield::Bitfield,
         download::state::DownloadState,
         p2p::{
-            message::{Message, MessageId, PiecePayload},
             message_handler::{client_version, generate_peer_id, Actor, JamError, State},
             piece::Piece,
         },
     };
     use assert_matches::assert_matches;
+    use protocol::bitfield::Bitfield;
+    use protocol::message::{Message, MessageId, PiecePayload};
     use tokio::{
         sync::{broadcast, mpsc},
         time::timeout,

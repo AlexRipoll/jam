@@ -497,6 +497,7 @@ dependencies = [
  "assert_matches",
  "hex",
  "percent-encoding",
+ "protocol",
  "rand",
  "reqwest",
  "serde",
@@ -765,6 +766,10 @@ checksum = "f139b0662de085916d1fb67d2b4169d1addddda1919e696f3252b740b629986e"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "protocol"
+version = "0.1.0"
 
 [[package]]
 name = "quote"

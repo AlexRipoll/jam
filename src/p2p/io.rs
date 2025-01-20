@@ -4,8 +4,7 @@ use tokio::{
 };
 
 use crate::error::error::JamError;
-
-use super::message::Message;
+use protocol::message::Message;
 
 pub async fn read_message<T>(read_half: &mut T) -> Result<Message, JamError>
 where
@@ -64,10 +63,8 @@ pub async fn send_message(
 #[cfg(test)]
 mod test {
     use crate::error::error::JamError;
-    use crate::p2p::{
-        io::read_message,
-        message::{Message, MessageId},
-    };
+    use crate::p2p::io::read_message;
+    use protocol::message::{Message, MessageId};
     use tokio::io::{duplex, AsyncWriteExt};
 
     #[tokio::test]

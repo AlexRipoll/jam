@@ -1,5 +1,7 @@
 use std::{io, sync::Arc};
 
+use protocol::bitfield::Bitfield;
+use protocol::message::Message;
 use tokio::{
     io::AsyncWriteExt,
     net::TcpStream,
@@ -8,12 +10,10 @@ use tokio::{
 use tracing::{error, info};
 
 use crate::{
-    bitfield::bitfield::Bitfield,
     download::state::DownloadState,
     error::error::JamError,
     p2p::{
         io::{read_message, send_message},
-        message::Message,
         message_handler::{perform_handshake, Actor, Handshake},
         piece::Piece,
     },
