@@ -1,4 +1,4 @@
-use std::io::{self, Error, ErrorKind};
+use crate::error::ProtocolError;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Message {
@@ -68,12 +68,9 @@ impl Message {
         bytes
     }
 
-    pub fn deserialize(buffer: &[u8]) -> io::Result<Message> {
+    pub fn deserialize(buffer: &[u8]) -> Result<Message, ProtocolError> {
         if buffer.len() < 4 {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                "Buffer too short for length prefix",
-            ));
+            return Err(ProtocolError::BufferTooShort);
         }
 
         let mut length_bytes = [0u8; 4];
@@ -151,13 +148,10 @@ impl PiecePayload {
         bytes
     }
 
-    pub fn deserialize(payload: &[u8]) -> io::Result<Self> {
+    pub fn deserialize(payload: &[u8]) -> Result<Self, ProtocolError> {
         // Check that the payload is at least 8 bytes for `index` and `begin`
         if payload.len() < 8 {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                "Payload too short for Piece deserialization",
-            ));
+            return Err(ProtocolError::PayloadTooShort);
         }
 
         // Extract the `index` (first 4 bytes) and `begin` (next 4 bytes)

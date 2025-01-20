@@ -1,5 +1,3 @@
-use std::io;
-
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Bitfield {
     pub bytes: Vec<u8>,    // In-memory bitfield
@@ -67,12 +65,6 @@ impl Bitfield {
 
         (last_byte & last_byte_mask) == last_byte_mask
     }
-}
-
-pub fn load_from_disk(file_path: &str) -> io::Result<Bitfield> {
-    let saved_bitfield = std::fs::read(file_path)?;
-
-    Ok(Bitfield::new(&saved_bitfield))
 }
 
 #[cfg(test)]
