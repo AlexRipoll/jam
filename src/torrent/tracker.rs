@@ -13,40 +13,56 @@ use super::peer::{Ip, Peer};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Request {
-    info_hash: [u8; 20],
-    peer_id: [u8; 20],
-    port: u16,
-    uploaded: u64,
-    downloaded: u64,
-    left: u64,
-    compact: u8,
-    no_peer_id: u8,
-    event: Option<Event>,
-    ip: Option<IpAddr>,
-    numwant: Option<u32>,
-    key: Option<String>,
-    trackerid: Option<String>,
+    pub info_hash: [u8; 20],
+    pub peer_id: [u8; 20],
+    pub port: u16,
+    pub uploaded: u64,
+    pub downloaded: u64,
+    pub left: u64,
+    pub compact: u8,
+    pub no_peer_id: u8,
+    pub event: Option<Event>,
+    pub ip: Option<IpAddr>,
+    pub num_want: Option<i32>,
+    pub key: Option<u32>,
+    pub tracker_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Event {
-    Started,
-    Stopped,
-    Completed,
+    None = 0,
+    Completed = 1,
+    Started = 2,
+    Stopped = 3,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Response {
-    failure_response: Option<String>,
+    pub failure_response: Option<String>,
     warning_message: Option<String>,
-    interval: Option<u16>,
-    min_interval: Option<u16>,
+    pub interval: Option<u32>,
+    min_interval: Option<u32>,
     tracker_id: Option<String>,
-    complete: Option<u32>,
-    incomplete: Option<u32>,
+    pub complete: Option<u32>,   // number of seeders
+    pub incomplete: Option<u32>, // number of leechers
     // TODO: deocde both Peers variants
     // peers: Option<Peers>,
-    peers: Option<ByteBuf>,
+    pub peers: Option<ByteBuf>,
+}
+
+impl Response {
+    pub fn empty() -> Self {
+        Response {
+            failure_response: None,
+            warning_message: None,
+            interval: None,
+            min_interval: None,
+            tracker_id: None,
+            complete: None,
+            incomplete: None,
+            peers: None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -114,6 +130,9 @@ pub async fn get(url: &str) -> Result<Response, Box<dyn std::error::Error>> {
 pub enum TrackerError {
     InvalidPeersFormat,
     EmptyPeers,
+    InvalidTrackerResponse,
+    InvalidPacketSize,
+    InvalidUTF8,
 }
 
 impl Display for TrackerError {
@@ -124,6 +143,9 @@ impl Display for TrackerError {
                 "Invalid peers format: must be consist of multiples of 6 bytes."
             ),
             TrackerError::EmptyPeers => write!(f, "No peers bytes found in tracker's response"),
+            TrackerError::InvalidTrackerResponse => write!(f, "Invalid tracker response"),
+            TrackerError::InvalidPacketSize => write!(f, "Invalid packet size"),
+            TrackerError::InvalidUTF8 => write!(f, "Invalid UTF-8 format"),
         }
     }
 }
