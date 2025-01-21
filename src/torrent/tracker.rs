@@ -130,9 +130,10 @@ pub async fn get(url: &str) -> Result<Response, Box<dyn std::error::Error>> {
 pub enum TrackerError {
     InvalidPeersFormat,
     EmptyPeers,
-    InvalidTrackerResponse,
+    InvalidTxId,
     InvalidPacketSize,
     InvalidUTF8,
+    UnknownAction,
 }
 
 impl Display for TrackerError {
@@ -143,9 +144,10 @@ impl Display for TrackerError {
                 "Invalid peers format: must be consist of multiples of 6 bytes."
             ),
             TrackerError::EmptyPeers => write!(f, "No peers bytes found in tracker's response"),
-            TrackerError::InvalidTrackerResponse => write!(f, "Invalid tracker response"),
+            TrackerError::InvalidTxId => write!(f, "Invalid tracker response"),
             TrackerError::InvalidPacketSize => write!(f, "Invalid packet size"),
             TrackerError::InvalidUTF8 => write!(f, "Invalid UTF-8 format"),
+            TrackerError::UnknownAction => write!(f, "Unknown action"),
         }
     }
 }

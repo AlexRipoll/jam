@@ -17,6 +17,26 @@ enum Action {
     Error = 3,
 }
 
+impl Action {
+    /// Reads the first 4 bytes of a buffer and returns the corresponding Action.
+    /// If the value does not match any known action, it returns an `Error`.
+    fn from_bytes(msg: &[u8]) -> Result<Action, TrackerError> {
+        if msg.len() < 4 {
+            return Err(TrackerError::InvalidPacketSize);
+        }
+
+        let value = u32::from_be_bytes(msg[..4].try_into().unwrap());
+
+        match value {
+            0 => Ok(Action::Connect),
+            1 => Ok(Action::Announce),
+            2 => Ok(Action::Scrape),
+            3 => Ok(Action::Error),
+            _ => Err(TrackerError::UnknownAction),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Udp {
     connection_id: u64,
@@ -36,13 +56,12 @@ impl Udp {
         if buf.len() < 16 {
             return Err(TrackerError::InvalidPacketSize);
         }
-        let mut response = Cursor::new(buf);
-        let action = response.read_u32().await.unwrap();
+        let mut response = Cursor::new(&buf[4..]);
         let received_tx_id = response.read_u32().await.unwrap();
         let connection_id = response.read_u64().await.unwrap();
 
-        if action != Action::Connect as u32 || received_tx_id != tx_id {
-            return Err(TrackerError::InvalidTrackerResponse);
+        if received_tx_id != tx_id {
+            return Err(TrackerError::InvalidTxId);
         }
 
         Ok(connection_id)
@@ -85,12 +104,11 @@ impl Udp {
         }
 
         let mut tracker_response = Response::empty();
-        let mut response = Cursor::new(buf);
-        let action = response.read_u32().await.unwrap();
+        let mut response = Cursor::new(&buf[4..]);
         let received_tx_id = response.read_u32().await.unwrap();
 
-        if action != Action::Announce as u32 || received_tx_id != tx_id {
-            return Err(TrackerError::InvalidTrackerResponse);
+        if received_tx_id != tx_id {
+            return Err(TrackerError::InvalidTxId);
         }
 
         tracker_response.interval = Some(response.read_u32().await.unwrap());
@@ -103,11 +121,10 @@ impl Udp {
     async fn process_error(buf: &[u8], tx_id: u32) -> Result<Response, TrackerError> {
         let mut tracker_response = Response::empty();
         let mut response = Cursor::new(buf);
-        let action = response.read_u32().await.unwrap();
         let received_tx_id = response.read_u32().await.unwrap();
 
-        if action != Action::Announce as u32 || received_tx_id != tx_id {
-            return Err(TrackerError::InvalidTrackerResponse);
+        if received_tx_id != tx_id {
+            return Err(TrackerError::InvalidTxId);
         }
 
         let message =
