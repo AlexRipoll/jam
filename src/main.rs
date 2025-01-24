@@ -4,10 +4,14 @@ use std::{
     time::Instant,
 };
 
-use client::client::{Client, TorrentMetadata};
+use client::client::Client;
 use config::Config;
 use download::message_handler::generate_peer_id;
-use torrent::{metainfo::Metainfo, tracker};
+use torrent::{
+    metainfo::Metainfo,
+    torrent::{Metadata, Torrent},
+    tracker,
+};
 use tracing::{debug, error, info, trace, warn, Level};
 use tracing_appender::rolling;
 use tracing_subscriber::{
@@ -123,16 +127,10 @@ async fn main() -> io::Result<()> {
     trace!("Loading config...");
     let config = Config::load().unwrap();
 
-    let torrent_metadata = TorrentMetadata::new(
-        metainfo.info.name,
-        metainfo.info.length.unwrap(),
-        metainfo.info.piece_length,
-        info_hash,
-        pieces,
-    );
+    let torrent = Torrent::new(&buffer);
 
     info!("Initializing client...");
-    let client = Client::new(config, torrent_metadata, peers, peer_id);
+    let client = Client::new(config, torrent, peers, peer_id);
 
     info!("Starting download...");
     if let Err(e) = client.run().await {

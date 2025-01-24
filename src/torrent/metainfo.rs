@@ -16,14 +16,14 @@ use protocol::piece::Piece;
 pub struct Metainfo {
     pub info: Info,
     #[serde(rename = "announce", skip_serializing_if = "Option::is_none")]
-    announce: Option<String>,
+    pub announce: Option<String>,
     #[serde(rename = "announce-list", skip_serializing_if = "Option::is_none")]
-    announce_list: Option<Vec<Vec<String>>>,
+    pub announce_list: Option<Vec<Vec<String>>>,
     #[serde(rename = "creation date", skip_serializing_if = "Option::is_none")]
-    creation_date: Option<u64>,
-    comment: Option<String>,
+    pub creation_date: Option<u64>,
+    pub comment: Option<String>,
     #[serde(rename = "created by", skip_serializing_if = "Option::is_none")]
-    created_by: Option<String>,
+    pub created_by: Option<String>,
     encoding: Option<String>,
 }
 
@@ -42,7 +42,7 @@ pub struct Info {
     pub piece_length: u64,
     // #[serde(skip)]
     pub pieces: ByteBuf,
-    private: Option<u8>,
+    pub private: Option<u8>,
     md5sum: Option<String>,
     files: Option<Vec<Files>>,
 }

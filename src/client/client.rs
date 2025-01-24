@@ -10,10 +10,12 @@ use tracing::{debug, error, info, warn};
 use crate::{
     config::Config,
     disk::disk::Writer,
-    download::message_handler::Handshake,
-    download::state::DownloadState,
+    download::{message_handler::Handshake, state::DownloadState},
     session::{session::PeerSession, tcp_connection::connect_to_peer},
-    torrent::peer::Peer,
+    torrent::{
+        peer::Peer,
+        torrent::{Metadata, Torrent},
+    },
 };
 use protocol::bitfield::Bitfield;
 use protocol::piece::Piece;
@@ -22,33 +24,6 @@ use protocol::piece::Piece;
 const CLIENT_CHANNEL_BUFFER: usize = 128;
 const DISK_CHANNEL_BUFFER: usize = 128;
 const SHUTDOWN_CHANNEL_BUFFER: usize = 1;
-
-#[derive(Debug)]
-pub struct TorrentMetadata {
-    pub file_name: String,
-    pub file_size: u64,
-    pub piece_standard_size: u64,
-    pub info_hash: [u8; 20],
-    pub pieces: HashMap<u32, Piece>,
-}
-
-impl TorrentMetadata {
-    pub fn new(
-        file_name: String,
-        file_size: u64,
-        piece_standard_size: u64,
-        info_hash: [u8; 20],
-        pieces: HashMap<u32, Piece>,
-    ) -> Self {
-        Self {
-            file_name,
-            file_size,
-            piece_standard_size,
-            info_hash,
-            pieces,
-        }
-    }
-}
 
 #[derive(Debug)]
 pub struct Client {
@@ -68,7 +43,7 @@ pub struct Client {
 impl Client {
     pub fn new(
         config: Config,
-        torrent_metadata: TorrentMetadata,
+        torrent: Torrent,
         peers: Vec<Peer>,  // metainfo-tracker
         peer_id: [u8; 20], // fn output
     ) -> Self {
@@ -77,13 +52,13 @@ impl Client {
             connection_retries: config.p2p.connection_retries,
             timeout_duration: config.p2p.timeout_duration,
             max_peer_connections: config.p2p.max_peer_connections,
-            file_name: torrent_metadata.file_name,
-            file_size: torrent_metadata.file_size,
-            piece_standard_size: torrent_metadata.piece_standard_size,
-            info_hash: torrent_metadata.info_hash,
+            file_name: torrent.metadata.name,
+            file_size: torrent.metadata.total_length,
+            piece_standard_size: torrent.metadata.piece_length,
+            info_hash: torrent.metadata.info_hash,
             peers,
             peer_id,
-            download_state: Arc::new(DownloadState::new(torrent_metadata.pieces)),
+            download_state: Arc::new(DownloadState::new(torrent.metadata.pieces)),
         }
     }
 
