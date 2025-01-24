@@ -56,41 +56,6 @@ impl Metainfo {
         ser::to_bytes(metainfo).map_err(MetainfoError::EncodeError)
     }
 
-    pub fn build_tracker_url(
-        &self,
-        info_hash: [u8; 20],
-        peer_id: [u8; 20],
-        port: u32,
-    ) -> Result<String, MetainfoError> {
-        // TODO: if both announce and announce_list are None, it means it is intended to be
-        // distributed over a DHT or PEX
-        let announce = self.announce()?;
-
-        let mut url = Url::parse(announce)?;
-
-        // Encode info_hash and peer_id
-        let info_hash = percent_encode(&info_hash, NON_ALPHANUMERIC).collect::<String>();
-        // TODO: generate peer_id
-        let encoded_peer_id = percent_encode(&peer_id, NON_ALPHANUMERIC).to_string();
-
-        url.set_query(Some(&format!("info_hash={info_hash}")));
-        url.set_query(Some(&format!(
-            "{}&{}",
-            url.query().unwrap_or(""),
-            &format!("peer_id={encoded_peer_id}")
-        )));
-
-        url.query_pairs_mut()
-            .append_pair("port", &port.to_string())
-            .append_pair("uploaded", "0")
-            .append_pair("downloaded", "0")
-            .append_pair("left", &self.info.length.unwrap_or_default().to_string())
-            // TODO: make compact configurable
-            .append_pair("compact", "1");
-
-        Ok(url.to_string())
-    }
-
     pub fn compute_info_hash(torrent_bytes: &[u8]) -> Result<[u8; 20], MetainfoError> {
         let decoded: BTreeMap<String, serde_bencode::value::Value> = de::from_bytes(torrent_bytes)?;
 
@@ -230,47 +195,6 @@ mod tests {
     use std::io::Read;
 
     use super::*;
-
-    #[test]
-    fn test_info_hash_url_encoding() {
-        // Sha1 sample (no the real one from the torrent specified in Metainfo struct bellow)
-        let sha1: [u8; 20] = [
-            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf1, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd,
-            0xef, 0x12, 0x34, 0x56, 0x78, 0x9a,
-        ];
-
-        let metainfo = Metainfo {
-            info: Info {
-                name: "ubuntu-24.10-desktop-amd64.iso".to_string(),
-                length: Some(5665497088),
-                piece_length: 262144,
-                pieces: ByteBuf::default(),
-                private: None,
-                md5sum: None,
-                files: None,
-            },
-            announce: Some("https://torrent.ubuntu.com/announce".to_string()),
-            announce_list: Some(vec![
-                vec!["https://torrent.ubuntu.com/announce".to_string()],
-                vec!["https://ipv6.torrent.ubuntu.com/announce".to_string()],
-            ]),
-            creation_date: Some(1728557557),
-            comment: Some("Ubuntu CD releases.ubuntu.com".to_string()),
-            created_by: Some("mktorrent 1.1".to_string()),
-            encoding: None,
-        };
-
-        let peer_id_str = "-JM0100-XPGcHeKEmI45";
-        let mut peer_id = [0u8; 20];
-        peer_id.copy_from_slice(peer_id_str.as_bytes());
-
-        let url = metainfo.build_tracker_url(sha1, peer_id, 6889).unwrap();
-
-        assert_eq!(
-            "https://torrent.ubuntu.com/announce?info_hash=%124Vx%9A%BC%DE%F1%23Eg%89%AB%CD%EF%124Vx%9A&peer_id=%2DJM0100%2DXPGcHeKEmI45&port=6889&uploaded=0&downloaded=0&left=5665497088&compact=1",
-            url.as_str()
-        );
-    }
 
     #[test]
     fn test_tracker_scrape() {

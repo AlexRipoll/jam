@@ -1,21 +1,34 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use protocol::piece::Piece;
 
-use super::metainfo::Metainfo;
+use super::{metainfo::Metainfo, peer::Peer};
 
 pub struct Torrent {
+    peer_id: [u8; 20],
     pub metadata: Metadata,
+    pub peers: HashSet<Peer>,
+    status: Status,
 }
 
 impl Torrent {
-    pub fn new(torrent_bytes: &[u8]) -> Torrent {
+    pub fn new(peer_id: [u8; 20], torrent_bytes: &[u8]) -> Torrent {
         let info_hash = Metainfo::compute_info_hash(&torrent_bytes).unwrap();
         let metainfo = Metainfo::deserialize(&torrent_bytes).unwrap();
-        let metadata = Metadata::new(info_hash, metainfo);
 
-        Torrent { metadata }
+        Torrent {
+            peer_id,
+            metadata: Metadata::new(info_hash, metainfo),
+            peers: HashSet::new(),
+            status: Status::Starting,
+        }
     }
+}
+
+enum Status {
+    Starting,
+    Downloading,
+    Paused,
 }
 
 #[derive(Debug)]

@@ -96,20 +96,20 @@ async fn main() -> io::Result<()> {
     let peer_id = generate_peer_id();
     debug!(peer_id = ?String::from_utf8_lossy(&peer_id), "Generated session peer ID");
 
-    trace!("Building tracker URL...");
-    let url = metainfo
-        .build_tracker_url(info_hash, peer_id, 6889)
-        .map_err(|e| {
-            warn!("Failed to build tracker URL: {}", e);
-            io::Error::new(io::ErrorKind::Other, e)
-        })?;
-    debug!(tracker_url = ?url, "Tracker URL built");
-
-    debug!("Querying tracker...");
-    let response = tracker::get(&url).await.map_err(|e| {
-        warn!("Failed to query tracker: {}", e);
-        io::Error::new(io::ErrorKind::Other, format!("Tracker query failed: {e}"))
-    })?;
+    // trace!("Building tracker URL...");
+    // let url = metainfo
+    //     .build_tracker_url(info_hash, peer_id, 6889)
+    //     .map_err(|e| {
+    //         warn!("Failed to build tracker URL: {}", e);
+    //         io::Error::new(io::ErrorKind::Other, e)
+    //     })?;
+    // debug!(tracker_url = ?url, "Tracker URL built");
+    //
+    // debug!("Querying tracker...");
+    // let response = tracker::get(&url).await.map_err(|e| {
+    //     warn!("Failed to query tracker: {}", e);
+    //     io::Error::new(io::ErrorKind::Other, format!("Tracker query failed: {e}"))
+    // })?;
 
     debug!("Decoding peer list...");
     let peers = response.decode_peers().map_err(|e| {

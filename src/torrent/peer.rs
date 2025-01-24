@@ -17,6 +17,12 @@ pub struct Peer {
     pub port: u16,
 }
 
+impl Peer {
+    pub fn address(&self) -> String {
+        format!("{}:{}", &self.ip, &self.port)
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub enum Ip {
     IpV4(Ipv4Addr),

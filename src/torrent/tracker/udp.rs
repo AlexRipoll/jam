@@ -6,7 +6,9 @@ use std::{
 use rand::Rng;
 use tokio::io::AsyncReadExt;
 
-use super::tracker::{Request, Response, TrackerError};
+use crate::torrent::peer::Peer;
+
+use super::tracker::{Announce, Response, TrackerError, TrackerProtocol};
 
 const UDP_PROTOCOL_ID: u64 = 0x41727101980;
 
@@ -38,11 +40,17 @@ impl Action {
 }
 
 #[derive(Debug)]
-struct Udp {
+pub struct UdpTracker {
     connection_id: u64,
 }
 
-impl Udp {
+impl UdpTracker {
+    pub fn new() -> UdpTracker {
+        UdpTracker {
+            connection_id: UDP_PROTOCOL_ID,
+        }
+    }
+
     fn connect(tx_id: u32) -> [u8; 16] {
         let mut buf = [0u8; 16];
         write_to_buffer(&mut buf, 0, UDP_PROTOCOL_ID);
@@ -67,7 +75,7 @@ impl Udp {
         Ok(connection_id)
     }
 
-    fn announce(&self, req: Request, tx_id: u32) -> [u8; 98] {
+    fn announce(&self, req: Announce, tx_id: u32) -> [u8; 98] {
         let mut buf = [0u8; 98];
         write_to_buffer(&mut buf, 0, self.connection_id);
         write_to_buffer(&mut buf, 8, Action::Announce as u32);
@@ -132,6 +140,16 @@ impl Udp {
         tracker_response.failure_response = Some(message);
 
         Ok(tracker_response)
+    }
+}
+
+impl TrackerProtocol for UdpTracker {
+    async fn get_peers(
+        &mut self,
+        announce: &str,
+        announce_data: &Announce,
+    ) -> Result<Vec<Peer>, TrackerError> {
+        unimplemented!();
     }
 }
 

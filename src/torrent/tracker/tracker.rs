@@ -1,18 +1,28 @@
 use serde::{Deserialize, Serialize};
-use serde_bencode::de;
 use serde_bytes::ByteBuf;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     error::Error,
     fmt::Display,
-    io,
     net::{IpAddr, Ipv4Addr},
 };
+use url::Url;
 
-use super::peer::{Ip, Peer};
+use crate::torrent::peer::{Ip, Peer};
+
+use super::{http::HttpTracker, udp::UdpTracker};
+
+pub struct Tracker {
+    port: u16,
+    announce_list: VecDeque<String>,
+    seeders: u64,
+    leechers: u64,
+    http: HttpTracker,
+    udp: UdpTracker,
+}
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct Request {
+pub struct Announce {
     pub info_hash: [u8; 20],
     pub peer_id: [u8; 20],
     pub port: u16,
@@ -34,6 +44,72 @@ pub enum Event {
     Completed = 1,
     Started = 2,
     Stopped = 3,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ScrapeResponse {
+    failure_response: Option<String>,
+    flags: Option<Flags>,
+    files: Option<HashMap<ByteBuf, FileStatus>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct FileStatus {
+    name: Option<String>,
+    complete: Option<u32>,
+    downloaded: Option<u32>,
+    incomplete: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Flags {
+    min_request_interval: Option<u64>,
+}
+
+#[derive(Debug)]
+enum TrackerResponse {
+    Ok,
+    Error,
+}
+
+pub trait TrackerProtocol {
+    async fn get_peers(
+        &mut self,
+        announce: &str,
+        announce_data: &Announce,
+    ) -> Result<Vec<Peer>, TrackerError>;
+}
+
+impl Tracker {
+    pub fn new(port: u16, annouce_urls: Vec<String>) -> Tracker {
+        Tracker {
+            port,
+            announce_list: VecDeque::from(annouce_urls),
+            seeders: 0,
+            leechers: 0,
+            http: HttpTracker::new(),
+            udp: UdpTracker::new(),
+        }
+    }
+
+    pub async fn request_peers(
+        &mut self,
+        announce_data: &Announce,
+    ) -> Result<Vec<Peer>, TrackerError> {
+        // Pop the next announce URL from the queue
+        let announce_url = self
+            .announce_list
+            .pop_front()
+            .ok_or(TrackerError::EmptyAnnounceQueue)?;
+
+        // Parse the URL to determine the protocol
+        let url = Url::parse(&announce_url).map_err(|e| TrackerError::AnnounceParseError(e))?;
+        match url.scheme() {
+            "http" | "https" => self.http.get_peers(&announce_url, announce_data).await,
+            "udp" => self.udp.get_peers(&announce_url, announce_data).await,
+            _ => Err(TrackerError::UnsupportedProtocol(url.scheme().to_string())),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -63,29 +139,7 @@ impl Response {
             peers: None,
         }
     }
-}
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ScrapeResponse {
-    failure_response: Option<String>,
-    flags: Option<Flags>,
-    files: Option<HashMap<ByteBuf, FileStatus>>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct FileStatus {
-    name: Option<String>,
-    complete: Option<u32>,
-    downloaded: Option<u32>,
-    incomplete: Option<u32>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Flags {
-    min_request_interval: Option<u64>,
-}
-
-impl Response {
     pub fn decode_peers(&self) -> Result<Vec<Peer>, TrackerError> {
         if let Some(peers_bytes) = &self.peers {
             if peers_bytes.len() % 6 != 0 {
@@ -111,21 +165,6 @@ impl Response {
     }
 }
 
-impl Peer {
-    pub fn address(&self) -> String {
-        format!("{}:{}", &self.ip, &self.port)
-    }
-}
-
-pub async fn get(url: &str) -> Result<Response, Box<dyn std::error::Error>> {
-    let response = reqwest::get(url).await?;
-    let bencoded_body = response.bytes().await?;
-    let response_parsed = de::from_bytes::<Response>(bencoded_body.as_ref())
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-
-    Ok(response_parsed)
-}
-
 #[derive(Debug)]
 pub enum TrackerError {
     InvalidPeersFormat,
@@ -134,6 +173,12 @@ pub enum TrackerError {
     InvalidPacketSize,
     InvalidUTF8,
     UnknownAction,
+    HttpRequestError(reqwest::Error), // Error during the HTTP request
+    InvalidResponse(reqwest::Error),
+    DecodeError(serde_bencode::Error),
+    AnnounceParseError(url::ParseError),
+    EmptyAnnounceQueue,
+    UnsupportedProtocol(String),
 }
 
 impl Display for TrackerError {
@@ -148,13 +193,25 @@ impl Display for TrackerError {
             TrackerError::InvalidPacketSize => write!(f, "Invalid packet size"),
             TrackerError::InvalidUTF8 => write!(f, "Invalid UTF-8 format"),
             TrackerError::UnknownAction => write!(f, "Unknown action"),
+            TrackerError::HttpRequestError(e) => write!(f, "HTTP request error: {}", e),
+            TrackerError::DecodeError(e) => write!(f, "Error decoding response: {}", e),
+            TrackerError::InvalidResponse(e) => write!(f, "Tracker invalid response: {}", e),
+            TrackerError::EmptyAnnounceQueue => write!(f, "Empty announce queue"),
+            TrackerError::AnnounceParseError(e) => write!(f, "Announce url parse error: {}", e),
+            TrackerError::UnsupportedProtocol(e) => write!(f, "Protocol not supported: {}", e),
         }
     }
 }
 
 impl Error for TrackerError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        None
+        match self {
+            TrackerError::HttpRequestError(err) => Some(err),
+            TrackerError::InvalidResponse(err) => Some(err),
+            TrackerError::DecodeError(err) => Some(err),
+            TrackerError::AnnounceParseError(err) => Some(err),
+            _ => None,
+        }
     }
 }
 
@@ -165,7 +222,7 @@ mod test {
     use serde_bencode::de;
     use serde_bytes::ByteBuf;
 
-    use crate::torrent::tracker::TrackerError;
+    use crate::torrent::tracker::tracker::TrackerError;
 
     use super::{Ip, Peer, Response};
 
