@@ -89,15 +89,20 @@ mod test {
         let mut peer_id = [0u8; 20];
         peer_id.copy_from_slice(peer_id_str.as_bytes());
 
+        let info_hash: [u8; 20] = [
+            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf1, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd,
+            0xef, 0x12, 0x34, 0x56, 0x78, 0x9a,
+        ];
+
         let announce_data = Announce {
-            info_hash: todo!(),
-            peer_id: peer_id,
+            info_hash,
+            peer_id,
             port: 6889,
             uploaded: 0,
             downloaded: 0,
             left: 5665497088,
             compact: 1,
-            no_peer_id: todo!(),
+            no_peer_id: 0,
             event: Some(Event::Started),
             ip: None,
             num_want: None,
