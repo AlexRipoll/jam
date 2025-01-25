@@ -1,4 +1,6 @@
+use core::panic;
 use serde::{Deserialize, Serialize};
+use serde_bencode::de;
 use serde_bytes::ByteBuf;
 use std::{
     collections::{HashMap, VecDeque},
@@ -66,10 +68,84 @@ pub struct Flags {
     min_request_interval: Option<u64>,
 }
 
-#[derive(Debug)]
-enum TrackerResponse {
-    Ok,
-    Error,
+#[derive(Debug, PartialEq, Eq)]
+pub enum TrackerResponse {
+    Success {
+        tracker_id: Option<String>,
+        interval: u32,
+        min_interval: Option<u32>,
+        seeders: u32,
+        leechers: u32,
+        peers: Vec<u8>,
+        warning: Option<String>,
+    },
+    Failure {
+        message: String,
+    },
+}
+
+impl TrackerResponse {
+    pub fn from_bencoded(response: &[u8]) -> Result<TrackerResponse, TrackerError> {
+        // Deserialize the bencoded data into a temporary intermediate structure
+        let raw: HashMap<String, serde_bencode::value::Value> = match de::from_bytes(response) {
+            Ok(val) => val,
+            Err(err) => return Err(TrackerError::ParseError(err)),
+        };
+
+        // Check for failure response
+        if let Some(serde_bencode::value::Value::Bytes(msg)) = raw.get("failure_reason") {
+            return Ok(TrackerResponse::Failure {
+                message: String::from_utf8_lossy(msg).to_string(),
+            });
+        }
+
+        // Extract fields for a successful response
+        let interval = match raw.get("interval") {
+            Some(serde_bencode::value::Value::Int(i)) if *i >= 0 => *i as u32,
+            _ => return Err(TrackerError::ResponseMissingField("interval".to_string())),
+        };
+
+        let min_interval = raw.get("min interval").and_then(|v| match v {
+            serde_bencode::value::Value::Int(i) if *i >= 0 => Some(*i as u32),
+            _ => None,
+        });
+
+        let tracker_id = raw.get("tracker_id").and_then(|v| match v {
+            serde_bencode::value::Value::Bytes(b) => Some(String::from_utf8_lossy(b).to_string()),
+            _ => None,
+        });
+
+        let seeders = match raw.get("complete") {
+            Some(serde_bencode::value::Value::Int(i)) if *i >= 0 => *i as u32,
+            _ => 0,
+        };
+
+        let leechers = match raw.get("incomplete") {
+            Some(serde_bencode::value::Value::Int(i)) if *i >= 0 => *i as u32,
+            _ => 0,
+        };
+
+        let warning = raw.get("warning_message").and_then(|v| match v {
+            serde_bencode::value::Value::Bytes(b) => Some(String::from_utf8_lossy(b).to_string()),
+            _ => None,
+        });
+
+        let peers = match raw.get("peers") {
+            Some(serde_bencode::value::Value::Bytes(bytes)) => bytes.clone(),
+            _ => vec![], // No peers found
+        };
+
+        // Build the Ok variant
+        Ok(TrackerResponse::Success {
+            tracker_id,
+            interval,
+            min_interval,
+            seeders,
+            leechers,
+            peers,
+            warning,
+        })
+    }
 }
 
 pub trait TrackerProtocol {
@@ -174,6 +250,8 @@ pub enum TrackerError {
     InvalidUTF8,
     UnknownAction,
     HttpRequestError(reqwest::Error), // Error during the HTTP request
+    ResponseMissingField(String),
+    ParseError(serde_bencode::Error),
     InvalidResponse(reqwest::Error),
     DecodeError(serde_bencode::Error),
     AnnounceParseError(url::ParseError),
@@ -199,6 +277,10 @@ impl Display for TrackerError {
             TrackerError::EmptyAnnounceQueue => write!(f, "Empty announce queue"),
             TrackerError::AnnounceParseError(e) => write!(f, "Announce url parse error: {}", e),
             TrackerError::UnsupportedProtocol(e) => write!(f, "Protocol not supported: {}", e),
+            TrackerError::ResponseMissingField(e) => {
+                write!(f, "Missing or invalid {} field", e)
+            }
+            TrackerError::ParseError(e) => write!(f, "Failed to parse bencoded data: {}", e),
         }
     }
 }
@@ -210,6 +292,7 @@ impl Error for TrackerError {
             TrackerError::InvalidResponse(err) => Some(err),
             TrackerError::DecodeError(err) => Some(err),
             TrackerError::AnnounceParseError(err) => Some(err),
+            TrackerError::ParseError(err) => Some(err),
             _ => None,
         }
     }
@@ -219,30 +302,39 @@ impl Error for TrackerError {
 mod test {
     use std::net::Ipv4Addr;
 
-    use serde_bencode::de;
     use serde_bytes::ByteBuf;
 
     use crate::torrent::tracker::tracker::TrackerError;
 
-    use super::{Ip, Peer, Response};
+    use super::{Ip, Peer, Response, TrackerResponse};
 
     #[test]
-    fn test_bencode_reponse_decode() {
+    fn test_tracker_response_from_bencoded_success_variant() {
         let bencoded_body =
-            b"d8:completei990e10:incompletei63e8:intervali1800e5:peers6:\xb9}\xbe;\x1b\x14e";
+            b"d8:completei990e10:incompletei63e8:intervali1800e10:tracker_id10:tracker12315:warning_message26:This is a warning message!5:peers6:\xb9}\xbe;\x1b\x14e";
 
-        let response = de::from_bytes::<Response>(bencoded_body.as_ref()).unwrap();
-
-        let expected_response = Response {
-            failure_response: None,
-            warning_message: None,
-            interval: Some(1800),
+        let response = TrackerResponse::from_bencoded(bencoded_body).unwrap();
+        let expected_response = TrackerResponse::Success {
+            interval: 1800,
             min_interval: None,
-            tracker_id: None,
-            complete: Some(990),
-            incomplete: Some(63),
-            // peers: Some(Peers::Binary(vec![0xb9, 0xbe, 0x1b, 0x14])),
-            peers: Some(vec![185, 125, 190, 59, 27, 20].into()),
+            tracker_id: Some(String::from("tracker123")),
+            // tracker_id: None,
+            seeders: 990,
+            leechers: 63,
+            peers: vec![185, 125, 190, 59, 27, 20].into(),
+            warning: Some(String::from("This is a warning message!")),
+        };
+
+        assert_eq!(expected_response, response);
+    }
+
+    #[test]
+    fn test_tracker_response_from_bencoded_failure_variant() {
+        let bencoded_body = b"d14:failure_reason28:Error: Something went wrong!e";
+
+        let response = TrackerResponse::from_bencoded(bencoded_body).unwrap();
+        let expected_response = TrackerResponse::Failure {
+            message: "Error: Something went wrong!".to_string(),
         };
 
         assert_eq!(expected_response, response);

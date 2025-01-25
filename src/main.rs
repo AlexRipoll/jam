@@ -111,35 +111,35 @@ async fn main() -> io::Result<()> {
     //     io::Error::new(io::ErrorKind::Other, format!("Tracker query failed: {e}"))
     // })?;
 
-    debug!("Decoding peer list...");
-    let peers = response.decode_peers().map_err(|e| {
-        warn!("Failed to decode peer list: {}", e);
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Failed to decode peers: {e}"),
-        )
-    })?;
-    debug!(peer_count = peers.len(), "Successfully decoded peer list");
-
-    trace!("Creating piece map...");
-    let pieces = metainfo.parse_pieces().unwrap();
-
-    trace!("Loading config...");
-    let config = Config::load().unwrap();
-
-    let torrent = Torrent::new(&buffer);
-
-    info!("Initializing client...");
-    let client = Client::new(config, torrent, peers, peer_id);
-
-    info!("Starting download...");
-    if let Err(e) = client.run().await {
-        error!("Error during client run: {}", e);
-        return Err(e);
-    }
-
-    info!("Download completed successfully");
-
+    // debug!("Decoding peer list...");
+    // let peers = response.decode_peers().map_err(|e| {
+    //     warn!("Failed to decode peer list: {}", e);
+    //     io::Error::new(
+    //         io::ErrorKind::InvalidData,
+    //         format!("Failed to decode peers: {e}"),
+    //     )
+    // })?;
+    // debug!(peer_count = peers.len(), "Successfully decoded peer list");
+    //
+    // trace!("Creating piece map...");
+    // let pieces = metainfo.parse_pieces().unwrap();
+    //
+    // trace!("Loading config...");
+    // let config = Config::load().unwrap();
+    //
+    // let torrent = Torrent::new(&buffer);
+    //
+    // info!("Initializing client...");
+    // let client = Client::new(config, torrent, peers, peer_id);
+    //
+    // info!("Starting download...");
+    // if let Err(e) = client.run().await {
+    //     error!("Error during client run: {}", e);
+    //     return Err(e);
+    // }
+    //
+    // info!("Download completed successfully");
+    //
     let duration = start.elapsed();
     println!("Time elapsed: {:.2?}", duration);
 
