@@ -1,13 +1,9 @@
 use percent_encoding::{percent_encode, NON_ALPHANUMERIC};
-use serde::{Deserialize, Serialize};
-use serde_bencode::de;
-use serde_bytes::ByteBuf;
-use std::net::Ipv4Addr;
 use url::Url;
 
-use crate::torrent::peer::{Ip, Peer};
+use crate::torrent::peer::Peer;
 
-use super::tracker::{Announce, Response, TrackerError, TrackerProtocol};
+use super::tracker::{Announce, TrackerError, TrackerProtocol, TrackerResponse};
 
 pub struct HttpTracker {}
 
@@ -68,10 +64,9 @@ impl TrackerProtocol for HttpTracker {
             .bytes()
             .await
             .map_err(|e| TrackerError::InvalidResponse(e))?;
-        let response_parsed = de::from_bytes::<Response>(bencoded_body.as_ref())
-            .map_err(|e| TrackerError::DecodeError(e))?;
+        let tracker_response = TrackerResponse::from_bencoded(bencoded_body.as_ref())?;
 
-        response_parsed.decode_peers()
+        tracker_response.decode_peers()
     }
 }
 

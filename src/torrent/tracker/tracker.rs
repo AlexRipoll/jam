@@ -146,6 +146,35 @@ impl TrackerResponse {
             warning,
         })
     }
+
+    pub fn decode_peers(&self) -> Result<Vec<Peer>, TrackerError> {
+        match &self {
+            TrackerResponse::Success { peers, .. } => {
+                if !peers.is_empty() {
+                    if peers.len() % 6 != 0 {
+                        return Err(TrackerError::InvalidPeersFormat);
+                    }
+                    let peers: Vec<Peer> = peers
+                        .chunks(6)
+                        .map(|peer_bytes| Peer {
+                            peer_id: None,
+                            ip: Ip::IpV4(Ipv4Addr::new(
+                                peer_bytes[0],
+                                peer_bytes[1],
+                                peer_bytes[2],
+                                peer_bytes[3],
+                            )),
+                            port: u16::from_be_bytes([peer_bytes[4], peer_bytes[5]]),
+                        })
+                        .collect();
+                    return Ok(peers);
+                }
+            }
+            TrackerResponse::Failure { .. } => {}
+        }
+
+        Err(TrackerError::EmptyPeers)
+    }
 }
 
 pub trait TrackerProtocol {
@@ -302,11 +331,9 @@ impl Error for TrackerError {
 mod test {
     use std::net::Ipv4Addr;
 
-    use serde_bytes::ByteBuf;
-
     use crate::torrent::tracker::tracker::TrackerError;
 
-    use super::{Ip, Peer, Response, TrackerResponse};
+    use super::{Ip, Peer, TrackerResponse};
 
     #[test]
     fn test_tracker_response_from_bencoded_success_variant() {
@@ -342,17 +369,14 @@ mod test {
 
     #[test]
     fn test_peers_binary_model_decode() {
-        let response = Response {
-            failure_response: None,
-            warning_message: None,
-            interval: None,
-            min_interval: None,
+        let response = TrackerResponse::Success {
             tracker_id: None,
-            complete: None,
-            incomplete: None,
-            peers: Some(ByteBuf::from(vec![
-                185, 125, 190, 59, 26, 247, 187, 125, 192, 48, 26, 233,
-            ])),
+            interval: 100,
+            min_interval: None,
+            seeders: 20,
+            leechers: 5,
+            peers: vec![185, 125, 190, 59, 26, 247, 187, 125, 192, 48, 26, 233],
+            warning: None,
         };
 
         let expected = vec![
@@ -373,17 +397,14 @@ mod test {
 
     #[test]
     fn test_peers_binary_model_decode_error_invalid_format() {
-        let response = Response {
-            failure_response: None,
-            warning_message: None,
-            interval: None,
-            min_interval: None,
+        let response = TrackerResponse::Success {
             tracker_id: None,
-            complete: None,
-            incomplete: None,
-            peers: Some(ByteBuf::from(vec![
-                185, 125, 190, 59, 26, 247, 187, 125, 192, 48,
-            ])),
+            interval: 100,
+            min_interval: None,
+            seeders: 20,
+            leechers: 5,
+            peers: vec![185, 125, 190, 59, 26, 247, 187, 125, 192, 48],
+            warning: None,
         };
 
         assert!(matches!(
@@ -395,15 +416,14 @@ mod test {
     }
     #[test]
     fn test_peers_binary_model_decode_error_empty_peers() {
-        let response = Response {
-            failure_response: None,
-            warning_message: None,
-            interval: None,
-            min_interval: None,
+        let response = TrackerResponse::Success {
             tracker_id: None,
-            complete: None,
-            incomplete: None,
-            peers: None,
+            interval: 100,
+            min_interval: None,
+            seeders: 20,
+            leechers: 5,
+            peers: vec![],
+            warning: None,
         };
 
         assert!(matches!(
