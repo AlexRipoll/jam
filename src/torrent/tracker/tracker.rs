@@ -12,7 +12,7 @@ use crate::torrent::peer::Peer;
 
 use super::{
     http::{self, HttpTracker},
-    udp::UdpTracker,
+    udp::{self, UdpTracker},
 };
 
 pub struct Tracker {
@@ -72,13 +72,8 @@ pub struct Flags {
 #[derive(Debug, PartialEq, Eq)]
 pub enum TrackerResponse {
     Http(http::TrackerResponse),
+    Udp(udp::TrackerResponse),
 }
-
-// enum Udp {
-//     Connect(response),
-//     Announce(response),
-//     Error(response),
-// }
 
 pub trait TrackerProtocol {
     async fn get_peers(

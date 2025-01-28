@@ -6,9 +6,9 @@ use std::{
 use rand::Rng;
 use tokio::io::AsyncReadExt;
 
-use crate::torrent::peer::Peer;
+use crate::torrent::peer::{Ip, Peer};
 
-use super::tracker::{Announce, Response, TrackerError, TrackerProtocol};
+use super::tracker::{Announce, TrackerError, TrackerProtocol};
 
 const UDP_PROTOCOL_ID: u64 = 0x41727101980;
 
@@ -60,21 +60,6 @@ impl UdpTracker {
         buf
     }
 
-    async fn process_connect(buf: &[u8], tx_id: u32) -> Result<u64, TrackerError> {
-        if buf.len() < 16 {
-            return Err(TrackerError::InvalidPacketSize);
-        }
-        let mut response = Cursor::new(&buf[4..]);
-        let received_tx_id = response.read_u32().await.unwrap();
-        let connection_id = response.read_u64().await.unwrap();
-
-        if received_tx_id != tx_id {
-            return Err(TrackerError::InvalidTxId);
-        }
-
-        Ok(connection_id)
-    }
-
     fn announce(&self, req: Announce, tx_id: u32) -> [u8; 98] {
         let mut buf = [0u8; 98];
         write_to_buffer(&mut buf, 0, self.connection_id);
@@ -105,42 +90,6 @@ impl UdpTracker {
 
         buf
     }
-
-    async fn process_announce(buf: &[u8], tx_id: u32) -> Result<Response, TrackerError> {
-        if buf.len() < 16 {
-            return Err(TrackerError::InvalidPacketSize);
-        }
-
-        let mut tracker_response = Response::empty();
-        let mut response = Cursor::new(&buf[4..]);
-        let received_tx_id = response.read_u32().await.unwrap();
-
-        if received_tx_id != tx_id {
-            return Err(TrackerError::InvalidTxId);
-        }
-
-        tracker_response.interval = Some(response.read_u32().await.unwrap());
-        tracker_response.incomplete = Some(response.read_u32().await.unwrap());
-        tracker_response.complete = Some(response.read_u32().await.unwrap());
-
-        Ok(tracker_response)
-    }
-
-    async fn process_error(buf: &[u8], tx_id: u32) -> Result<Response, TrackerError> {
-        let mut tracker_response = Response::empty();
-        let mut response = Cursor::new(buf);
-        let received_tx_id = response.read_u32().await.unwrap();
-
-        if received_tx_id != tx_id {
-            return Err(TrackerError::InvalidTxId);
-        }
-
-        let message =
-            String::from_utf8(buf[8..].to_vec()).map_err(|_| TrackerError::InvalidUTF8)?;
-        tracker_response.failure_response = Some(message);
-
-        Ok(tracker_response)
-    }
 }
 
 impl TrackerProtocol for UdpTracker {
@@ -150,6 +99,134 @@ impl TrackerProtocol for UdpTracker {
         announce_data: &Announce,
     ) -> Result<Vec<Peer>, TrackerError> {
         unimplemented!();
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum TrackerResponse {
+    Connect {
+        transaction_id: u32,
+        connection_id: u64,
+    },
+    Announce {
+        transaction_id: u32,
+        interval: u32,
+        leechers: u32,
+        seeders: u32,
+        ip_address: Vec<u32>,
+        tcp_port: Vec<u16>,
+    },
+    Error {
+        transaction_id: u32,
+        message: String,
+    },
+}
+
+impl TrackerResponse {
+    pub async fn from_bencoded(buf: &[u8]) -> Result<TrackerResponse, TrackerError> {
+        let action = Action::from_bytes(&buf)?;
+
+        match action {
+            Action::Connect => TrackerResponse::decode_connect_packet(buf).await,
+            Action::Announce => TrackerResponse::decode_announce_packet(buf).await,
+            Action::Scrape => {
+                unimplemented!()
+            }
+            Action::Error => TrackerResponse::decode_error_packet(buf).await,
+        }
+    }
+
+    async fn decode_connect_packet(buf: &[u8]) -> Result<TrackerResponse, TrackerError> {
+        if buf.len() < 16 {
+            return Err(TrackerError::InvalidPacketSize);
+        }
+        let mut response = Cursor::new(&buf[4..]);
+        let transaction_id = response.read_u32().await.unwrap();
+        let connection_id = response.read_u64().await.unwrap();
+
+        Ok(TrackerResponse::Connect {
+            transaction_id,
+            connection_id,
+        })
+    }
+
+    async fn decode_announce_packet(buf: &[u8]) -> Result<TrackerResponse, TrackerError> {
+        if buf.len() < 20 {
+            return Err(TrackerError::InvalidPacketSize);
+        }
+
+        let mut cursor = Cursor::new(&buf[4..]);
+        let transaction_id = cursor.read_u32().await.unwrap();
+
+        let interval = cursor.read_u32().await.unwrap();
+        let leechers = cursor.read_u32().await.unwrap();
+        let seeders = cursor.read_u32().await.unwrap();
+
+        let mut ip_address = Vec::new();
+        let mut tcp_port = Vec::new();
+
+        while (cursor.position() as usize) + 6 <= buf.len() {
+            // Read IPv4 address (4 bytes)
+            let ip = cursor.read_u32().await.unwrap();
+            ip_address.push(ip);
+
+            // Read TCP port (2 bytes)
+            let port = cursor.read_u16().await.unwrap();
+            tcp_port.push(port);
+        }
+
+        Ok(TrackerResponse::Announce {
+            transaction_id,
+            interval,
+            leechers,
+            seeders,
+            ip_address,
+            tcp_port,
+        })
+    }
+
+    async fn decode_error_packet(buf: &[u8]) -> Result<TrackerResponse, TrackerError> {
+        let mut cursor = Cursor::new(&buf[4..]);
+        let transaction_id = cursor.read_u32().await.unwrap();
+
+        let message =
+            String::from_utf8(buf[8..].to_vec()).map_err(|_| TrackerError::InvalidUTF8)?;
+
+        Ok(TrackerResponse::Error {
+            transaction_id,
+            message,
+        })
+    }
+
+    pub fn decode_peers(&self) -> Result<Vec<Peer>, TrackerError> {
+        match &self {
+            TrackerResponse::Announce {
+                ip_address,
+                tcp_port,
+                ..
+            } => {
+                if !ip_address.is_empty() && !tcp_port.is_empty() {
+                    if ip_address.len() != tcp_port.len() {
+                        return Err(TrackerError::InvalidPeersFormat);
+                    }
+
+                    let peers: Vec<Peer> = ip_address
+                        .iter()
+                        .zip(tcp_port.iter())
+                        .map(|(&ip_addr, &port)| Peer {
+                            peer_id: None,
+                            ip: Ip::IpV4(Ipv4Addr::from(ip_addr)),
+                            port,
+                        })
+                        .collect();
+
+                    return Ok(peers);
+                }
+            }
+            _ => {}
+        }
+
+        Err(TrackerError::EmptyPeers)
     }
 }
 
