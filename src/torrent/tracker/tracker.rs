@@ -70,6 +70,15 @@ pub enum TrackerResponse {
     Udp(udp::TrackerResponse),
 }
 
+impl TrackerResponse {
+    pub fn get_peers(&self) -> Result<Vec<Peer>, TrackerError> {
+        match self {
+            TrackerResponse::Http(response) => response.decode_peers(),
+            TrackerResponse::Udp(response) => response.decode_peers(),
+        }
+    }
+}
+
 pub trait TrackerProtocol {
     type Response;
 
