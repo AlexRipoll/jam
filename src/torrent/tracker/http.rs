@@ -55,11 +55,13 @@ impl HttpTracker {
 }
 
 impl TrackerProtocol for HttpTracker {
-    async fn get_peers(
+    type Response = TrackerResponse;
+
+    async fn request_announce(
         &mut self,
         announce: &str,
         announce_data: &Announce,
-    ) -> Result<Vec<Peer>, TrackerError> {
+    ) -> Result<Self::Response, TrackerError> {
         let req_url = self.build_announce_request(announce, announce_data)?;
         let response = reqwest::get(&req_url)
             .await
@@ -68,9 +70,8 @@ impl TrackerProtocol for HttpTracker {
             .bytes()
             .await
             .map_err(|e| TrackerError::InvalidResponse(e))?;
-        let tracker_response = TrackerResponse::from_bencoded(bencoded_body.as_ref())?;
 
-        tracker_response.decode_peers()
+        TrackerResponse::from_bencoded(bencoded_body.as_ref())
     }
 }
 

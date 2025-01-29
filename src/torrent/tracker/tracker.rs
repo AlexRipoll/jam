@@ -1,12 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
-use std::{
-    collections::{HashMap, VecDeque},
-    error::Error,
-    fmt::Display,
-    net::IpAddr,
-};
-use tokio::{io, net::UdpSocket};
+use std::{collections::HashMap, error::Error, fmt::Display, net::IpAddr};
+use tokio::io;
 use url::Url;
 
 use crate::torrent::peer::Peer;
@@ -17,8 +12,7 @@ use super::{
 };
 
 pub struct Tracker {
-    port: u16,
-    announce_list: VecDeque<String>,
+    announce: String,
     seeders: u64,
     leechers: u64,
     http: HttpTracker,
@@ -77,18 +71,19 @@ pub enum TrackerResponse {
 }
 
 pub trait TrackerProtocol {
-    async fn get_peers(
+    type Response;
+
+    async fn request_announce(
         &mut self,
         announce: &str,
         announce_data: &Announce,
-    ) -> Result<Vec<Peer>, TrackerError>;
+    ) -> Result<Self::Response, TrackerError>;
 }
 
 impl Tracker {
-    pub fn new(port: u16, annouce_urls: Vec<String>) -> Tracker {
+    pub fn new(annouce_url: String) -> Tracker {
         Tracker {
-            port,
-            announce_list: VecDeque::from(annouce_urls),
+            announce: annouce_url,
             seeders: 0,
             leechers: 0,
             http: HttpTracker::new(),
@@ -96,21 +91,22 @@ impl Tracker {
         }
     }
 
-    pub async fn request_peers(
+    async fn request_announce(
         &mut self,
+        announce: &str,
         announce_data: &Announce,
-    ) -> Result<Vec<Peer>, TrackerError> {
-        // Pop the next announce URL from the queue
-        let announce_url = self
-            .announce_list
-            .pop_front()
-            .ok_or(TrackerError::EmptyAnnounceQueue)?;
-
+    ) -> Result<TrackerResponse, TrackerError> {
         // Parse the URL to determine the protocol
-        let url = Url::parse(&announce_url).map_err(|e| TrackerError::AnnounceParseError(e))?;
+        let url = Url::parse(announce).map_err(|e| TrackerError::AnnounceParseError(e))?;
         match url.scheme() {
-            "http" | "https" => self.http.get_peers(&announce_url, announce_data).await,
-            "udp" => self.udp.get_peers(&announce_url, announce_data).await,
+            "http" | "https" => {
+                let response = self.http.request_announce(announce, announce_data).await?;
+                return Ok(TrackerResponse::Http(response));
+            }
+            "udp" => {
+                let response = self.udp.request_announce(announce, announce_data).await?;
+                return Ok(TrackerResponse::Udp(response));
+            }
             _ => Err(TrackerError::UnsupportedProtocol(url.scheme().to_string())),
         }
     }
@@ -190,4 +186,111 @@ impl Error for TrackerError {
             _ => None,
         }
     }
+}
+
+mod test {
+    use std::net::Ipv4Addr;
+
+    use crate::torrent::tracker::tracker::TrackerError;
+
+    use super::{Peer, TrackerResponse};
+
+    // #[test]
+    // fn test_tracker_response_from_bencoded_success_variant() {
+    //     let bencoded_body =
+    //         b"d8:completei990e10:incompletei63e8:intervali1800e10:tracker_id10:tracker12315:warning_message26:This is a warning message!5:peers6:\xb9}\xbe;\x1b\x14e";
+    //
+    //     let response = TrackerResponse::from_bencoded(bencoded_body).unwrap();
+    //     let expected_response = TrackerResponse::Success {
+    //         interval: 1800,
+    //         min_interval: None,
+    //         tracker_id: Some(String::from("tracker123")),
+    //         // tracker_id: None,
+    //         seeders: 990,
+    //         leechers: 63,
+    //         peers: vec![185, 125, 190, 59, 27, 20].into(),
+    //         warning: Some(String::from("This is a warning message!")),
+    //     };
+    //
+    //     assert_eq!(expected_response, response);
+    // }
+    //
+    // #[test]
+    // fn test_tracker_response_from_bencoded_failure_variant() {
+    //     let bencoded_body = b"d14:failure_reason28:Error: Something went wrong!e";
+    //
+    //     let response = TrackerResponse::from_bencoded(bencoded_body).unwrap();
+    //     let expected_response = TrackerResponse::Failure {
+    //         message: "Error: Something went wrong!".to_string(),
+    //     };
+    //
+    //     assert_eq!(expected_response, response);
+    // }
+    //
+    // #[test]
+    // fn test_peers_binary_model_decode() {
+    //     let response = TrackerResponse::Success {
+    //         tracker_id: None,
+    //         interval: 100,
+    //         min_interval: None,
+    //         seeders: 20,
+    //         leechers: 5,
+    //         peers: vec![185, 125, 190, 59, 26, 247, 187, 125, 192, 48, 26, 233],
+    //         warning: None,
+    //     };
+    //
+    //     let expected = vec![
+    //         Peer {
+    //             peer_id: None,
+    //             ip: Ip::IpV4(Ipv4Addr::new(185, 125, 190, 59)),
+    //             port: 6903,
+    //         },
+    //         Peer {
+    //             peer_id: None,
+    //             ip: Ip::IpV4(Ipv4Addr::new(187, 125, 192, 48)),
+    //             port: 6889,
+    //         },
+    //     ];
+    //
+    //     assert_eq!(expected, response.decode_peers().unwrap());
+    // }
+    //
+    // #[test]
+    // fn test_peers_binary_model_decode_error_invalid_format() {
+    //     let response = TrackerResponse::Success {
+    //         tracker_id: None,
+    //         interval: 100,
+    //         min_interval: None,
+    //         seeders: 20,
+    //         leechers: 5,
+    //         peers: vec![185, 125, 190, 59, 26, 247, 187, 125, 192, 48],
+    //         warning: None,
+    //     };
+    //
+    //     assert!(matches!(
+    //         response
+    //             .decode_peers()
+    //             .expect_err("Expected InvalidPeersFormat error"),
+    //         TrackerError::InvalidPeersFormat,
+    //     ));
+    // }
+    // #[test]
+    // fn test_peers_binary_model_decode_error_empty_peers() {
+    //     let response = TrackerResponse::Success {
+    //         tracker_id: None,
+    //         interval: 100,
+    //         min_interval: None,
+    //         seeders: 20,
+    //         leechers: 5,
+    //         peers: vec![],
+    //         warning: None,
+    //     };
+    //
+    //     assert!(matches!(
+    //         response
+    //             .decode_peers()
+    //             .expect_err("Expected EmptyPeers error"),
+    //         TrackerError::EmptyPeers,
+    //     ));
+    // }
 }

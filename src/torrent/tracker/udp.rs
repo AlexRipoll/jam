@@ -129,11 +129,13 @@ impl UdpTracker {
 }
 
 impl TrackerProtocol for UdpTracker {
-    async fn get_peers(
+    type Response = TrackerResponse;
+
+    async fn request_announce(
         &mut self,
         announce: &str,
         announce_data: &Announce,
-    ) -> Result<Vec<Peer>, TrackerError> {
+    ) -> Result<Self::Response, TrackerError> {
         // Bind the socket to any available ip address
         let socket = UdpSocket::bind("0.0.0.0:0")
             .await
@@ -199,7 +201,7 @@ impl TrackerProtocol for UdpTracker {
                 }
 
                 // Decode and return the list of peers
-                return announce_resp.decode_peers();
+                return Ok(announce_resp);
             }
             _ => {
                 return Err(TrackerError::UnexpectedAction);
