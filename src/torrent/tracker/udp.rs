@@ -1,10 +1,15 @@
 use std::{
     io::Cursor,
     net::{IpAddr, Ipv4Addr},
+    time::Duration,
 };
 
 use rand::Rng;
-use tokio::io::AsyncReadExt;
+use tokio::{
+    io::AsyncReadExt,
+    net::{lookup_host, UdpSocket},
+    time::timeout,
+};
 
 use crate::torrent::peer::{Ip, Peer};
 
@@ -51,7 +56,7 @@ impl UdpTracker {
         }
     }
 
-    fn connect(tx_id: u32) -> [u8; 16] {
+    fn build_connect_packet(&self, tx_id: u32) -> [u8; 16] {
         let mut buf = [0u8; 16];
         write_to_buffer(&mut buf, 0, UDP_PROTOCOL_ID);
         write_to_buffer(&mut buf, 8, Action::Connect as u32);
@@ -60,7 +65,7 @@ impl UdpTracker {
         buf
     }
 
-    fn announce(&self, req: Announce, tx_id: u32) -> [u8; 98] {
+    fn build_announce_packet(&self, req: &Announce, tx_id: u32) -> [u8; 98] {
         let mut buf = [0u8; 98];
         write_to_buffer(&mut buf, 0, self.connection_id);
         write_to_buffer(&mut buf, 8, Action::Announce as u32);
@@ -90,6 +95,37 @@ impl UdpTracker {
 
         buf
     }
+
+    async fn receive_response(
+        &self,
+        socket: &UdpSocket,
+        expected_tx_id: u32,
+    ) -> Result<TrackerResponse, TrackerError> {
+        let mut buf = [0; 1024];
+        let timeout_duration = Duration::from_secs(5);
+
+        let result = timeout(timeout_duration, socket.recv_from(&mut buf)).await;
+        match result {
+            Ok(Ok((size, _))) => {
+                let resp = TrackerResponse::from_bencoded(&buf[..size]).await?;
+                if let TrackerResponse::Error {
+                    transaction_id,
+                    message,
+                } = resp
+                {
+                    if transaction_id != expected_tx_id {
+                        return Err(TrackerError::InvalidTransactionId);
+                    }
+
+                    return Err(TrackerError::ErrorResponse(message));
+                }
+
+                Ok(resp)
+            }
+            Ok(Err(e)) => Err(TrackerError::UdpSocketError(e)),
+            Err(_) => Err(TrackerError::ResponseTimeout),
+        }
+    }
 }
 
 impl TrackerProtocol for UdpTracker {
@@ -98,7 +134,77 @@ impl TrackerProtocol for UdpTracker {
         announce: &str,
         announce_data: &Announce,
     ) -> Result<Vec<Peer>, TrackerError> {
-        unimplemented!();
+        // Bind the socket to any available ip address
+        let socket = UdpSocket::bind("0.0.0.0:0")
+            .await
+            .map_err(|e| TrackerError::UdpBindingError(e))?;
+
+        let tracker_addresses = lookup_host(announce)
+            .await
+            .map_err(|e| TrackerError::IoError(e))?;
+
+        // Connect to one of the tracker's ip addresses
+        let mut connected = false;
+        for ip_addr in tracker_addresses {
+            if socket.connect(ip_addr).await.is_ok() {
+                connected = true;
+                break;
+            }
+        }
+        if !connected {
+            return Err(TrackerError::ConnectionFailed);
+        }
+
+        // Generate a random transaction ID for connect request
+        let tx_id = rand::thread_rng().gen::<u32>();
+
+        // Send the connect packet to the tracker
+        let connect_packet = self.build_connect_packet(tx_id);
+        socket
+            .send(&connect_packet)
+            .await
+            .map_err(|e| TrackerError::IoError(e))?;
+
+        // Receive and parse the connection response
+        let connect_resp = self.receive_response(&socket, tx_id).await?;
+        match connect_resp {
+            TrackerResponse::Connect {
+                transaction_id,
+                connection_id,
+            } => {
+                if transaction_id != tx_id {
+                    return Err(TrackerError::InvalidTransactionId);
+                }
+                self.connection_id = connection_id;
+            }
+            _ => return Err(TrackerError::UnexpectedAction),
+        }
+
+        // Generate a random transaction ID for announce request
+        let tx_id = rand::thread_rng().gen::<u32>();
+
+        // Send the announce packet to the tracker
+        let announce_packet = self.build_announce_packet(announce_data, tx_id);
+        socket
+            .send(&announce_packet)
+            .await
+            .map_err(|e| TrackerError::IoError(e))?;
+
+        // Receive and parse the announce response
+        let announce_resp = self.receive_response(&socket, tx_id).await?;
+        match announce_resp {
+            TrackerResponse::Announce { transaction_id, .. } => {
+                if transaction_id != tx_id {
+                    return Err(TrackerError::InvalidTransactionId);
+                }
+
+                // Decode and return the list of peers
+                return announce_resp.decode_peers();
+            }
+            _ => {
+                return Err(TrackerError::UnexpectedAction);
+            }
+        }
     }
 }
 

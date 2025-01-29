@@ -6,6 +6,7 @@ use std::{
     fmt::Display,
     net::IpAddr,
 };
+use tokio::{io, net::UdpSocket};
 use url::Url;
 
 use crate::torrent::peer::Peer;
@@ -41,7 +42,7 @@ pub struct Announce {
     pub tracker_id: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 pub enum Event {
     None = 0,
     Completed = 1,
@@ -131,6 +132,14 @@ pub enum TrackerError {
     AnnounceParseError(url::ParseError),
     EmptyAnnounceQueue,
     UnsupportedProtocol(String),
+    UdpBindingError(io::Error),
+    UdpSocketError(io::Error),
+    InvalidTransactionId,
+    UnexpectedAction,
+    ErrorResponse(String),
+    IoError(tokio::io::Error),
+    ResponseTimeout,
+    ConnectionFailed,
 }
 
 impl Display for TrackerError {
@@ -155,6 +164,14 @@ impl Display for TrackerError {
                 write!(f, "Missing or invalid {} field", e)
             }
             TrackerError::ParseError(e) => write!(f, "Failed to parse bencoded data: {}", e),
+            TrackerError::UdpBindingError(e) => write!(f, "UDP binding error: {}", e),
+            TrackerError::InvalidTransactionId => write!(f, "Invalid Tx ID received from tracker"),
+            TrackerError::UdpSocketError(e) => write!(f, "Socket error: {}", e),
+            TrackerError::UnexpectedAction => write!(f, "Unexpected action in tracker response"),
+            TrackerError::ErrorResponse(e) => write!(f, "Tracker responded with error: {}", e),
+            TrackerError::IoError(e) => write!(f, "IO error: {}", e),
+            TrackerError::ResponseTimeout => write!(f, "Tracker response timeout"),
+            TrackerError::ConnectionFailed => write!(f, "Failed to connect to the tracker"),
         }
     }
 }
@@ -167,6 +184,9 @@ impl Error for TrackerError {
             TrackerError::DecodeError(err) => Some(err),
             TrackerError::AnnounceParseError(err) => Some(err),
             TrackerError::ParseError(err) => Some(err),
+            TrackerError::UdpBindingError(err) => Some(err),
+            TrackerError::UdpSocketError(err) => Some(err),
+            TrackerError::IoError(err) => Some(err),
             _ => None,
         }
     }
