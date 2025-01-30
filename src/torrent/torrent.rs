@@ -1,9 +1,13 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    fmt,
+};
 
 use protocol::piece::Piece;
 
 use super::{metainfo::Metainfo, peer::Peer};
 
+#[derive(Debug)]
 pub struct Torrent {
     peer_id: [u8; 20],
     pub metadata: Metadata,
@@ -25,13 +29,13 @@ impl Torrent {
     }
 }
 
+#[derive(Debug)]
 enum Status {
     Starting,
     Downloading,
     Paused,
 }
 
-#[derive(Debug)]
 pub struct Metadata {
     pub info_hash: [u8; 20],
     pub name: String,
@@ -44,6 +48,34 @@ pub struct Metadata {
     pub piece_length: u64,
     pub total_length: u64,
     pub pieces: HashMap<u32, Piece>,
+}
+
+impl fmt::Debug for Metadata {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Torrent Metadata {{
+                name: {:?},
+                comment: {:?},
+                created_by: {:?},
+                creation_date: {:?},
+                announce: {:?},
+                announce list: {:?},
+                private: {:?},
+                piece size: {:?},
+                total size: {:?},
+            }}",
+            self.name,
+            self.comment.clone().unwrap_or("not defined".to_string()),
+            self.created_by.clone().unwrap_or("not defined".to_string()),
+            self.creation_date.clone().unwrap_or(0),
+            self.announce.clone().unwrap_or("not defined".to_string()),
+            self.announce_list.clone().unwrap_or(vec![]),
+            self.private.clone().unwrap_or(0),
+            self.piece_length,
+            self.total_length,
+        )
+    }
 }
 
 impl Metadata {
