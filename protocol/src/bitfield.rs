@@ -1,7 +1,7 @@
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Bitfield {
-    pub bytes: Vec<u8>,    // In-memory bitfield
-    pub num_pieces: usize, // Total number of pieces
+    pub bytes: Vec<u8>,      // In-memory bitfield
+    pub total_pieces: usize, // Total number of pieces
 }
 
 impl Bitfield {
@@ -9,7 +9,7 @@ impl Bitfield {
         let num_pieces: u32 = bytes.iter().map(|byte| byte.count_ones()).sum();
         Self {
             bytes: bytes.to_vec(),
-            num_pieces: num_pieces as usize,
+            total_pieces: num_pieces as usize,
         }
     }
 
@@ -17,7 +17,7 @@ impl Bitfield {
         let bitfield = vec![0; (num_pieces + 7) / 8];
         Self {
             bytes: bitfield,
-            num_pieces,
+            total_pieces: num_pieces,
         }
     }
 
@@ -57,10 +57,10 @@ impl Bitfield {
         // Check the last byte
         let last_byte_index = self.bytes.len() - 1;
         let last_byte = self.bytes[last_byte_index];
-        let last_byte_mask = if self.num_pieces % 8 == 0 {
+        let last_byte_mask = if self.total_pieces % 8 == 0 {
             0xFF // All bits must be set if the total pieces are a multiple of 8
         } else {
-            0xFFu8 << (8 - (self.num_pieces % 8)) // Mask for the remaining bits in the last byte
+            0xFFu8 << (8 - (self.total_pieces % 8)) // Mask for the remaining bits in the last byte
         };
 
         (last_byte & last_byte_mask) == last_byte_mask

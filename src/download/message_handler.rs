@@ -358,7 +358,7 @@ impl Actor {
         let client_bitfield = self.download_state.metadata.bitfield.lock().await;
 
         // Iterate over the peer's bitfield to identify missing pieces
-        let missing_pieces: Vec<usize> = (0..self.state.peer_bitfield.num_pieces)
+        let missing_pieces: Vec<usize> = (0..self.state.peer_bitfield.total_pieces)
             .filter(|&index| {
                 self.state.peer_bitfield.has_piece(index) && !client_bitfield.has_piece(index)
             })

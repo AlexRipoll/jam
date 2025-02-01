@@ -272,7 +272,7 @@ impl Client {
                             let count: u32 = download_state.downloaded_pieces_count().await;
 
                             let bitfield = download_state.metadata.bitfield.lock().await;
-                            debug!(piece_index = piece_index, "Bitfield: {:?} ({}/{})", bitfield.bytes, count, bitfield.num_pieces);
+                            debug!(piece_index = piece_index, "Bitfield: {:?} ({}/{})", bitfield.bytes, count, bitfield.total_pieces);
                             debug!(piece_index = piece_index, "{:?}", bitfield.has_piece(piece_index as usize));
                             drop(bitfield);
 

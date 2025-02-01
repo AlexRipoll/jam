@@ -207,7 +207,7 @@ impl DownloadState {
         let downloaded_pieces = self.downloaded_pieces_count().await;
         let bitfield = self.metadata.bitfield.lock().await;
 
-        downloaded_pieces * 100 / bitfield.num_pieces as u32
+        downloaded_pieces * 100 / bitfield.total_pieces as u32
     }
 
     pub async fn downloaded_pieces_count(&self) -> u32 {
