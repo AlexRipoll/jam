@@ -9,7 +9,7 @@ pub struct State {
     // pieces_map: HashMap<u32, Piece>,         // Piece index - Piece struct Map
     pieces_rarity: Vec<u32>, // Containing the amount of occurences of a piece index within
     // the  current peers' bitfieds
-    pending_pieces: Vec<u32>, // Sorted set of pieces pending to be downloaded from the current
+    pending_pieces: Vec<u32>, // Sorted set of pieces index pending to be downloaded from the current
     // peer connections (rarest first)
     assigned_pieces: HashSet<u32>, // Indexes of the pieces being downloaded
 }
@@ -50,6 +50,24 @@ impl State {
             .sum::<u32>()
     }
 
+    // Find the next assignable piece for the given peer bitfield and returns the piece index.
+    pub fn assign_piece(&mut self, peer_bitfield: &Bitfield) -> Option<u32> {
+        if let Some(pos) = self.pending_pieces.iter().position(|&piece_index| {
+            !self.assigned_pieces.contains(&piece_index)
+                && peer_bitfield.has_piece(piece_index as usize)
+        }) {
+            let piece_index = self.pending_pieces[pos];
+            self.assigned_pieces.insert(piece_index.clone());
+            return Some(piece_index);
+        }
+
+        None
+    }
+
+    pub fn unassign_piece(&mut self, piece_index: u32) {
+        self.assigned_pieces.remove(&piece_index);
+    }
+
     pub fn unassign_pieces(&mut self, pieces_index: Vec<u32>) {
         for piece_index in pieces_index {
             self.unassign_piece(piece_index);
@@ -57,9 +75,14 @@ impl State {
     }
 
     // Mark a piece as downloaded, remove from missing and assigned sets
-    fn mark_piece_complete(&mut self, piece_index: u32) {
+    pub fn mark_piece_complete(&mut self, piece_index: u32) {
         self.bitfield.set_piece(piece_index as usize);
-        self.pending_pieces.remove(piece_index as usize);
+        for &index in self.pending_pieces.iter() {
+            if index == piece_index {
+                self.pending_pieces.remove(index as usize);
+                break;
+            }
+        }
         self.assigned_pieces.remove(&piece_index);
         // set to 0 so it is not taken in consideration since it is already set in the `bitfield` field.
         self.pieces_rarity[piece_index as usize] = 0;
@@ -114,19 +137,6 @@ impl State {
         self.pending_pieces.extend(sorted_pieces);
     }
 
-    pub fn assign_piece(&mut self, peer_bitfield: &Bitfield) -> Option<u32> {
-        if let Some(pos) = self.pending_pieces.iter().position(|&piece_index| {
-            !self.assigned_pieces.contains(&piece_index)
-                && peer_bitfield.has_piece(piece_index as usize)
-        }) {
-            let piece_index = self.pending_pieces.remove(pos);
-            self.assigned_pieces.insert(piece_index.clone());
-            return Some(piece_index);
-        }
-
-        None
-    }
-
     pub fn has_missing_pieces(&self, peer_bitfield: &Bitfield) -> bool {
         for (byte_index, _) in peer_bitfield.bytes.iter().enumerate() {
             for bit_index in 0..8 {
@@ -141,11 +151,6 @@ impl State {
         }
 
         false
-    }
-
-    pub fn unassign_piece(&mut self, piece_index: u32) {
-        self.assigned_pieces.remove(&piece_index);
-        self.pending_pieces.push(piece_index);
     }
 
     pub fn download_progress_percent(&self) -> u32 {
@@ -202,5 +207,47 @@ mod test {
             interested_pieces_bitfield,
             Bitfield::new(&vec![0b0000000, 0b00000000])
         );
+    }
+
+    #[test]
+    fn test_count_downloaded_pieces() {
+        let mut state = State::new(15);
+        state.bitfield = Bitfield::new(&vec![0b00111011, 0b11110000]);
+
+        assert_eq!(state.downloaded_pieces_count(), 9);
+    }
+
+    #[test]
+    fn test_count_downloaded_pieces_empty_bitfield() {
+        let mut state = State::new(15);
+        state.bitfield = Bitfield::new(&vec![0b00000000, 0b00000000]);
+
+        assert_eq!(state.downloaded_pieces_count(), 0);
+    }
+
+    #[test]
+    fn test_assign_piece() {
+        let mut state = State::new(15);
+        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.pending_pieces = vec![0, 1, 12, 9, 5];
+
+        // pieces 5 and 9 available
+        let peer_bitfield = Bitfield::new(&vec![0b00011110, 0b01100000]);
+
+        assert_eq!(state.assign_piece(&peer_bitfield), Some(9));
+        assert_eq!(state.assigned_pieces.get(&9), Some(&9));
+    }
+
+    #[test]
+    fn test_assign_piece_non_assignable() {
+        let mut state = State::new(15);
+        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.pending_pieces = vec![0, 1, 12, 9, 5];
+
+        // no pieces available
+        let peer_bitfield = Bitfield::new(&vec![0b00011010, 0b00000000]);
+
+        assert_eq!(state.assign_piece(&peer_bitfield), None);
+        assert!(state.assigned_pieces.is_empty());
     }
 }
