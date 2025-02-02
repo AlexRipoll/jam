@@ -1,28 +1,38 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use protocol::bitfield::Bitfield;
-use protocol::piece::Piece;
 
 #[derive(Debug)]
 pub struct State {
     bitfield: Bitfield,                      // Bitfield of the downloaded pieces
     peers_bitfield: Vec<(String, Bitfield)>, // Peers' bitfield from all peer connections
-    pieces_map: HashMap<u32, Piece>,         // Piece index - Piece struct Map
+    // pieces_map: HashMap<u32, Piece>,         // Piece index - Piece struct Map
     pieces_rarity: Vec<u32>, // Containing the amount of occurences of a piece index within
     // the  current peers' bitfieds
-    pending_pieces: Vec<u32>, // Sorted set of pieces pending to be downloaded (rarest first)
+    pending_pieces: Vec<u32>, // Sorted set of pieces pending to be downloaded from the current
+    // peer connections (rarest first)
     assigned_pieces: HashSet<u32>, // Indexes of the pieces being downloaded
 }
 
 impl State {
-    pub async fn process_bitfield(&mut self, peer_bitfield: &Bitfield) {
-        let missing_pieces_bitfield = self.build_wanted_pieces_bitfield(peer_bitfield);
+    pub fn new(total_pieces: usize) -> State {
+        State {
+            bitfield: Bitfield::from_empty(total_pieces),
+            peers_bitfield: Vec::new(),
+            pieces_rarity: Vec::new(),
+            pending_pieces: Vec::new(),
+            assigned_pieces: HashSet::new(),
+        }
+    }
+
+    pub fn process_bitfield(&mut self, peer_bitfield: &Bitfield) {
+        let missing_pieces_bitfield = self.build_interested_pieces_bitfield(peer_bitfield);
 
         self.increase_pieces_rarity(&missing_pieces_bitfield);
         self.pending_pieces = self.sort_pieces();
     }
 
-    fn build_wanted_pieces_bitfield(&self, peer_bitfield: &Bitfield) -> Bitfield {
+    fn build_interested_pieces_bitfield(&self, peer_bitfield: &Bitfield) -> Bitfield {
         let mut missing = Vec::new();
 
         for (peer_byte, state_byte) in peer_bitfield.bytes.iter().zip(self.bitfield.bytes.iter()) {
@@ -55,12 +65,25 @@ impl State {
         self.pieces_rarity[piece_index as usize] = 0;
     }
 
-    pub async fn increase_pieces_rarity(&mut self, peer_bitfield: &Bitfield) {
+    pub fn increase_pieces_rarity(&mut self, peer_bitfield: &Bitfield) {
         for byte_index in 0..peer_bitfield.bytes.len() {
             for bit_index in 0..8 {
                 let piece_index = (byte_index * 8 + bit_index) as u32;
                 if peer_bitfield.has_piece(piece_index as usize) {
-                    self.pieces_rarity[piece_index as usize] += 1;
+                    self.pieces_rarity[piece_index as usize] =
+                        self.pieces_rarity[piece_index as usize].saturating_add(1);
+                }
+            }
+        }
+    }
+
+    pub fn decrease_pieces_rarity(&mut self, peer_bitfield: &Bitfield) {
+        for byte_index in 0..peer_bitfield.bytes.len() {
+            for bit_index in 0..8 {
+                let piece_index = (byte_index * 8 + bit_index) as u32;
+                if peer_bitfield.has_piece(piece_index as usize) {
+                    self.pieces_rarity[piece_index as usize] =
+                        self.pieces_rarity[piece_index as usize].saturating_sub(1);
                 }
             }
         }
@@ -102,6 +125,22 @@ impl State {
         }
 
         None
+    }
+
+    pub fn has_missing_pieces(&self, peer_bitfield: &Bitfield) -> bool {
+        for (byte_index, _) in peer_bitfield.bytes.iter().enumerate() {
+            for bit_index in 0..8 {
+                let piece_index = (byte_index * 8 + bit_index) as u32;
+
+                if peer_bitfield.has_piece(piece_index as usize)
+                    && !self.bitfield.has_piece(piece_index as usize)
+                {
+                    return true;
+                }
+            }
+        }
+
+        false
     }
 
     pub fn unassign_piece(&mut self, piece_index: u32) {
