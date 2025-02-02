@@ -154,3 +154,53 @@ impl State {
         downloaded_pieces * 100 / self.bitfield.total_pieces as u32
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_build_interested_pieces_bitfield_empty_state_bitfield() {
+        // Test the case where the peer has pieces that have not been downloaded yet.
+        let state = State::new(15);
+        let peer_bitfield = Bitfield::new(&vec![0b0010111, 0b00110000]);
+
+        let interested_pieces_bitfield = state.build_interested_pieces_bitfield(&peer_bitfield);
+
+        // Verify that the generated bitfield correctly indicates interest in all pieces
+        // available from the peer since the current State has no downloaded pieces.
+        assert_eq!(interested_pieces_bitfield, interested_pieces_bitfield);
+    }
+
+    #[test]
+    fn test_build_interested_pieces_bitfield_non_empty_state_bitfield() {
+        // Test the case where the peer has pieces that have not been downloaded yet.
+        let mut state = State::new(15);
+        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+
+        let peer_bitfield = Bitfield::new(&vec![0b0010111, 0b00110000]);
+
+        let interested_pieces_bitfield = state.build_interested_pieces_bitfield(&peer_bitfield);
+
+        assert_eq!(
+            interested_pieces_bitfield,
+            Bitfield::new(&vec![0b0000100, 0b00110000])
+        );
+    }
+
+    #[test]
+    fn test_build_interested_pieces_bitfield_no_interesting_pieces() {
+        // Test the case where the peer does not have any interesting piece.
+        let mut state = State::new(15);
+        state.bitfield = Bitfield::new(&vec![0b00111011, 0b11110000]);
+
+        let peer_bitfield = Bitfield::new(&vec![0b00011010, 0b01100000]);
+
+        let interested_pieces_bitfield = state.build_interested_pieces_bitfield(&peer_bitfield);
+
+        assert_eq!(
+            interested_pieces_bitfield,
+            Bitfield::new(&vec![0b0000000, 0b00000000])
+        );
+    }
+}
