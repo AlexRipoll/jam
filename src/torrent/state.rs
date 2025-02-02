@@ -250,4 +250,30 @@ mod test {
         assert_eq!(state.assign_piece(&peer_bitfield), None);
         assert!(state.assigned_pieces.is_empty());
     }
+
+    #[test]
+    fn test_unassign_piece() {
+        let mut state = State::new(15);
+        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.pending_pieces = vec![0, 1, 12, 9, 5];
+        state.assigned_pieces = HashSet::from_iter(vec![1, 9]);
+
+        state.unassign_piece(9);
+
+        assert_eq!(state.assigned_pieces.get(&9), None);
+    }
+
+    #[test]
+    fn test_unassign_pieces() {
+        let mut state = State::new(15);
+        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.pending_pieces = vec![0, 1, 12, 9, 5];
+        state.assigned_pieces = HashSet::from_iter(vec![1, 9, 5]);
+
+        state.unassign_pieces(vec![1, 9]);
+
+        assert_eq!(state.assigned_pieces.get(&1), None);
+        assert_eq!(state.assigned_pieces.get(&9), None);
+        assert_eq!(state.assigned_pieces.get(&5), Some(&5));
+    }
 }
