@@ -173,8 +173,6 @@ impl State {
 
 #[cfg(test)]
 mod test {
-    use serde::ser::SerializeStructVariant;
-
     use super::*;
 
     #[test]
@@ -374,5 +372,33 @@ mod test {
             state.pending_pieces,
             vec![5, 10, 12, 13, 14, 0, 1, 9, 8, 11]
         );
+    }
+
+    #[test]
+    fn test_has_missing_pieces_true() {
+        let mut state = State::new(15);
+        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.pieces_rarity = vec![2, 2, 0, 0, 0, 1, 0, 0, 3, 2, 1, 4, 1, 1, 1];
+        state.pending_pieces = vec![0, 1, 12, 9, 5];
+        state.assigned_pieces = HashSet::from_iter(vec![1, 9, 5]);
+
+        // pieces 5 available
+        let peer_bitfield = Bitfield::new(&vec![0b00011110, 0b00000000]);
+
+        assert!(state.has_missing_pieces(&peer_bitfield));
+    }
+
+    #[test]
+    fn test_has_missing_pieces_false() {
+        let mut state = State::new(15);
+        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.pieces_rarity = vec![2, 2, 0, 0, 0, 1, 0, 0, 3, 2, 1, 4, 1, 1, 1];
+        state.pending_pieces = vec![0, 1, 12, 9, 5];
+        state.assigned_pieces = HashSet::from_iter(vec![1, 9, 5]);
+
+        // pieces 5 available
+        let peer_bitfield = Bitfield::new(&vec![0b00011010, 0b00000000]);
+
+        assert!(!state.has_missing_pieces(&peer_bitfield));
     }
 }
