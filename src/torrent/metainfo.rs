@@ -122,6 +122,10 @@ impl Metainfo {
         Err(MetainfoError::ScrapeNotSupported)
     }
 
+    pub fn total_pieces(&self) -> usize {
+        self.info.pieces.chunks(20).count()
+    }
+
     pub fn parse_pieces(&self) -> Result<HashMap<u32, Piece>, MetainfoError> {
         let mut pieces = HashMap::new();
 

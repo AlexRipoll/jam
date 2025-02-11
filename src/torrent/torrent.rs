@@ -5,13 +5,14 @@ use std::{
 
 use protocol::piece::Piece;
 
-use super::{metainfo::Metainfo, peer::Peer};
+use super::{metainfo::Metainfo, peer::Peer, state::State, tracker::tracker::Tracker};
 
 #[derive(Debug)]
 pub struct Torrent {
     peer_id: [u8; 20],
     pub metadata: Metadata,
     pub peers: HashSet<Peer>,
+    state: State,
     status: Status,
 }
 
@@ -19,11 +20,13 @@ impl Torrent {
     pub fn new(peer_id: [u8; 20], torrent_bytes: &[u8]) -> Torrent {
         let info_hash = Metainfo::compute_info_hash(&torrent_bytes).unwrap();
         let metainfo = Metainfo::deserialize(&torrent_bytes).unwrap();
+        let total_pieces = metainfo.total_pieces();
 
         Torrent {
             peer_id,
             metadata: Metadata::new(info_hash, metainfo),
             peers: HashSet::new(),
+            state: State::new(total_pieces),
             status: Status::Starting,
         }
     }
