@@ -310,4 +310,42 @@ mod test {
         // check piece 9 rarity is set to 0
         assert_eq!(state.pieces_rarity[9], 0);
     }
+
+    #[test]
+    fn test_increase_pieces_rarity() {
+        let mut state = State::new(15);
+        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.pieces_rarity = vec![2, 2, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1];
+        state.pending_pieces = vec![0, 1, 12, 9, 5];
+        state.assigned_pieces = HashSet::from_iter(vec![1, 9, 5]);
+
+        // pieces 0, 1, 9 and 10 count should increase
+        let interested_pieces = Bitfield::new(&vec![0b11000000, 0b01100000]);
+
+        state.increase_pieces_rarity(&interested_pieces);
+
+        assert_eq!(
+            state.pieces_rarity,
+            vec![3, 3, 0, 0, 0, 1, 0, 0, 1, 2, 2, 1, 1, 1, 1]
+        );
+    }
+
+    #[test]
+    fn test_decrease_pieces_rarity() {
+        let mut state = State::new(15);
+        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.pieces_rarity = vec![2, 2, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1];
+        state.pending_pieces = vec![0, 1, 12, 9, 5];
+        state.assigned_pieces = HashSet::from_iter(vec![1, 9, 5]);
+
+        // pieces 0, 1, 9 and 10 count should increase
+        let interested_pieces = Bitfield::new(&vec![0b11000000, 0b01100000]);
+
+        state.decrease_pieces_rarity(&interested_pieces);
+
+        assert_eq!(
+            state.pieces_rarity,
+            vec![1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 1]
+        );
+    }
 }
