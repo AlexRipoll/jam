@@ -173,6 +173,8 @@ impl State {
 
 #[cfg(test)]
 mod test {
+    use serde::ser::SerializeStructVariant;
+
     use super::*;
 
     #[test]
@@ -316,7 +318,6 @@ mod test {
         let mut state = State::new(15);
         state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
         state.pieces_rarity = vec![2, 2, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1];
-        state.pending_pieces = vec![0, 1, 12, 9, 5];
         state.assigned_pieces = HashSet::from_iter(vec![1, 9, 5]);
 
         // pieces 0, 1, 9 and 10 count should increase
@@ -335,7 +336,6 @@ mod test {
         let mut state = State::new(15);
         state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
         state.pieces_rarity = vec![2, 2, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1];
-        state.pending_pieces = vec![0, 1, 12, 9, 5];
         state.assigned_pieces = HashSet::from_iter(vec![1, 9, 5]);
 
         // pieces 0, 1, 9 and 10 count should increase
@@ -346,6 +346,33 @@ mod test {
         assert_eq!(
             state.pieces_rarity,
             vec![1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 1]
+        );
+    }
+
+    #[test]
+    fn test_sort_piece() {
+        let mut state = State::new(15);
+        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.pieces_rarity = vec![2, 2, 0, 0, 0, 1, 0, 0, 3, 2, 1, 4, 1, 1, 1];
+        state.assigned_pieces = HashSet::from_iter(vec![1, 9, 5]);
+
+        assert_eq!(state.sort_pieces(), vec![5, 10, 12, 13, 14, 0, 1, 9, 8, 11]);
+    }
+
+    #[test]
+    fn test_populate_queue() {
+        let mut state = State::new(15);
+        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.pieces_rarity = vec![2, 2, 0, 0, 0, 1, 0, 0, 3, 2, 1, 4, 1, 1, 1];
+        state.pending_pieces = vec![0, 1, 12, 9, 5];
+        state.assigned_pieces = HashSet::from_iter(vec![1, 9, 5]);
+
+        let sorted_pieces = state.sort_pieces();
+        state.populate_queue(sorted_pieces);
+
+        assert_eq!(
+            state.pending_pieces,
+            vec![5, 10, 12, 13, 14, 0, 1, 9, 8, 11]
         );
     }
 }
