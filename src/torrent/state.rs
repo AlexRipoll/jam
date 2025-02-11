@@ -7,7 +7,7 @@ pub struct State {
     bitfield: Bitfield,                      // Bitfield of the downloaded pieces
     peers_bitfield: Vec<(String, Bitfield)>, // Peers' bitfield from all peer connections
     // pieces_map: HashMap<u32, Piece>,         // Piece index - Piece struct Map
-    pieces_rarity: Vec<u32>, // Containing the amount of occurences of a piece index within
+    pieces_rarity: Vec<u8>, // Containing the amount of occurences of a piece index within
     // the  current peers' bitfieds
     pending_pieces: Vec<u32>, // Sorted set of pieces index pending to be downloaded from the current
     // peer connections (rarest first)
@@ -19,7 +19,7 @@ impl State {
         State {
             bitfield: Bitfield::from_empty(total_pieces),
             peers_bitfield: Vec::new(),
-            pieces_rarity: Vec::new(),
+            pieces_rarity: vec![0u8; total_pieces],
             pending_pieces: Vec::new(),
             assigned_pieces: HashSet::new(),
         }
@@ -32,6 +32,17 @@ impl State {
         self.pending_pieces = self.sort_pieces();
     }
 
+    /// Constructs a bitfield representing the pieces that the peer has but are missing
+    /// from the current state. This bitfield indicates the pending pieces that the state
+    /// can request for download.
+    ///
+    /// # Parameters
+    /// - `peer_bitfield`: A reference to the peer's bitfield, representing the pieces
+    ///   that the peer possesses.
+    ///
+    /// # Returns
+    /// A `Bitfield` where each bit is set if the corresponding piece is available
+    /// in the peer's bitfield but not in the current state's bitfield.
     fn build_interested_pieces_bitfield(&self, peer_bitfield: &Bitfield) -> Bitfield {
         let mut missing = Vec::new();
 
@@ -77,9 +88,9 @@ impl State {
     // Mark a piece as downloaded, remove from missing and assigned sets
     pub fn mark_piece_complete(&mut self, piece_index: u32) {
         self.bitfield.set_piece(piece_index as usize);
-        for &index in self.pending_pieces.iter() {
-            if index == piece_index {
-                self.pending_pieces.remove(index as usize);
+        for (i, &piece_idx) in self.pending_pieces.iter().enumerate() {
+            if piece_idx == piece_index {
+                self.pending_pieces.remove(i as usize);
                 break;
             }
         }
@@ -275,5 +286,28 @@ mod test {
         assert_eq!(state.assigned_pieces.get(&1), None);
         assert_eq!(state.assigned_pieces.get(&9), None);
         assert_eq!(state.assigned_pieces.get(&5), Some(&5));
+    }
+
+    #[test]
+    fn test_mark_piece_as_complete() {
+        let mut state = State::new(15);
+        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.pieces_rarity = vec![2, 2, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1];
+        state.pending_pieces = vec![0, 1, 12, 9, 5];
+        state.assigned_pieces = HashSet::from_iter(vec![1, 9, 5]);
+
+        assert!(!state.bitfield.has_piece(9));
+
+        state.mark_piece_complete(9);
+        // check piece 9 has been set in bitfield
+        assert!(state.bitfield.has_piece(9));
+        // check piece 9 has been removed from pending pieces
+        assert!(!state.pending_pieces.contains(&9));
+        // check piece 9 has been removed assigned pieces
+        assert_eq!(state.assigned_pieces.get(&1), Some(&1));
+        assert_eq!(state.assigned_pieces.get(&5), Some(&5));
+        assert_eq!(state.assigned_pieces.get(&9), None);
+        // check piece 9 rarity is set to 0
+        assert_eq!(state.pieces_rarity[9], 0);
     }
 }
