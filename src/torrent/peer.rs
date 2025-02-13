@@ -10,7 +10,7 @@ pub enum Peers {
     Dictionary(Vec<Peer>),
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Hash)]
 pub struct Peer {
     pub peer_id: Option<String>,
     pub ip: Ip,
@@ -23,7 +23,7 @@ impl Peer {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Hash)]
 pub enum Ip {
     IpV4(Ipv4Addr),
     IpV6(Ipv6Addr),
