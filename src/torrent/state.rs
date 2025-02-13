@@ -21,7 +21,7 @@ impl State {
         let total_pieces = pieces.len();
         State {
             pieces,
-            bitfield: Bitfield::from_empty(total_pieces),
+            bitfield: Bitfield::new(total_pieces),
             peers_bitfield: HashMap::new(),
             pieces_rarity: vec![0u8; total_pieces],
             pending_pieces: Vec::new(),
@@ -55,7 +55,7 @@ impl State {
             missing.push(peer_byte & !state_byte);
         }
 
-        Bitfield::new(&missing)
+        Bitfield::from(&missing, self.bitfield.total_pieces)
     }
 
     pub fn downloaded_pieces_count(&self) -> u32 {
@@ -169,6 +169,44 @@ impl State {
         false
     }
 
+    // checks if the state bitfield already has downloaded all the availabe pieces of a given peer
+    // (state_bitfield & peer_bitfield == peer_bitfield)
+    pub fn has_concluded(&self, peer_bitfield: &Bitfield) -> bool {
+        if peer_bitfield.bytes.is_empty() {
+            return false;
+        }
+
+        peer_bitfield
+            .bytes
+            .iter()
+            .zip(self.bitfield.bytes.iter())
+            .all(|(&x, &y)| (x & y) == x)
+    }
+
+    // checks if there is any missing (not in progress) piece to be downloaded from a given peer
+    pub fn has_assignable_pieces(&self, peer_bitfield: &Bitfield) -> bool {
+        // Iterate over the peer's bitfield to identify missing pieces
+        let missing_pieces: Vec<usize> = (0..peer_bitfield.total_pieces)
+            .filter(|&index| peer_bitfield.has_piece(index) && !self.bitfield.has_piece(index))
+            .collect();
+
+        // Check if any missing piece is already assigned to another task
+        missing_pieces
+            .into_iter()
+            .any(|piece_index| !self.assigned_pieces.contains(&(piece_index as u32)))
+    }
+
+    // Iterate over the peer's bitfield to identify missing pieces that are not assigned
+    pub fn missing_unassigned_pieces(&self, peer_bitfield: &Bitfield) -> Vec<usize> {
+        (0..peer_bitfield.total_pieces)
+            .filter(|&piece_index| {
+                peer_bitfield.has_piece(piece_index)
+                    && !self.bitfield.has_piece(piece_index)
+                    && !self.assigned_pieces.contains(&(piece_index as u32))
+            })
+            .collect()
+    }
+
     pub fn download_progress_percent(&self) -> u32 {
         let downloaded_pieces = self.downloaded_pieces_count();
 
@@ -180,8 +218,8 @@ impl State {
 mod test {
     use super::*;
 
-    fn dummy_pieces() -> HashMap<u32, Piece> {
-        (0..16)
+    fn dummy_pieces(total_piece: u32) -> HashMap<u32, Piece> {
+        (0..total_piece)
             .map(|i| (i, Piece::new(i, 1024, [i as u8; 20])))
             .collect()
     }
@@ -189,9 +227,10 @@ mod test {
     #[test]
     fn test_build_interested_pieces_bitfield_empty_state_bitfield() {
         // Test the case where the peer has pieces that have not been downloaded yet.
-        let pieces = dummy_pieces();
+        let total_pieces = 15;
+        let pieces = dummy_pieces(total_pieces);
         let state = State::new(pieces);
-        let peer_bitfield = Bitfield::new(&vec![0b0010111, 0b00110000]);
+        let peer_bitfield = Bitfield::from(&vec![0b0010111, 0b00110000], total_pieces as usize);
 
         let interested_pieces_bitfield = state.build_interested_pieces_bitfield(&peer_bitfield);
 
@@ -203,64 +242,69 @@ mod test {
     #[test]
     fn test_build_interested_pieces_bitfield_non_empty_state_bitfield() {
         // Test the case where the peer has pieces that have not been downloaded yet.
-        let pieces = dummy_pieces();
+        let total_pieces = 15;
+        let pieces = dummy_pieces(total_pieces);
         let mut state = State::new(pieces);
-        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.bitfield = Bitfield::from(&vec![0b00111011, 0b00000000], total_pieces as usize);
 
-        let peer_bitfield = Bitfield::new(&vec![0b0010111, 0b00110000]);
+        let peer_bitfield = Bitfield::from(&vec![0b0010111, 0b00110000], total_pieces as usize);
 
         let interested_pieces_bitfield = state.build_interested_pieces_bitfield(&peer_bitfield);
 
         assert_eq!(
             interested_pieces_bitfield,
-            Bitfield::new(&vec![0b0000100, 0b00110000])
+            Bitfield::from(&vec![0b0000100, 0b00110000], total_pieces as usize)
         );
     }
 
     #[test]
     fn test_build_interested_pieces_bitfield_no_interesting_pieces() {
         // Test the case where the peer does not have any interesting piece.
-        let pieces = dummy_pieces();
+        let total_pieces = 15;
+        let pieces = dummy_pieces(total_pieces);
         let mut state = State::new(pieces);
-        state.bitfield = Bitfield::new(&vec![0b00111011, 0b11110000]);
+        state.bitfield = Bitfield::from(&vec![0b00111011, 0b11110000], total_pieces as usize);
 
-        let peer_bitfield = Bitfield::new(&vec![0b00011010, 0b01100000]);
+        let peer_bitfield = Bitfield::from(&vec![0b00011010, 0b01100000], total_pieces as usize);
 
         let interested_pieces_bitfield = state.build_interested_pieces_bitfield(&peer_bitfield);
 
         assert_eq!(
             interested_pieces_bitfield,
-            Bitfield::new(&vec![0b0000000, 0b00000000])
+            Bitfield::from(&vec![0b0000000, 0b00000000], total_pieces as usize)
         );
     }
 
     #[test]
     fn test_count_downloaded_pieces() {
-        let pieces = dummy_pieces();
+        let total_pieces = 15;
+        let pieces = dummy_pieces(total_pieces);
         let mut state = State::new(pieces);
-        state.bitfield = Bitfield::new(&vec![0b00111011, 0b11110000]);
+        state.bitfield = Bitfield::from(&vec![0b00111011, 0b11110000], total_pieces as usize);
 
         assert_eq!(state.downloaded_pieces_count(), 9);
     }
 
     #[test]
     fn test_count_downloaded_pieces_empty_bitfield() {
-        let pieces = dummy_pieces();
+        let total_pieces = 15;
+        let pieces = dummy_pieces(total_pieces);
         let mut state = State::new(pieces);
-        state.bitfield = Bitfield::new(&vec![0b00000000, 0b00000000]);
+        state.bitfield = Bitfield::from(&vec![0b00000000, 0b00000000], total_pieces as usize);
 
         assert_eq!(state.downloaded_pieces_count(), 0);
     }
 
     #[test]
     fn test_assign_piece() {
-        let pieces = dummy_pieces();
+        let total_pieces = 15;
+        let pieces = dummy_pieces(total_pieces);
         let mut state = State::new(pieces);
-        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.bitfield = Bitfield::from(&vec![0b00111011, 0b00000000], total_pieces as usize);
         state.pending_pieces = vec![0, 1, 12, 9, 5];
 
         // pieces 5 and 9 available
-        let peer_bitfield = Bitfield::new(&vec![0b00011110, 0b01100000]);
+        let peer_bitfield = Bitfield::from(&vec![0b00011110, 0b01100000], total_pieces as usize);
 
         assert_eq!(state.assign_piece(&peer_bitfield), Some(9));
         assert_eq!(state.assigned_pieces.get(&9), Some(&9));
@@ -268,13 +312,14 @@ mod test {
 
     #[test]
     fn test_assign_piece_non_assignable() {
-        let pieces = dummy_pieces();
+        let total_pieces = 15;
+        let pieces = dummy_pieces(total_pieces);
         let mut state = State::new(pieces);
-        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.bitfield = Bitfield::from(&vec![0b00111011, 0b00000000], total_pieces as usize);
         state.pending_pieces = vec![0, 1, 12, 9, 5];
 
         // no pieces available
-        let peer_bitfield = Bitfield::new(&vec![0b00011010, 0b00000000]);
+        let peer_bitfield = Bitfield::from(&vec![0b00011010, 0b00000000], total_pieces as usize);
 
         assert_eq!(state.assign_piece(&peer_bitfield), None);
         assert!(state.assigned_pieces.is_empty());
@@ -282,9 +327,10 @@ mod test {
 
     #[test]
     fn test_unassign_piece() {
-        let pieces = dummy_pieces();
+        let total_pieces = 15;
+        let pieces = dummy_pieces(total_pieces);
         let mut state = State::new(pieces);
-        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.bitfield = Bitfield::from(&vec![0b00111011, 0b00000000], total_pieces as usize);
         state.pending_pieces = vec![0, 1, 12, 9, 5];
         state.assigned_pieces = HashSet::from_iter(vec![1, 9]);
 
@@ -295,9 +341,10 @@ mod test {
 
     #[test]
     fn test_unassign_pieces() {
-        let pieces = dummy_pieces();
+        let total_pieces = 15;
+        let pieces = dummy_pieces(total_pieces);
         let mut state = State::new(pieces);
-        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.bitfield = Bitfield::from(&vec![0b00111011, 0b00000000], total_pieces as usize);
         state.pending_pieces = vec![0, 1, 12, 9, 5];
         state.assigned_pieces = HashSet::from_iter(vec![1, 9, 5]);
 
@@ -310,9 +357,10 @@ mod test {
 
     #[test]
     fn test_mark_piece_as_complete() {
-        let pieces = dummy_pieces();
+        let total_pieces = 15;
+        let pieces = dummy_pieces(total_pieces);
         let mut state = State::new(pieces);
-        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.bitfield = Bitfield::from(&vec![0b00111011, 0b00000000], total_pieces as usize);
         state.pieces_rarity = vec![2, 2, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1];
         state.pending_pieces = vec![0, 1, 12, 9, 5];
         state.assigned_pieces = HashSet::from_iter(vec![1, 9, 5]);
@@ -334,14 +382,16 @@ mod test {
 
     #[test]
     fn test_increase_pieces_rarity() {
-        let pieces = dummy_pieces();
+        let total_pieces = 15;
+        let pieces = dummy_pieces(total_pieces);
         let mut state = State::new(pieces);
-        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.bitfield = Bitfield::from(&vec![0b00111011, 0b00000000], total_pieces as usize);
         state.pieces_rarity = vec![2, 2, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1];
         state.assigned_pieces = HashSet::from_iter(vec![1, 9, 5]);
 
         // pieces 0, 1, 9 and 10 count should increase
-        let interested_pieces = Bitfield::new(&vec![0b11000000, 0b01100000]);
+        let interested_pieces =
+            Bitfield::from(&vec![0b11000000, 0b01100000], total_pieces as usize);
 
         state.increase_pieces_rarity(&interested_pieces);
 
@@ -353,14 +403,16 @@ mod test {
 
     #[test]
     fn test_decrease_pieces_rarity() {
-        let pieces = dummy_pieces();
+        let total_pieces = 15;
+        let pieces = dummy_pieces(total_pieces);
         let mut state = State::new(pieces);
-        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.bitfield = Bitfield::from(&vec![0b00111011, 0b00000000], total_pieces as usize);
         state.pieces_rarity = vec![2, 2, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1];
         state.assigned_pieces = HashSet::from_iter(vec![1, 9, 5]);
 
         // pieces 0, 1, 9 and 10 count should increase
-        let interested_pieces = Bitfield::new(&vec![0b11000000, 0b01100000]);
+        let interested_pieces =
+            Bitfield::from(&vec![0b11000000, 0b01100000], total_pieces as usize);
 
         state.decrease_pieces_rarity(&interested_pieces);
 
@@ -372,9 +424,10 @@ mod test {
 
     #[test]
     fn test_sort_piece() {
-        let pieces = dummy_pieces();
+        let total_pieces = 15;
+        let pieces = dummy_pieces(total_pieces);
         let mut state = State::new(pieces);
-        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.bitfield = Bitfield::from(&vec![0b00111011, 0b00000000], total_pieces as usize);
         state.pieces_rarity = vec![2, 2, 0, 0, 0, 1, 0, 0, 3, 2, 1, 4, 1, 1, 1];
         state.assigned_pieces = HashSet::from_iter(vec![1, 9, 5]);
 
@@ -383,9 +436,10 @@ mod test {
 
     #[test]
     fn test_populate_queue() {
-        let pieces = dummy_pieces();
+        let total_pieces = 15;
+        let pieces = dummy_pieces(total_pieces);
         let mut state = State::new(pieces);
-        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.bitfield = Bitfield::from(&vec![0b00111011, 0b00000000], total_pieces as usize);
         state.pieces_rarity = vec![2, 2, 0, 0, 0, 1, 0, 0, 3, 2, 1, 4, 1, 1, 1];
         state.pending_pieces = vec![0, 1, 12, 9, 5];
         state.assigned_pieces = HashSet::from_iter(vec![1, 9, 5]);
@@ -401,31 +455,141 @@ mod test {
 
     #[test]
     fn test_has_missing_pieces_true() {
-        let pieces = dummy_pieces();
+        let total_pieces = 15;
+        let pieces = dummy_pieces(total_pieces);
         let mut state = State::new(pieces);
-        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.bitfield = Bitfield::from(&vec![0b00111011, 0b00000000], total_pieces as usize);
         state.pieces_rarity = vec![2, 2, 0, 0, 0, 1, 0, 0, 3, 2, 1, 4, 1, 1, 1];
         state.pending_pieces = vec![0, 1, 12, 9, 5];
         state.assigned_pieces = HashSet::from_iter(vec![1, 9, 5]);
 
         // pieces 5 available
-        let peer_bitfield = Bitfield::new(&vec![0b00011110, 0b00000000]);
+        let peer_bitfield = Bitfield::from(&vec![0b00011110, 0b00000000], total_pieces as usize);
 
         assert!(state.has_missing_pieces(&peer_bitfield));
     }
 
     #[test]
     fn test_has_missing_pieces_false() {
-        let pieces = dummy_pieces();
+        let total_pieces = 15;
+        let pieces = dummy_pieces(total_pieces);
         let mut state = State::new(pieces);
-        state.bitfield = Bitfield::new(&vec![0b00111011, 0b00000000]);
+        state.bitfield = Bitfield::from(&vec![0b00111011, 0b00000000], total_pieces as usize);
         state.pieces_rarity = vec![2, 2, 0, 0, 0, 1, 0, 0, 3, 2, 1, 4, 1, 1, 1];
         state.pending_pieces = vec![0, 1, 12, 9, 5];
         state.assigned_pieces = HashSet::from_iter(vec![1, 9, 5]);
 
         // pieces 5 available
-        let peer_bitfield = Bitfield::new(&vec![0b00011010, 0b00000000]);
+        let peer_bitfield = Bitfield::from(&vec![0b00011010, 0b00000000], total_pieces as usize);
 
         assert!(!state.has_missing_pieces(&peer_bitfield));
+    }
+
+    #[test]
+    fn test_has_concluded() {
+        let total_pieces = 15;
+        let pieces = dummy_pieces(total_pieces);
+        let mut state = State::new(pieces);
+        state.bitfield = Bitfield::from(&vec![0b00111011, 0b10111000], total_pieces as usize);
+
+        let peer_bitfield = Bitfield::from(&vec![0b00011010, 0b10100000], total_pieces as usize);
+
+        assert!(state.has_concluded(&peer_bitfield));
+    }
+
+    #[test]
+    fn test_has_not_concluded() {
+        let total_pieces = 15;
+        let pieces = dummy_pieces(total_pieces);
+        let mut state = State::new(pieces);
+        state.bitfield = Bitfield::from(&vec![0b00111011, 0b10111000], total_pieces as usize);
+
+        // pieces 0 and 1 stil to be downloaded
+        let peer_bitfield = Bitfield::from(&vec![0b11011010, 0b10100000], total_pieces as usize);
+
+        assert!(!state.has_concluded(&peer_bitfield));
+    }
+
+    #[test]
+    fn test_has_assignable_pieces() {
+        let total_pieces = 15;
+        let pieces = dummy_pieces(total_pieces);
+        let mut state = State::new(pieces);
+        state.bitfield = Bitfield::from(&vec![0b00111011, 0b00000000], total_pieces as usize);
+        state.pieces_rarity = vec![2, 2, 0, 0, 0, 1, 0, 0, 3, 2, 1, 4, 1, 1, 1];
+        state.pending_pieces = vec![0, 1, 12, 9, 5];
+        state.assigned_pieces = HashSet::from_iter(vec![9, 5]);
+
+        // piece 14 availabe
+        let peer_bitfield = Bitfield::from(&vec![0b00011010, 0b00000010], total_pieces as usize);
+
+        assert!(state.has_assignable_pieces(&peer_bitfield));
+    }
+
+    #[test]
+    fn test_has_not_assignable_pieces() {
+        let total_pieces = 15;
+        let pieces = dummy_pieces(total_pieces);
+        let mut state = State::new(pieces);
+        state.bitfield = Bitfield::from(&vec![0b00111011, 0b00000000], total_pieces as usize);
+        state.pieces_rarity = vec![2, 2, 0, 0, 0, 1, 0, 0, 3, 2, 1, 4, 1, 1, 1];
+        state.pending_pieces = vec![0, 1, 12, 9, 5];
+        state.assigned_pieces = HashSet::from_iter(vec![9, 5]);
+
+        // no more pieces to be downloaded from peer
+        let peer_bitfield = Bitfield::from(&vec![0b00011010, 0b00000000], total_pieces as usize);
+
+        assert!(!state.has_assignable_pieces(&peer_bitfield));
+    }
+
+    #[test]
+    fn test_has_not_assignable_pieces_already_assigned() {
+        let total_pieces = 15;
+        let pieces = dummy_pieces(total_pieces);
+        let mut state = State::new(pieces);
+        state.bitfield = Bitfield::from(&vec![0b00111011, 0b00000000], total_pieces as usize);
+        state.pieces_rarity = vec![2, 2, 0, 0, 0, 1, 0, 0, 3, 2, 1, 4, 1, 1, 1];
+        state.pending_pieces = vec![0, 1, 12, 9, 5];
+        state.assigned_pieces = HashSet::from_iter(vec![0, 1, 9, 5]);
+
+        // pieces 0 and 1 available but already assigned
+        let peer_bitfield = Bitfield::from(&vec![0b11011010, 0b00000000], total_pieces as usize);
+
+        assert!(!state.has_assignable_pieces(&peer_bitfield));
+    }
+
+    #[test]
+    fn test_missing_unassigned_pieces() {
+        let total_pieces = 15;
+        let pieces = dummy_pieces(total_pieces);
+        let mut state = State::new(pieces);
+        state.bitfield = Bitfield::from(&vec![0b00111011, 0b00000000], total_pieces as usize);
+        state.pieces_rarity = vec![2, 2, 0, 0, 0, 1, 0, 0, 3, 2, 1, 4, 1, 1, 1];
+        state.pending_pieces = vec![0, 1, 12, 9, 5, 10, 14];
+        state.assigned_pieces = HashSet::from_iter(vec![9, 5, 10]);
+
+        // pieces 0, 1, 10 and 14 available but piece 10 is already assigned
+        let peer_bitfield = Bitfield::from(&vec![0b11011010, 0b00100010], total_pieces as usize);
+
+        assert_eq!(
+            state.missing_unassigned_pieces(&peer_bitfield),
+            vec![0, 1, 14]
+        );
+    }
+
+    #[test]
+    fn test_no_missing_unassigned_pieces() {
+        let total_pieces = 12;
+        let pieces = dummy_pieces(total_pieces);
+        let mut state = State::new(pieces);
+        state.bitfield = Bitfield::from(&vec![0b00111011, 0b00000000], total_pieces as usize);
+        state.pieces_rarity = vec![2, 2, 0, 0, 0, 1, 0, 0, 3, 2, 1, 4, 1, 1, 1];
+        state.pending_pieces = vec![0, 1, 12, 9, 5, 10, 14];
+        state.assigned_pieces = HashSet::from_iter(vec![0, 1, 9, 5, 10, 14]);
+
+        // pieces 0, 1, 10 and 14 available but piece 10 is already assigned
+        let peer_bitfield = Bitfield::from(&vec![0b11011010, 0b00100010], total_pieces as usize);
+
+        assert!(state.missing_unassigned_pieces(&peer_bitfield).is_empty());
     }
 }
