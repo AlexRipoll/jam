@@ -5,19 +5,18 @@ pub struct Bitfield {
 }
 
 impl Bitfield {
-    pub fn new(bytes: &[u8]) -> Self {
-        let num_pieces: u32 = bytes.iter().map(|byte| byte.count_ones()).sum();
+    pub fn new(total_pieces: usize) -> Self {
+        let bitfield = vec![0; (total_pieces + 7) / 8];
         Self {
-            bytes: bytes.to_vec(),
-            total_pieces: num_pieces as usize,
+            bytes: bitfield,
+            total_pieces,
         }
     }
 
-    pub fn from_empty(num_pieces: usize) -> Self {
-        let bitfield = vec![0; (num_pieces + 7) / 8];
+    pub fn from(bytes: &[u8], total_pieces: usize) -> Self {
         Self {
-            bytes: bitfield,
-            total_pieces: num_pieces,
+            bytes: bytes.to_vec(),
+            total_pieces,
         }
     }
 
@@ -73,21 +72,21 @@ mod test {
 
     #[test]
     fn test_has_piece() {
-        let bitfield = Bitfield::new(&vec![0b0, 0b0, 0b00001000, 0b0]);
+        let bitfield = Bitfield::from(&vec![0b0, 0b0, 0b00001000, 0b0], 30);
         //check that it has the only piece available at index 20
         assert!(bitfield.has_piece(20));
     }
 
     #[test]
     fn test_has_piece_out_of_range() {
-        let bitfield = Bitfield::new(&vec![0b0, 0b0, 0b00001000, 0b0]);
+        let bitfield = Bitfield::from(&vec![0b0, 0b0, 0b00001000, 0b0], 28);
         // should return false when checking for a piece index out of range
         assert!(!bitfield.has_piece(50));
     }
 
     #[test]
     fn test_set_piece() {
-        let mut bitfield = Bitfield::new(&vec![0b0, 0b0, 0b0, 0b0]);
+        let mut bitfield = Bitfield::from(&vec![0b0, 0b0, 0b0, 0b0], 32);
         bitfield.set_piece(20);
 
         assert_eq!(bitfield.bytes, vec![0b0, 0b0, 0b00001000, 0b0]);
@@ -95,7 +94,7 @@ mod test {
 
     #[test]
     fn test_set_piece_out_of_range() {
-        let mut bitfield = Bitfield::new(&vec![0b0, 0b0, 0b0, 0b0]);
+        let mut bitfield = Bitfield::from(&vec![0b0, 0b0, 0b0, 0b0], 26);
         // out of range
         bitfield.set_piece(50);
 
@@ -106,18 +105,18 @@ mod test {
     #[test]
     fn test_has_all_pieces() {
         // Case 1: Empty bitfield
-        let bitfield = Bitfield::from_empty(8);
+        let bitfield = Bitfield::new(8);
         assert!(!bitfield.has_all_pieces());
 
         // Case 2: Partially completed bitfield
-        let mut bitfield = Bitfield::from_empty(8);
+        let mut bitfield = Bitfield::new(8);
         bitfield.set_piece(0);
         bitfield.set_piece(1);
         bitfield.set_piece(2);
         assert!(!bitfield.has_all_pieces());
 
         // Case 3: Fully completed bitfield for a multiple of 8 pieces
-        let mut bitfield = Bitfield::from_empty(8);
+        let mut bitfield = Bitfield::new(8);
         for i in 0..8 {
             bitfield.set_piece(i);
         }
