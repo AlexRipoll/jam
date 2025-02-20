@@ -217,7 +217,7 @@ mod test {
             left: 5665497088,
             compact: 1,
             no_peer_id: 0,
-            event: Some(Event::Started),
+            event: Event::Started,
             ip: None,
             num_want: None,
             key: None,
