@@ -241,18 +241,18 @@ mod test {
         let mut orchestrator = Orchestrator::new(state, 5);
 
         // Create a test channel (1 slot to ensure async behavior)
-        let (worker1_tx, _) = mpsc::channel::<Event>(10);
+        let (worker1_tx, worker1_rx) = mpsc::channel::<Event>(10);
         // Insert mock channel into orchestrator
         orchestrator
             .channels
             .insert(peer1.0.to_string(), worker1_tx);
 
-        let (worker2_tx, _) = mpsc::channel::<Event>(10);
+        let (worker2_tx, worker2_rx) = mpsc::channel::<Event>(10);
         orchestrator
             .channels
             .insert(peer2.0.to_string(), worker2_tx);
 
-        let (worker3_tx, _) = mpsc::channel::<Event>(10);
+        let (worker3_tx, worker3_rx) = mpsc::channel::<Event>(10);
         orchestrator
             .channels
             .insert(peer3.0.to_string(), worker3_tx);
@@ -316,18 +316,18 @@ mod test {
         let mut orchestrator = Orchestrator::new(state, 5);
 
         // Create a test channel (1 slot to ensure async behavior)
-        let (worker1_tx, _) = mpsc::channel::<Event>(10);
+        let (worker1_tx, worker1_rx) = mpsc::channel::<Event>(10);
         // Insert mock channel into orchestrator
         orchestrator
             .channels
             .insert(peer1.0.to_string(), worker1_tx);
 
-        let (worker2_tx, _) = mpsc::channel::<Event>(10);
+        let (worker2_tx, worker2_rx) = mpsc::channel::<Event>(10);
         orchestrator
             .channels
             .insert(peer2.0.to_string(), worker2_tx);
 
-        let (worker3_tx, _) = mpsc::channel::<Event>(10);
+        let (worker3_tx, worker3_rx) = mpsc::channel::<Event>(10);
         orchestrator
             .channels
             .insert(peer3.0.to_string(), worker3_tx);
