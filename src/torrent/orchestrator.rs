@@ -1,22 +1,92 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    fmt::Display,
+    usize,
+};
 
 use tokio::sync::mpsc;
 
-use super::{events::Event, state::State};
+use super::{
+    events::{Event, StateEvent},
+    state::State,
+};
 
 #[derive(Debug)]
 struct Orchestrator {
     state: State,
     channels: HashMap<String, mpsc::Sender<Event>>, // worker_id -> worker sender for sending Events to worker
+    queue_capacity: usize,
 }
 
 impl Orchestrator {
-    fn new(state: State) -> Orchestrator {
+    fn new(state: State, queue_capacity: usize) -> Orchestrator {
         Orchestrator {
             state,
             channels: HashMap::new(),
-            // tx: None,
+            queue_capacity,
         }
+    }
+
+    async fn send_event(&self, worker_id: &str, event: Event) -> Result<(), OrchestratorError> {
+        match self.channels.get(worker_id) {
+            Some(worker_tx) => worker_tx
+                .send(event)
+                .await
+                .map_err(OrchestratorError::ChannelTxError),
+            None => Err(OrchestratorError::WorkerChannelNotFound(
+                worker_id.to_string(),
+            )),
+        }
+    }
+
+    async fn dispatch_pending_pieces(&mut self) -> Result<(), OrchestratorError> {
+        let mut workers_assigned_pieces = self.assign_pieces_to_workers();
+
+        while !self.state.pending_pieces.is_empty() {
+            // iterate over each current worker
+            for (worker_id, peer_bitfield) in self.state.peers_bitfield.clone().iter() {
+                while self
+                    .state
+                    .workers_pending_pieces
+                    .get(worker_id)
+                    .ok_or(OrchestratorError::WorkerNotFound(worker_id.to_string()))?
+                    .len()
+                    < self.queue_capacity
+                    && !workers_assigned_pieces
+                        .get(worker_id)
+                        .ok_or(OrchestratorError::WorkerNotFound(worker_id.to_string()))?
+                        .is_empty()
+                {
+                    if let Some(queue) = workers_assigned_pieces.get_mut(worker_id) {
+                        if let Some(piece_index) = queue.pop_front() {
+                            let piece = self
+                                .state
+                                .pieces
+                                .get(&piece_index)
+                                .ok_or(OrchestratorError::PieceNotFound(piece_index))?;
+                            self.send_event(
+                                &worker_id,
+                                Event::State(StateEvent::RequestPiece(piece.clone())),
+                            )
+                            .await?;
+                            self.state
+                                .workers_pending_pieces
+                                .get_mut(worker_id)
+                                .ok_or(OrchestratorError::PieceNotFound(piece_index))?
+                                .push(piece_index);
+                            self.state.remove_pending_piece(piece_index);
+                        }
+                    }
+                }
+
+                // Shutdown worker if it's done
+                if workers_assigned_pieces.is_empty() && self.state.has_concluded(peer_bitfield) {
+                    self.send_event(worker_id, Event::Shutdown).await?;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     // assign the pieces to be downloaded by each worker in a balanced distribution.
@@ -55,12 +125,46 @@ impl Orchestrator {
     }
 }
 
+#[derive(Debug)]
+pub enum OrchestratorError {
+    WorkerNotFound(String),
+    PieceNotFound(u32),
+    WorkerChannelNotFound(String),
+    ChannelTxError(mpsc::error::SendError<Event>),
+}
+
+impl Display for OrchestratorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OrchestratorError::WorkerNotFound(worker_id) => {
+                write!(f, "Worker {} not found", worker_id)
+            }
+            OrchestratorError::PieceNotFound(piece_index) => {
+                write!(f, "Piece with index {} not found", piece_index)
+            }
+            OrchestratorError::WorkerChannelNotFound(worker_id) => {
+                write!(f, "Channel for worker {} not found", worker_id)
+            }
+            OrchestratorError::ChannelTxError(err) => {
+                write!(f, "Failed to send event: {}", err)
+            }
+        }
+    }
+}
+
+impl From<mpsc::error::SendError<Event>> for OrchestratorError {
+    fn from(err: mpsc::error::SendError<Event>) -> Self {
+        OrchestratorError::ChannelTxError(err)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::Orchestrator;
-    use crate::torrent::state::State;
+    use crate::torrent::{events::Event, state::State};
     use protocol::{bitfield::Bitfield, piece::Piece};
     use std::collections::{HashMap, VecDeque};
+    use tokio::sync::mpsc;
 
     pub fn mock_pieces(total_piece: u32) -> HashMap<u32, Piece> {
         (0..total_piece)
@@ -95,7 +199,7 @@ mod test {
             state.process_bitfield(id, bitfield.clone());
         }
 
-        let orchestrator = Orchestrator::new(state);
+        let orchestrator = Orchestrator::new(state, 5);
 
         let assignments = orchestrator.assign_pieces_to_workers();
         assert_eq!(assignments.get(peer1.0), Some(&VecDeque::from([0])));
@@ -105,5 +209,149 @@ mod test {
             Some(&VecDeque::from([2, 6, 9, 11]))
         );
         assert_eq!(assignments.get(peer4.0), Some(&VecDeque::from([4, 7, 10])));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_pending_pieces() {
+        let total_pieces = 10;
+        let pieces = mock_pieces(total_pieces);
+        let mut state = State::new(pieces);
+        state.bitfield = Bitfield::from(&vec![0b10000001, 0b01101100], total_pieces as usize);
+
+        let peer1 = (
+            "worker1",
+            Bitfield::from(&vec![0b11001010, 0b0], total_pieces as usize),
+        );
+        let peer2 = (
+            "worker2",
+            Bitfield::from(&vec![0b01001101, 0b10000000], total_pieces as usize),
+        );
+
+        let peer3 = (
+            "worker3",
+            Bitfield::from(&vec![0b10001001, 0b00000000], total_pieces as usize),
+        );
+
+        for (id, bitfield) in [&peer1, &peer2, &peer3] {
+            state.process_bitfield(id, bitfield.clone());
+        }
+
+        state.pending_pieces = vec![1, 4, 5, 6, 8];
+
+        let mut orchestrator = Orchestrator::new(state, 5);
+
+        // Create a test channel (1 slot to ensure async behavior)
+        let (worker1_tx, _) = mpsc::channel::<Event>(10);
+        // Insert mock channel into orchestrator
+        orchestrator
+            .channels
+            .insert(peer1.0.to_string(), worker1_tx);
+
+        let (worker2_tx, _) = mpsc::channel::<Event>(10);
+        orchestrator
+            .channels
+            .insert(peer2.0.to_string(), worker2_tx);
+
+        let (worker3_tx, _) = mpsc::channel::<Event>(10);
+        orchestrator
+            .channels
+            .insert(peer3.0.to_string(), worker3_tx);
+
+        orchestrator.dispatch_pending_pieces().await.unwrap();
+
+        // Check that workers have been assigned pieces to download
+        let worker1_pending_pieces = orchestrator
+            .state
+            .workers_pending_pieces
+            .get(peer1.0)
+            .unwrap();
+        assert_eq!(worker1_pending_pieces, &vec![1, 6]);
+        let worker2_pending_pieces = orchestrator
+            .state
+            .workers_pending_pieces
+            .get(peer2.0)
+            .unwrap();
+        assert_eq!(worker2_pending_pieces, &vec![5, 8]);
+        let worker3_pending_pieces = orchestrator
+            .state
+            .workers_pending_pieces
+            .get(peer3.0)
+            .unwrap();
+        assert_eq!(worker3_pending_pieces, &vec![4]);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_pending_pieces_append_to_non_empty_queues() {
+        let total_pieces = 10;
+        let pieces = mock_pieces(total_pieces);
+        let mut state = State::new(pieces);
+        state.bitfield = Bitfield::from(&vec![0b10000001, 0b01101100], total_pieces as usize);
+
+        let peer1 = (
+            "worker1",
+            Bitfield::from(&vec![0b11001010, 0b0], total_pieces as usize),
+        );
+        let peer2 = (
+            "worker2",
+            Bitfield::from(&vec![0b01001101, 0b10000000], total_pieces as usize),
+        );
+
+        let peer3 = (
+            "worker3",
+            Bitfield::from(&vec![0b10001001, 0b00000000], total_pieces as usize),
+        );
+
+        for (id, bitfield) in [&peer1, &peer2, &peer3] {
+            state.process_bitfield(id, bitfield.clone());
+        }
+
+        state.pending_pieces = vec![1, 4, 5, 6, 8];
+        state
+            .workers_pending_pieces
+            .insert(peer1.0.to_string(), vec![7, 9]);
+        state
+            .workers_pending_pieces
+            .insert(peer3.0.to_string(), vec![2]);
+
+        let mut orchestrator = Orchestrator::new(state, 5);
+
+        // Create a test channel (1 slot to ensure async behavior)
+        let (worker1_tx, _) = mpsc::channel::<Event>(10);
+        // Insert mock channel into orchestrator
+        orchestrator
+            .channels
+            .insert(peer1.0.to_string(), worker1_tx);
+
+        let (worker2_tx, _) = mpsc::channel::<Event>(10);
+        orchestrator
+            .channels
+            .insert(peer2.0.to_string(), worker2_tx);
+
+        let (worker3_tx, _) = mpsc::channel::<Event>(10);
+        orchestrator
+            .channels
+            .insert(peer3.0.to_string(), worker3_tx);
+
+        orchestrator.dispatch_pending_pieces().await.unwrap();
+
+        // Check that workers have been assigned pieces to download
+        let worker1_pending_pieces = orchestrator
+            .state
+            .workers_pending_pieces
+            .get(peer1.0)
+            .unwrap();
+        assert_eq!(worker1_pending_pieces, &vec![7, 9, 1, 6]);
+        let worker2_pending_pieces = orchestrator
+            .state
+            .workers_pending_pieces
+            .get(peer2.0)
+            .unwrap();
+        assert_eq!(worker2_pending_pieces, &vec![5, 8]);
+        let worker3_pending_pieces = orchestrator
+            .state
+            .workers_pending_pieces
+            .get(peer3.0)
+            .unwrap();
+        assert_eq!(worker3_pending_pieces, &vec![2, 4]);
     }
 }
