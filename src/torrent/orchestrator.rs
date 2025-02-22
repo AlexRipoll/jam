@@ -8,27 +8,32 @@ use tokio::sync::mpsc;
 
 use super::{
     events::{Event, StateEvent},
+    peer::Peer,
     state::State,
 };
 
 #[derive(Debug)]
 struct Orchestrator {
     state: State,
-    channels: HashMap<String, mpsc::Sender<Event>>, // worker_id -> worker sender for sending Events to worker
+    peers: HashSet<Peer>,
+    workers: HashSet<String>,
+    workers_channel: HashMap<String, mpsc::Sender<Event>>, // worker_id -> worker sender for sending Events to worker
     queue_capacity: usize,
 }
 
 impl Orchestrator {
-    fn new(state: State, queue_capacity: usize) -> Orchestrator {
+    fn new(state: State, queue_capacity: usize, peers: HashSet<Peer>) -> Orchestrator {
         Orchestrator {
             state,
-            channels: HashMap::new(),
+            peers,
+            workers: HashSet::new(),
+            workers_channel: HashMap::new(),
             queue_capacity,
         }
     }
 
     async fn send_event(&self, worker_id: &str, event: Event) -> Result<(), OrchestratorError> {
-        match self.channels.get(worker_id) {
+        match self.workers_channel.get(worker_id) {
             Some(worker_tx) => worker_tx
                 .send(event)
                 .await
@@ -40,7 +45,7 @@ impl Orchestrator {
     }
 
     async fn dispatch_pending_pieces(&mut self) -> Result<(), OrchestratorError> {
-        let mut workers_assigned_pieces = self.assign_pieces_to_workers();
+        let mut workers_queue = self.assign_pieces_to_workers();
 
         while !self.state.pending_pieces.is_empty() {
             // iterate over each current worker
@@ -52,12 +57,12 @@ impl Orchestrator {
                     .ok_or(OrchestratorError::WorkerNotFound(worker_id.to_string()))?
                     .len()
                     < self.queue_capacity
-                    && !workers_assigned_pieces
+                    && !workers_queue
                         .get(worker_id)
                         .ok_or(OrchestratorError::WorkerNotFound(worker_id.to_string()))?
                         .is_empty()
                 {
-                    if let Some(queue) = workers_assigned_pieces.get_mut(worker_id) {
+                    if let Some(queue) = workers_queue.get_mut(worker_id) {
                         if let Some(piece_index) = queue.pop_front() {
                             let piece = self
                                 .state
@@ -77,11 +82,6 @@ impl Orchestrator {
                             self.state.remove_pending_piece(piece_index);
                         }
                     }
-                }
-
-                // Shutdown worker if it's done
-                if workers_assigned_pieces.is_empty() && self.state.has_concluded(peer_bitfield) {
-                    self.send_event(worker_id, Event::Shutdown).await?;
                 }
             }
         }
@@ -163,7 +163,7 @@ mod test {
     use super::Orchestrator;
     use crate::torrent::{events::Event, state::State};
     use protocol::{bitfield::Bitfield, piece::Piece};
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::{HashMap, HashSet, VecDeque};
     use tokio::sync::mpsc;
 
     pub fn mock_pieces(total_piece: u32) -> HashMap<u32, Piece> {
@@ -199,7 +199,7 @@ mod test {
             state.process_bitfield(id, bitfield.clone());
         }
 
-        let orchestrator = Orchestrator::new(state, 5);
+        let orchestrator = Orchestrator::new(state, 5, HashSet::new());
 
         let assignments = orchestrator.assign_pieces_to_workers();
         assert_eq!(assignments.get(peer1.0), Some(&VecDeque::from([0])));
@@ -238,23 +238,23 @@ mod test {
 
         state.pending_pieces = vec![1, 4, 5, 6, 8];
 
-        let mut orchestrator = Orchestrator::new(state, 5);
+        let mut orchestrator = Orchestrator::new(state, 5, HashSet::new());
 
         // Create a test channel (1 slot to ensure async behavior)
         let (worker1_tx, worker1_rx) = mpsc::channel::<Event>(10);
         // Insert mock channel into orchestrator
         orchestrator
-            .channels
+            .workers_channel
             .insert(peer1.0.to_string(), worker1_tx);
 
         let (worker2_tx, worker2_rx) = mpsc::channel::<Event>(10);
         orchestrator
-            .channels
+            .workers_channel
             .insert(peer2.0.to_string(), worker2_tx);
 
         let (worker3_tx, worker3_rx) = mpsc::channel::<Event>(10);
         orchestrator
-            .channels
+            .workers_channel
             .insert(peer3.0.to_string(), worker3_tx);
 
         orchestrator.dispatch_pending_pieces().await.unwrap();
@@ -313,23 +313,23 @@ mod test {
             .workers_pending_pieces
             .insert(peer3.0.to_string(), vec![2]);
 
-        let mut orchestrator = Orchestrator::new(state, 5);
+        let mut orchestrator = Orchestrator::new(state, 5, HashSet::new());
 
         // Create a test channel (1 slot to ensure async behavior)
         let (worker1_tx, worker1_rx) = mpsc::channel::<Event>(10);
         // Insert mock channel into orchestrator
         orchestrator
-            .channels
+            .workers_channel
             .insert(peer1.0.to_string(), worker1_tx);
 
         let (worker2_tx, worker2_rx) = mpsc::channel::<Event>(10);
         orchestrator
-            .channels
+            .workers_channel
             .insert(peer2.0.to_string(), worker2_tx);
 
         let (worker3_tx, worker3_rx) = mpsc::channel::<Event>(10);
         orchestrator
-            .channels
+            .workers_channel
             .insert(peer3.0.to_string(), worker3_tx);
 
         orchestrator.dispatch_pending_pieces().await.unwrap();
