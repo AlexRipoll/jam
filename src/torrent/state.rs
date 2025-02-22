@@ -13,6 +13,7 @@ pub struct State {
     pub pending_pieces: Vec<u32>, // Sorted set of piece indexes pending to be downloaded from the current
     // peer connections (rarest first)
     pub assigned_pieces: HashSet<u32>, // Indexes of the pieces being downloaded
+    // FIX: move to orchestrator
     pub workers_pending_pieces: HashMap<String, Vec<u32>>, // Indexes of the pieces being downloaded by each worker
 }
 
@@ -225,6 +226,18 @@ impl State {
                     && !self.assigned_pieces.contains(&(piece_index as u32))
             })
             .collect()
+    }
+
+    // checks if any of the workers has any piece stil in progress
+    pub fn has_active_worker(&self) -> bool {
+        self.workers_pending_pieces
+            .iter()
+            .any(|(_, pending_pieces)| !pending_pieces.is_empty())
+    }
+
+    // checks if all pieces have been downloaded
+    pub fn is_completed(&self) -> bool {
+        self.bitfield.has_all_pieces()
     }
 
     pub fn download_progress_percent(&self) -> u32 {
@@ -655,5 +668,71 @@ mod test {
         let peer_bitfield = Bitfield::from(&vec![0b11011010, 0b00100010], total_pieces as usize);
 
         assert!(state.missing_unassigned_pieces(&peer_bitfield).is_empty());
+    }
+
+    #[test]
+    fn test_has_active_workers() {
+        let total_pieces = 12;
+        let pieces = mock_pieces(total_pieces);
+        let mut state = State::new(pieces);
+        state
+            .workers_pending_pieces
+            .insert("worker1".to_string(), vec![]);
+        state
+            .workers_pending_pieces
+            .insert("worker2".to_string(), vec![2, 4, 5]);
+        state
+            .workers_pending_pieces
+            .insert("worker3".to_string(), vec![]);
+
+        assert!(state.has_active_worker());
+    }
+
+    #[test]
+    fn test_has_no_active_workers() {
+        let total_pieces = 12;
+        let pieces = mock_pieces(total_pieces);
+        let mut state = State::new(pieces);
+        state
+            .workers_pending_pieces
+            .insert("worker1".to_string(), vec![]);
+        state
+            .workers_pending_pieces
+            .insert("worker2".to_string(), vec![]);
+        state
+            .workers_pending_pieces
+            .insert("worker3".to_string(), vec![]);
+
+        assert!(!state.has_active_worker());
+    }
+
+    #[test]
+    fn test_bitfield_is_completed() {
+        let total_pieces = 12;
+        let pieces = mock_pieces(total_pieces);
+        let mut state = State::new(pieces);
+        state.bitfield = Bitfield::from(&vec![0b11111111, 0b11110000], total_pieces as usize);
+
+        assert!(state.is_completed());
+    }
+
+    #[test]
+    fn test_bitfield_is_not_completed() {
+        let total_pieces = 12;
+        let pieces = mock_pieces(total_pieces);
+        let mut state = State::new(pieces);
+        state.bitfield = Bitfield::from(&vec![0b11110011, 0b11110000], total_pieces as usize);
+
+        assert!(!state.is_completed());
+    }
+
+    #[test]
+    fn test_bitfield_is_not_completed_invalid_pieces_set() {
+        let total_pieces = 12;
+        let pieces = mock_pieces(total_pieces);
+        let mut state = State::new(pieces);
+        state.bitfield = Bitfield::from(&vec![0b11111111, 0b00001111], total_pieces as usize);
+
+        assert!(!state.is_completed());
     }
 }
