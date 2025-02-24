@@ -1,17 +1,16 @@
-use core::panic;
-use std::sync::Arc;
+use std::{error::Error, fmt::Display, sync::Arc};
 
-use handshake::{perform_handshake, Handshake};
+use handshake::{perform_handshake, Handshake, HandshakeError};
 use io::{read_message, send_message, IoError};
 use protocol::message::Message;
-use tcp::connect;
+use tcp::{connect, TcpError};
 use tokio::{
     io::AsyncWriteExt,
     net::TcpStream,
     sync::{broadcast, mpsc, Mutex},
 };
-use tracing::{debug, error, warn};
-use worker::Worker;
+use tracing::{debug, error};
+use worker::{Worker, WorkerError};
 
 use super::events::{DiskEvent, Event, StateEvent};
 
@@ -52,31 +51,17 @@ impl PeerSession {
         }
     }
 
-    pub async fn initialize(&mut self) {
-        let mut stream = match connect(
+    pub async fn initialize(&mut self) -> Result<(), SessionError> {
+        let mut stream = connect(
             &self.peer_addr,
             3000, // TODO:inject values from config
             2,    // TODO:inject values from config
         )
-        .await
-        {
-            Ok(stream) => stream, // Successfully connected, return the stream
-            Err(e) => {
-                warn!(
-                    peer_id = self.id,
-                    peer_address = %self.peer_addr,
-                    error = %e,
-                    "Failed to connect to peer after retries"
-                );
-                panic!();
-            }
-        };
+        .await?;
 
         let handshake_metadata = Handshake::new(self.info_hash, self.peer_id);
         // Perform handshake
-        if let Err(e) = perform_handshake(&mut stream, &handshake_metadata).await {
-            panic!();
-        }
+        perform_handshake(&mut stream, &handshake_metadata).await?;
 
         // Create channels for communication
         // TODO: define channel buffer size in config
@@ -160,12 +145,20 @@ impl PeerSession {
             }
         }
 
+        // release any pieces assigned to this peer
+        let mut worker = worker.lock().await;
+        if let Err(err) = worker.release_pieces().await {
+            error!(peer_addr = %self.peer_addr, error = %err, "timeout watcher error");
+        }
+
         // Await tasks
         for handle in task_handles {
             if let Err(e) = handle.await {
                 tracing::error!(self.peer_addr, error = ?e, "peer session handle error");
             }
         }
+
+        Ok(())
     }
 }
 
@@ -306,10 +299,6 @@ async fn piece_requester(
 
             // Handle shutdown signal
             _ = shutdown_rx.recv() => {
-                let mut worker = worker.lock().await;
-                // FIX: should be exec by another task
-                worker.release_pieces().await;
-
                 break;
             }
         }
@@ -329,8 +318,9 @@ async fn timeout_watcher(
                 let mut worker = worker.lock().await;
 
                 if worker.has_pieces_in_progress() {
-                    worker.release_timed_out_pieces().await;
-                }
+                    if let Err(err) = worker.release_timed_out_pieces().await{
+                        error!(peer_addr = %peer_addr, error = %err, "timeout watcher error");
+                    }                }
                 if worker.is_strikeout() {
                     let _ = shutdown_tx.send(()); // Send shutdown signal
                     debug!(peer_addr = %peer_addr, "max strikes reached. Sending shutdown signal...");
@@ -340,12 +330,54 @@ async fn timeout_watcher(
 
             // Handle shutdown signal
             _ = shutdown_rx.recv() => {
-            let mut worker = worker.lock().await;
-            // FIX: should be exec by another task
-                worker.release_pieces().await;
-
                 break;
             }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum SessionError {
+    Connection(TcpError),
+    Handshake(HandshakeError),
+    Worker(WorkerError),
+}
+
+impl Display for SessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SessionError::Connection(err) => write!(f, "Connection error: {}", err),
+            SessionError::Handshake(err) => write!(f, "Handshake error: {}", err),
+            SessionError::Worker(err) => write!(f, "Worker error: {}", err),
+        }
+    }
+}
+
+impl From<TcpError> for SessionError {
+    fn from(err: TcpError) -> Self {
+        SessionError::Connection(err)
+    }
+}
+
+impl From<HandshakeError> for SessionError {
+    fn from(err: HandshakeError) -> Self {
+        SessionError::Handshake(err)
+    }
+}
+
+impl From<WorkerError> for SessionError {
+    fn from(err: WorkerError) -> Self {
+        SessionError::Worker(err)
+    }
+}
+
+impl Error for SessionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            SessionError::Connection(err) => Some(err),
+            SessionError::Handshake(err) => Some(err),
+            SessionError::Worker(err) => Some(err),
+            _ => None,
         }
     }
 }
