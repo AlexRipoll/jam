@@ -11,7 +11,7 @@ pub enum Event {
 pub enum DiskEvent {
     Piece {
         piece: Piece,
-        assembled_data: Vec<u8>,
+        assembled_blocks: Vec<u8>,
     },
 }
 
@@ -27,6 +27,11 @@ pub enum StateEvent {
     },
     RequestPiece(Piece),
     UnassignPiece(u32),
+    CorruptedPiece {
+        piece_index: u32,
+        worker_id: String,
+    },
     UnassignPieces(Vec<u32>),
     CompletedPiece(u32),
+    Shutdown(String),
 }
