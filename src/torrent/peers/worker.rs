@@ -2,6 +2,7 @@ use protocol::error::ProtocolError;
 use sha1::{Digest, Sha1};
 use std::error::Error;
 use std::fmt::Display;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{collections::HashMap, usize};
 use tokio::sync::mpsc;
@@ -21,9 +22,8 @@ pub struct Worker {
     peer_bitfield_received: bool,
     download_status: DownloadStatus,
     io_wtx: mpsc::Sender<Message>,
-    disk_tx: mpsc::Sender<DiskEvent>,
-    rx: mpsc::Receiver<Event>,
-    orchestrator_tx: mpsc::Sender<Event>,
+    disk_tx: Arc<mpsc::Sender<DiskEvent>>,
+    orchestrator_tx: Arc<mpsc::Sender<Event>>,
 }
 
 #[derive(Debug)]
@@ -38,7 +38,7 @@ struct State {
 struct DownloadStatus {
     active_pieces: HashMap<usize, Piece>, // the status of the pieces that are being downloaded or have been downloaded from this peer
     // stores in memeory  the bytes from the corresponding piece
-    download_queue: Vec<Piece>, // vector containing the pieces to be requested to the peer
+    queue: Vec<Piece>, // vector containing the pieces to be requested to the peer
     in_progress: Vec<Piece>, // vector containing the pieces that are being downloaded but stil not
     // completed
     in_progress_timestamps: HashMap<u32, Instant>, // timestamps of the las time a block os a piece
@@ -61,7 +61,7 @@ impl Default for DownloadStatus {
     fn default() -> Self {
         DownloadStatus {
             active_pieces: HashMap::new(),
-            download_queue: vec![],
+            queue: vec![],
             in_progress: vec![],
             in_progress_timestamps: HashMap::new(),
             strikes: 0,
@@ -73,9 +73,8 @@ impl Worker {
     pub fn new(
         id: String,
         io_wtx: mpsc::Sender<Message>,
-        disk_tx: mpsc::Sender<DiskEvent>,
-        rx: mpsc::Receiver<Event>,
-        orchestrator_tx: mpsc::Sender<Event>,
+        disk_tx: Arc<mpsc::Sender<DiskEvent>>,
+        orchestrator_tx: Arc<mpsc::Sender<Event>>,
     ) -> Self {
         Self {
             id,
@@ -84,13 +83,16 @@ impl Worker {
             download_status: DownloadStatus::default(),
             io_wtx,
             disk_tx,
-            rx,
             orchestrator_tx,
         }
     }
 
     pub fn ready_to_request(&self) -> bool {
-        !self.state.is_choked && self.state.is_interested
+        !self.state.is_choked && self.state.is_interested && !self.download_status.queue.is_empty()
+    }
+
+    pub fn push_to_queue(&mut self, piece: Piece) {
+        self.download_status.queue.push(piece);
     }
 
     pub fn has_received_peer_bitfield(&self) -> bool {
@@ -320,7 +322,7 @@ impl Worker {
     }
 
     pub async fn request(&mut self) -> Result<(), WorkerError> {
-        for piece in self.download_status.download_queue.clone().iter() {
+        for piece in self.download_status.queue.clone().iter() {
             self.download_status
                 .active_pieces
                 .entry(piece.index() as usize)
@@ -362,7 +364,7 @@ impl Worker {
 
         // remove the piece from the download queue
         self.download_status
-            .download_queue
+            .queue
             .retain(|p| p.index() != piece.index());
 
         Ok(())
@@ -448,7 +450,10 @@ impl Error for WorkerError {
 
 #[cfg(test)]
 mod test {
-    use std::time::{Duration, Instant};
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
 
     use protocol::{
         message::{Message, MessageId},
@@ -466,19 +471,18 @@ mod test {
         let (io_wtx, _) = tokio::sync::mpsc::channel(1);
         let (disk_tx, _) = tokio::sync::mpsc::channel(1);
         let (orchestrator_tx, _) = tokio::sync::mpsc::channel(1);
-        let (_, rx) = tokio::sync::mpsc::channel(1);
 
         let mut worker = Worker::new(
             "worker-id".to_string(),
             io_wtx,
-            disk_tx,
-            rx,
-            orchestrator_tx,
+            Arc::new(disk_tx),
+            Arc::new(orchestrator_tx),
         );
 
         // Modify state to make it ready
         worker.state.is_choked = false;
         worker.state.is_interested = true;
+        worker.download_status.queue = vec![Piece::new(0, 1024, [0u8; 20])];
         assert!(worker.ready_to_request());
     }
 
@@ -487,24 +491,30 @@ mod test {
         let (io_wtx, _) = tokio::sync::mpsc::channel(1);
         let (disk_tx, _) = tokio::sync::mpsc::channel(1);
         let (orchestrator_tx, _) = tokio::sync::mpsc::channel(1);
-        let (_, rx) = tokio::sync::mpsc::channel(1);
 
         let mut worker = Worker::new(
             "worker-id".to_string(),
             io_wtx,
-            disk_tx,
-            rx,
-            orchestrator_tx,
+            Arc::new(disk_tx),
+            Arc::new(orchestrator_tx),
         );
 
         // worker is still choked
         worker.state.is_choked = true;
         worker.state.is_interested = true;
+        worker.download_status.queue = vec![Piece::new(0, 1024, [0u8; 20])];
+        assert!(!worker.ready_to_request());
+
+        // worker has no pieces in download
+        worker.state.is_choked = false;
+        worker.state.is_interested = true;
+        worker.download_status.queue = vec![];
         assert!(!worker.ready_to_request());
 
         // worker has not expressed interes to peer
         worker.state.is_choked = false;
         worker.state.is_interested = false;
+        worker.download_status.queue = vec![Piece::new(0, 1024, [0u8; 20])];
         assert!(!worker.ready_to_request());
     }
 
@@ -513,14 +523,12 @@ mod test {
         let (io_wtx, _) = tokio::sync::mpsc::channel(1);
         let (disk_tx, _) = tokio::sync::mpsc::channel(1);
         let (orchestrator_tx, _) = tokio::sync::mpsc::channel(1);
-        let (_, rx) = tokio::sync::mpsc::channel(1);
 
         let mut worker = Worker::new(
             "worker-id".to_string(),
             io_wtx,
-            disk_tx,
-            rx,
-            orchestrator_tx,
+            Arc::new(disk_tx),
+            Arc::new(orchestrator_tx),
         );
 
         worker.peer_bitfield_received = true;
@@ -533,14 +541,12 @@ mod test {
         let (io_wtx, _) = tokio::sync::mpsc::channel(1);
         let (disk_tx, _) = tokio::sync::mpsc::channel(1);
         let (orchestrator_tx, _) = tokio::sync::mpsc::channel(1);
-        let (_, rx) = tokio::sync::mpsc::channel(1);
 
         let worker = Worker::new(
             "worker-id".to_string(),
             io_wtx,
-            disk_tx,
-            rx,
-            orchestrator_tx,
+            Arc::new(disk_tx),
+            Arc::new(orchestrator_tx),
         );
 
         assert!(!worker.has_received_peer_bitfield());
@@ -551,14 +557,12 @@ mod test {
         let (io_wtx, _) = tokio::sync::mpsc::channel(1);
         let (disk_tx, _) = tokio::sync::mpsc::channel(1);
         let (orchestrator_tx, _) = tokio::sync::mpsc::channel(1);
-        let (_, rx) = tokio::sync::mpsc::channel(1);
 
         let mut worker = Worker::new(
             "worker-id".to_string(),
             io_wtx,
-            disk_tx,
-            rx,
-            orchestrator_tx,
+            Arc::new(disk_tx),
+            Arc::new(orchestrator_tx),
         );
 
         worker.download_status.in_progress = vec![Piece::new(1, 1024, [0u8; 20])];
@@ -571,14 +575,12 @@ mod test {
         let (io_wtx, _) = tokio::sync::mpsc::channel(1);
         let (disk_tx, _) = tokio::sync::mpsc::channel(1);
         let (orchestrator_tx, _) = tokio::sync::mpsc::channel(1);
-        let (_, rx) = tokio::sync::mpsc::channel(1);
 
         let mut worker = Worker::new(
             "worker-id".to_string(),
             io_wtx,
-            disk_tx,
-            rx,
-            orchestrator_tx,
+            Arc::new(disk_tx),
+            Arc::new(orchestrator_tx),
         );
 
         worker.download_status.in_progress = vec![];
@@ -587,78 +589,16 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_release_timeed_out_pieces() {
-        let (io_wtx, _) = tokio::sync::mpsc::channel(1);
-        let (disk_tx, _) = tokio::sync::mpsc::channel(1);
-        let (orchestrator_tx, _) = tokio::sync::mpsc::channel(1);
-        let (_, rx) = tokio::sync::mpsc::channel(1);
-
-        let mut worker = Worker::new(
-            "worker-id".to_string(),
-            io_wtx,
-            disk_tx,
-            rx,
-            orchestrator_tx,
-        );
-
-        worker.download_status.in_progress = vec![
-            Piece::new(1, 1024, [0u8; 20]),
-            Piece::new(2, 1024, [0u8; 20]),
-            Piece::new(4, 1024, [0u8; 20]),
-            Piece::new(8, 1024, [0u8; 20]),
-        ];
-
-        worker
-            .download_status
-            .in_progress_timestamps
-            .insert(1, Instant::now() - Duration::from_secs(15));
-        worker
-            .download_status
-            .in_progress_timestamps
-            .insert(2, Instant::now() - Duration::from_secs(4));
-        worker
-            .download_status
-            .in_progress_timestamps
-            .insert(4, Instant::now() - Duration::from_secs(5));
-        worker
-            .download_status
-            .in_progress_timestamps
-            .insert(8, Instant::now() - Duration::from_secs(18));
-
-        assert_eq!(worker.download_status.strikes, 0);
-
-        worker.release_timed_out_pieces().await.unwrap();
-
-        assert_eq!(worker.download_status.strikes, 2);
-        assert_eq!(
-            worker.download_status.in_progress,
-            vec![
-                Piece::new(2, 1024, [0u8; 20]),
-                Piece::new(4, 1024, [0u8; 20]),
-            ]
-        );
-        let mut remaining_keys = worker
-            .download_status
-            .in_progress_timestamps
-            .keys()
-            .collect::<Vec<&u32>>();
-        remaining_keys.sort();
-        assert_eq!(remaining_keys, vec![&2, &4]);
-    }
-
-    #[tokio::test]
     async fn test_is_strikeout() {
         let (io_wtx, _) = tokio::sync::mpsc::channel(1);
         let (disk_tx, _) = tokio::sync::mpsc::channel(1);
         let (orchestrator_tx, _) = tokio::sync::mpsc::channel(1);
-        let (_, rx) = tokio::sync::mpsc::channel(1);
 
         let mut worker = Worker::new(
             "worker-id".to_string(),
             io_wtx,
-            disk_tx,
-            rx,
-            orchestrator_tx,
+            Arc::new(disk_tx),
+            Arc::new(orchestrator_tx),
         );
 
         worker.download_status.strikes = MAX_STRIKES;
@@ -670,15 +610,13 @@ mod test {
     async fn test_release_timed_out_pieces() {
         let (io_wtx, _) = tokio::sync::mpsc::channel(1);
         let (disk_tx, _) = tokio::sync::mpsc::channel(1);
-        let (orchestrator_tx, _) = tokio::sync::mpsc::channel(1);
-        let (_, rx) = tokio::sync::mpsc::channel(1);
+        let (orchestrator_tx, mut orchestrator_rx) = tokio::sync::mpsc::channel(2);
 
         let mut worker = Worker::new(
             "worker-id".to_string(),
             io_wtx,
-            disk_tx,
-            rx,
-            orchestrator_tx,
+            Arc::new(disk_tx),
+            Arc::new(orchestrator_tx),
         );
 
         worker.download_status.in_progress = vec![
@@ -726,6 +664,16 @@ mod test {
         // sorting for consistency
         remaining_keys.sort();
         assert_eq!(remaining_keys, vec![&2, &4]);
+
+        // Ensure the correct event was sent
+        match orchestrator_rx.recv().await {
+            Some(Event::State(StateEvent::UnassignPiece(index))) => {
+                assert_eq!(index, 1);
+            }
+            _ => {
+                panic!("Expected `UnassignPiece` event was not received");
+            }
+        }
     }
 
     #[tokio::test]
@@ -733,14 +681,12 @@ mod test {
         let (io_wtx, _) = tokio::sync::mpsc::channel(1);
         let (disk_tx, _) = tokio::sync::mpsc::channel(1);
         let (orchestrator_tx, mut orchestrator_rx) = tokio::sync::mpsc::channel(1);
-        let (_, rx) = tokio::sync::mpsc::channel(1);
 
         let mut worker = Worker::new(
             "worker-id".to_string(),
             io_wtx,
-            disk_tx,
-            rx,
-            orchestrator_tx,
+            Arc::new(disk_tx),
+            Arc::new(orchestrator_tx),
         );
 
         worker.download_status.in_progress = vec![
@@ -787,14 +733,12 @@ mod test {
         let (io_wtx, _) = tokio::sync::mpsc::channel(1);
         let (disk_tx, _) = tokio::sync::mpsc::channel(1);
         let (orchestrator_tx, mut orchestrator_rx) = tokio::sync::mpsc::channel(1);
-        let (_, rx) = tokio::sync::mpsc::channel(1);
 
         let mut worker = Worker::new(
             "worker-id".to_string(),
             io_wtx,
-            disk_tx,
-            rx,
-            orchestrator_tx,
+            Arc::new(disk_tx),
+            Arc::new(orchestrator_tx),
         );
 
         worker.download_status.in_progress = vec![
@@ -838,14 +782,12 @@ mod test {
         let (io_wtx, _) = tokio::sync::mpsc::channel(1);
         let (disk_tx, _) = tokio::sync::mpsc::channel(1);
         let (orchestrator_tx, _) = tokio::sync::mpsc::channel(1);
-        let (_, rx) = tokio::sync::mpsc::channel(1);
 
         let mut worker = Worker::new(
             "worker-id".to_string(),
             io_wtx,
-            disk_tx,
-            rx,
-            orchestrator_tx,
+            Arc::new(disk_tx),
+            Arc::new(orchestrator_tx),
         );
 
         let mut piece1 = Piece::new(1, 1024, [0u8; 20]);
@@ -867,14 +809,12 @@ mod test {
         let (io_wtx, _) = tokio::sync::mpsc::channel(1);
         let (disk_tx, _) = tokio::sync::mpsc::channel(1);
         let (orchestrator_tx, _) = tokio::sync::mpsc::channel(1);
-        let (_, rx) = tokio::sync::mpsc::channel(1);
 
         let mut worker = Worker::new(
             "worker-id".to_string(),
             io_wtx,
-            disk_tx,
-            rx,
-            orchestrator_tx,
+            Arc::new(disk_tx),
+            Arc::new(orchestrator_tx),
         );
 
         let mut piece1 = Piece::new(1, 1024, [0u8; 20]);
@@ -895,10 +835,14 @@ mod test {
         let (io_wtx, _) = tokio::sync::mpsc::channel(1);
         let (disk_tx, _) = tokio::sync::mpsc::channel(1);
         let (orchestrator_tx, mut orchestrator_rx) = tokio::sync::mpsc::channel(1);
-        let (_, rx) = tokio::sync::mpsc::channel(1);
 
         let worker_id = "worker-id".to_string();
-        let mut worker = Worker::new(worker_id.clone(), io_wtx, disk_tx, rx, orchestrator_tx);
+        let mut worker = Worker::new(
+            worker_id.clone(),
+            io_wtx,
+            Arc::new(disk_tx),
+            Arc::new(orchestrator_tx),
+        );
 
         let piece_index: u32 = 1;
         worker
@@ -933,10 +877,14 @@ mod test {
         let (io_wtx, mut io_wrx) = tokio::sync::mpsc::channel(2);
         let (disk_tx, _) = tokio::sync::mpsc::channel(1);
         let (orchestrator_tx, _) = tokio::sync::mpsc::channel(1);
-        let (_, rx) = tokio::sync::mpsc::channel(1);
 
         let worker_id = "worker-id".to_string();
-        let mut worker = Worker::new(worker_id.clone(), io_wtx, disk_tx, rx, orchestrator_tx);
+        let mut worker = Worker::new(
+            worker_id.clone(),
+            io_wtx,
+            Arc::new(disk_tx),
+            Arc::new(orchestrator_tx),
+        );
 
         // Create a dummy Piece object
         let piece_index = 0;
@@ -945,7 +893,7 @@ mod test {
         let piece = Piece::new(piece_index, piece_size, piece_hash);
 
         // Pre-fill the pieces queue with the piece
-        worker.download_status.download_queue.push(piece);
+        worker.download_status.queue.push(piece);
 
         // Call the request method
         worker.request().await.expect("request method failed");
@@ -980,10 +928,14 @@ mod test {
         let (io_wtx, mut io_wrx) = tokio::sync::mpsc::channel(2);
         let (disk_tx, _) = tokio::sync::mpsc::channel(1);
         let (orchestrator_tx, _) = tokio::sync::mpsc::channel(1);
-        let (_, rx) = tokio::sync::mpsc::channel(1);
 
         let worker_id = "worker-id".to_string();
-        let mut worker = Worker::new(worker_id.clone(), io_wtx, disk_tx, rx, orchestrator_tx);
+        let mut worker = Worker::new(
+            worker_id.clone(),
+            io_wtx,
+            Arc::new(disk_tx),
+            Arc::new(orchestrator_tx),
+        );
 
         // Create a dummy Piece object
         let piece_index = 0;
@@ -1027,14 +979,12 @@ mod test {
         let (io_wtx, _) = tokio::sync::mpsc::channel(1);
         let (disk_tx, _) = tokio::sync::mpsc::channel(1);
         let (orchestrator_tx, _) = tokio::sync::mpsc::channel(1);
-        let (_, rx) = tokio::sync::mpsc::channel(1);
 
         let mut worker = Worker::new(
             "worker-id".to_string(),
             io_wtx,
-            disk_tx,
-            rx,
-            orchestrator_tx,
+            Arc::new(disk_tx),
+            Arc::new(orchestrator_tx),
         );
 
         worker.state.is_choked = false;
@@ -1052,14 +1002,12 @@ mod test {
         let (io_wtx, _) = tokio::sync::mpsc::channel(1);
         let (disk_tx, _) = tokio::sync::mpsc::channel(1);
         let (orchestrator_tx, _) = tokio::sync::mpsc::channel(1);
-        let (_, rx) = tokio::sync::mpsc::channel(1);
 
         let mut worker = Worker::new(
             "worker-id".to_string(),
             io_wtx,
-            disk_tx,
-            rx,
-            orchestrator_tx,
+            Arc::new(disk_tx),
+            Arc::new(orchestrator_tx),
         );
 
         assert!(worker.state.is_choked);
@@ -1078,14 +1026,12 @@ mod test {
         let (io_wtx, mut io_wrx) = tokio::sync::mpsc::channel(1);
         let (disk_tx, _) = tokio::sync::mpsc::channel(1);
         let (orchestrator_tx, _) = tokio::sync::mpsc::channel(1);
-        let (_, rx) = tokio::sync::mpsc::channel(1);
 
         let mut worker = Worker::new(
             "worker-id".to_string(),
             io_wtx,
-            disk_tx,
-            rx,
-            orchestrator_tx,
+            Arc::new(disk_tx),
+            Arc::new(orchestrator_tx),
         );
 
         assert!(!worker.state.peer_interested);
@@ -1116,14 +1062,12 @@ mod test {
         let (io_wtx, _) = tokio::sync::mpsc::channel(1);
         let (disk_tx, _) = tokio::sync::mpsc::channel(1);
         let (orchestrator_tx, _) = tokio::sync::mpsc::channel(1);
-        let (_, rx) = tokio::sync::mpsc::channel(1);
 
         let mut worker = Worker::new(
             "worker-id".to_string(),
             io_wtx,
-            disk_tx,
-            rx,
-            orchestrator_tx,
+            Arc::new(disk_tx),
+            Arc::new(orchestrator_tx),
         );
 
         worker.state.peer_interested = true;
@@ -1142,10 +1086,14 @@ mod test {
         let (io_wtx, _) = tokio::sync::mpsc::channel(1);
         let (disk_tx, _) = tokio::sync::mpsc::channel(1);
         let (orchestrator_tx, mut orchestrator_rx) = tokio::sync::mpsc::channel(1);
-        let (_, rx) = tokio::sync::mpsc::channel(1);
 
         let worker_id = "worker-id".to_string();
-        let mut worker = Worker::new(worker_id.clone(), io_wtx, disk_tx, rx, orchestrator_tx);
+        let mut worker = Worker::new(
+            worker_id.clone(),
+            io_wtx,
+            Arc::new(disk_tx),
+            Arc::new(orchestrator_tx),
+        );
 
         assert!(!worker.peer_bitfield_received);
 
