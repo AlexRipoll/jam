@@ -1,37 +1,49 @@
 use protocol::piece::Piece;
 
-#[derive(Debug, PartialEq, Eq)]
+// Enum defining all possible commands the Orchestrator can handle
+#[derive(Debug)]
 pub enum Event {
-    Disk(DiskEvent),
-    State(StateEvent),
-    Shutdown,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum DiskEvent {
-    Piece {
-        piece: Piece,
-        assembled_blocks: Vec<u8>,
+    // Peer session related commands
+    SpawnPeerSession {
+        session_id: String,
+        peer_addr: String,
     },
-}
+    PeerSessionEstablished {
+        session_id: String,
+        peer_addr: String,
+    },
+    // Event sent to a peer session to close the connection
+    ShutdownPeerSession {
+        session_id: String,
+    },
+    // Event sent to notify a peer closed the connection
+    PeerSessionClosed {
+        session_id: String,
+    },
+    PeerSessionTimeout {
+        session_id: String,
+    },
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum StateEvent {
+    // Peer communication commands
     PeerBitfield {
-        worker_id: String,
+        session_id: String,
         bitfield: Vec<u8>,
     },
     PeerHave {
-        worker_id: String,
+        session_id: String,
         piece_index: u32,
     },
-    RequestPiece(Piece),
-    UnassignPiece(u32),
-    CorruptedPiece {
-        piece_index: u32,
-        worker_id: String,
+
+    // Piece management commands
+    PieceDispatch {
+        session_id: String,
+        piece: Piece,
     },
-    UnassignPieces(Vec<u32>),
-    CompletedPiece(u32),
-    Shutdown(String),
+    PieceCompleted(u32),
+    PieceUnassign(u32),
+    PieceUnassignMany(Vec<u32>),
+    PieceCorrupted {
+        session_id: String,
+        piece_index: u32,
+    },
 }
