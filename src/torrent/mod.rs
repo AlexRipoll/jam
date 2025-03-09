@@ -1,3 +1,4 @@
+mod disk;
 mod events;
 pub mod metainfo;
 mod monitor;

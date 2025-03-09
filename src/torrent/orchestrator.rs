@@ -8,9 +8,10 @@ use protocol::piece::Piece;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::debug;
 
-use crate::torrent::peers::PeerSession;
+use crate::torrent::{disk::DiskWriterCommand, peers::PeerSession};
 
 use super::{
+    disk::DiskWriter,
     events::Event,
     monitor::{Monitor, MonitorCommand},
     peer::Peer,
@@ -35,6 +36,10 @@ pub struct Orchestrator {
     queue_capacity: usize,
     pieces: HashMap<u32, Piece>,
     peers: VecDeque<Peer>,
+    // File information needed for DiskWriter
+    download_path: String,
+    file_size: u64,
+    pieces_size: u64,
 }
 
 impl Orchestrator {
@@ -43,6 +48,9 @@ impl Orchestrator {
         queue_capacity: usize,
         pieces: HashMap<u32, Piece>,
         peers: VecDeque<Peer>,
+        download_path: String,
+        file_size: u64,
+        pieces_size: u64,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel(100);
 
@@ -57,6 +65,9 @@ impl Orchestrator {
             queue_capacity,
             pieces,
             peers,
+            download_path,
+            file_size,
+            pieces_size,
         }
     }
 
@@ -84,11 +95,23 @@ impl Orchestrator {
         // Start the monitor
         let (monitor_tx, monitor_handle) = monitor.run();
 
+        // Initialize the disk writer
+        let disk_writer = DiskWriter::new(
+            self.download_path.clone(),
+            self.file_size,
+            self.pieces_size,
+            self.pieces.clone(),
+            Arc::clone(&self.event_tx),
+        );
+
+        let (disk_tx, disk_handle) = disk_writer.run();
+
         // Orchestrator task
         let orchestrator_handle = tokio::spawn(async move {
             // Store handles to ensure they're dropped properly when orchestrator_handle completes
             let _sync_handle = sync_handle;
             let _monitor_handle = monitor_handle;
+            let _disk_handle = disk_handle;
 
             while let Some(event) = self.event_rx.recv().await {
                 match event {
@@ -163,7 +186,12 @@ impl Orchestrator {
                             })
                             .await;
                     }
-                    Event::PieceCompleted(piece_index) => {
+                    Event::PieceAssembled { piece_index, data } => {
+                        let _ = disk_tx
+                            .send(DiskWriterCommand::WritePiece { piece_index, data })
+                            .await;
+                    }
+                    Event::PieceCompleted { piece_index } => {
                         let _ = sync_tx
                             .send(SynchronizerCommand::MarkPieceComplete(piece_index))
                             .await;
@@ -196,6 +224,12 @@ impl Orchestrator {
                     }
                     Event::PeerSessionTimeout { session_id } => {
                         // TODO: remove peer channels and send shutdown event
+                    }
+                    Event::DiskStats { response_channel } => {
+                        // Forward the request to the DiskWriter component
+                        let _ = disk_tx
+                            .send(DiskWriterCommand::QueryStats(response_channel))
+                            .await;
                     }
                 }
             }
