@@ -7,7 +7,7 @@ use std::{
 use protocol::{bitfield::Bitfield, piece::Piece};
 use tokio::{sync::mpsc, task::JoinHandle};
 
-use super::events::Event;
+use crate::torrent::events::Event;
 
 #[derive(Debug)]
 pub struct Synchronizer {

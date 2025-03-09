@@ -8,13 +8,11 @@ use protocol::piece::Piece;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::debug;
 
-use crate::torrent::{disk::DiskWriterCommand, peers::PeerSession};
+use crate::torrent::{core::disk::DiskWriterCommand, events::Event, peer::Peer};
 
 use super::{
     disk::DiskWriter,
-    events::Event,
     monitor::{Monitor, MonitorCommand},
-    peer::Peer,
     sync::{Synchronizer, SynchronizerCommand},
 };
 

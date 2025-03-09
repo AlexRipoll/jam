@@ -7,7 +7,7 @@ use std::{
 use tokio::{sync::mpsc, task::JoinHandle, time::Instant};
 use uuid::Uuid;
 
-use super::{events::Event, peer::Peer};
+use crate::torrent::{events::Event, peer::Peer};
 
 #[derive(Debug)]
 pub enum MonitorCommand {
