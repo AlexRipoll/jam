@@ -1,7 +1,7 @@
 use protocol::piece::Piece;
 use tokio::sync::mpsc;
 
-use super::disk::DiskWriterStats;
+use super::core::disk::DiskWriterStats;
 
 // Enum defining all possible commands the Orchestrator can handle
 #[derive(Debug)]
