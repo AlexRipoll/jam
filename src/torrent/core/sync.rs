@@ -594,6 +594,106 @@ impl Synchronizer {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol::{bitfield::Bitfield, piece::Piece};
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+    };
+    use tokio::{sync::mpsc, test as async_test};
+
+    // Helper function to create test pieces map
+    fn create_pieces_hashmap(count: u32, size: usize) -> HashMap<u32, Piece> {
+        let mut pieces = HashMap::new();
+        for i in 0..count {
+            pieces.insert(i, Piece::new(i, size, [i as u8; 20]));
+        }
+        pieces
+    }
+
+    // Helper function to create a bitfield with specific pieces set
+    fn create_bitfield(total: usize, set_indices: &[usize]) -> Vec<u8> {
+        let mut bitfield = Bitfield::new(total);
+        for &idx in set_indices {
+            bitfield.set_piece(idx);
+        }
+
+        bitfield.bytes
+    }
+
+    #[async_test]
+    async fn test_new_synchronizer() {
+        let pieces = create_pieces_hashmap(10, 16834);
+        let (event_tx, _) = mpsc::channel(100);
+        let event_tx = Arc::new(event_tx);
+
+        let sync = Synchronizer::new(pieces, 5, event_tx);
+
+        assert_eq!(sync.pieces.len(), 10);
+        assert_eq!(sync.queue_capacity, 5);
+        assert_eq!(sync.bitfield.total_pieces, 10);
+        assert!(sync.active_sessions.is_empty());
+        assert!(sync.peers_bitfield.is_empty());
+        assert_eq!(sync.pieces_rarity.len(), 10);
+        assert!(sync.pending_pieces.is_empty());
+        assert!(sync.assigned_pieces.is_empty());
+        assert!(sync.workers_pending_pieces.is_empty());
+        assert!(!sync.dispatch_in_progress);
+    }
+
+    #[async_test]
+    async fn test_process_bitfield() {
+        let total_pieces = 14;
+        let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
+        let (event_tx, _) = mpsc::channel(100);
+        let event_tx = Arc::new(event_tx);
+
+        let mut sync = Synchronizer::new(pieces.clone(), 5, event_tx);
+
+        // Create a peer that has pieces 0, 1, 2, 5, 8
+        let peer_bitfield = create_bitfield(total_pieces, &[0, 1, 2, 5, 8]);
+
+        sync.process_bitfield("peer1", Bitfield::from(&peer_bitfield, total_pieces));
+
+        // Verify worker was added
+        assert!(sync.workers_pending_pieces.contains_key("peer1"));
+        assert!(sync.peers_bitfield.contains_key("peer1"));
+
+        // Verify the rarity of pieces
+        assert_eq!(sync.pieces_rarity[0], 1);
+        assert_eq!(sync.pieces_rarity[1], 1);
+        assert_eq!(sync.pieces_rarity[2], 1);
+        assert_eq!(sync.pieces_rarity[3], 0);
+        assert_eq!(sync.pieces_rarity[5], 1);
+        assert_eq!(sync.pieces_rarity[8], 1);
+
+        // Verify pending pieces are populated and sorted (rarest first)
+        assert_eq!(sync.pending_pieces.len(), 5);
+        assert_eq!(sync.pending_pieces, vec![0, 1, 2, 5, 8]);
+
+        // Add another peer with some overlapping pieces
+        let peer2_bitfield = create_bitfield(total_pieces, &[0, 3, 5, 7, 9]);
+        sync.process_bitfield("peer2", Bitfield::from(&peer2_bitfield, total_pieces));
+
+        // Verify the rarity updated correctly
+        assert_eq!(sync.pieces_rarity[0], 2); // Both peers have piece 0
+        assert_eq!(sync.pieces_rarity[1], 1);
+        assert_eq!(sync.pieces_rarity[2], 1);
+        assert_eq!(sync.pieces_rarity[3], 1);
+        assert_eq!(sync.pieces_rarity[5], 2); // Both peers have piece 5
+        assert_eq!(sync.pieces_rarity[7], 1);
+        assert_eq!(sync.pieces_rarity[8], 1);
+        assert_eq!(sync.pieces_rarity[9], 1);
+
+        // Verify pending pieces list is updated
+        assert_eq!(sync.pending_pieces.len(), 8);
+        assert_eq!(sync.pending_pieces, vec![1, 2, 3, 7, 8, 9, 0, 5,]);
+    }
+}
+
 //
 // #[cfg(test)]
 // mod test {
