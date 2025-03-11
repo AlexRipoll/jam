@@ -814,6 +814,36 @@ mod tests {
     }
 
     #[test]
+    fn test_has_concluded() {
+        let total_pieces = 8;
+        let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
+        let (event_tx, _) = mpsc::channel(100);
+        let event_tx = Arc::new(event_tx);
+
+        let mut sync = Synchronizer::new(pieces.clone(), 5, event_tx);
+
+        // Create a peer bitfield with pieces 0, 1, 2
+        let peer_bitfield =
+            Bitfield::from(&create_bitfield(total_pieces, &[0, 1, 2]), total_pieces);
+
+        // Initially we have no pieces, so we haven't concluded
+        assert!(!sync.has_concluded(&peer_bitfield));
+
+        // Mark piece 0 and 1 as complete
+        sync.bitfield.set_piece(0);
+        sync.bitfield.set_piece(1);
+
+        // We still need piece 2, so not concluded
+        assert!(!sync.has_concluded(&peer_bitfield));
+
+        // Mark the last piece as complete
+        sync.bitfield.set_piece(2);
+
+        // Now we should have concluded with this peer (got all their pieces)
+        assert!(sync.has_concluded(&peer_bitfield));
+    }
+
+    #[test]
     fn test_download_progress_percent() {
         let total_pieces = 10;
         let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
