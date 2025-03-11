@@ -644,8 +644,8 @@ mod tests {
         assert!(!sync.dispatch_in_progress);
     }
 
-    #[async_test]
-    async fn test_process_bitfield() {
+    #[test]
+    fn test_process_bitfield() {
         let total_pieces = 14;
         let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
         let (event_tx, _) = mpsc::channel(100);
@@ -691,6 +691,50 @@ mod tests {
         // Verify pending pieces list is updated
         assert_eq!(sync.pending_pieces.len(), 8);
         assert_eq!(sync.pending_pieces, vec![1, 2, 3, 7, 8, 9, 0, 5,]);
+    }
+
+    #[test]
+    fn test_mark_piece_complete() {
+        let pieces = create_pieces_hashmap(8, 16384);
+        let (event_tx, _) = mpsc::channel(100);
+        let event_tx = Arc::new(event_tx);
+
+        let mut sync = Synchronizer::new(pieces.clone(), 5, event_tx);
+
+        // Set up initial state with a peer having all pieces
+        let peer_bitfield = create_bitfield(8, &[0, 1, 2, 3, 4, 5, 6, 7]);
+        sync.process_bitfield("peer1", Bitfield::from(&peer_bitfield, 8));
+
+        // Mark some pieces as assigned
+        sync.assigned_pieces.insert(1);
+        sync.assigned_pieces.insert(3);
+
+        // Mark worker as having piece 1 pending
+        sync.workers_pending_pieces
+            .entry("peer1".to_string())
+            .or_default()
+            .push(1);
+
+        // Verify the piece is still not marked in bitfield
+        assert!(!sync.bitfield.has_piece(1));
+
+        // Now mark piece 1 as complete
+        sync.mark_piece_complete(1);
+
+        // Verify the piece is marked in bitfield
+        assert!(sync.bitfield.has_piece(1));
+
+        // Verify the piece is removed from assigned pieces
+        assert!(!sync.assigned_pieces.contains(&1));
+
+        // Verify piece rarity is set to 0
+        assert_eq!(sync.pieces_rarity[1], 0);
+
+        // Verify piece is removed from worker's pending list
+        assert!(!sync.workers_pending_pieces["peer1"].contains(&1));
+
+        // Verify piece is removed from pending pieces
+        assert!(!sync.pending_pieces.contains(&1));
     }
 }
 
