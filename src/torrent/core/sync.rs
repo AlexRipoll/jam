@@ -16,6 +16,7 @@ pub struct Synchronizer {
     // Bitfield of the downloaded pieces
     pub bitfield: Bitfield,
 
+    // FIX: check if necessary
     // Tracking active peer sessions
     active_sessions: HashSet<String>,
 
@@ -699,7 +700,7 @@ mod tests {
         let (event_tx, _) = mpsc::channel(100);
         let event_tx = Arc::new(event_tx);
 
-        let mut sync = Synchronizer::new(pieces.clone(), 5, event_tx);
+        let mut sync = Synchronizer::new(pieces, 5, event_tx);
 
         // Set up initial state with a peer having all pieces
         let peer_bitfield = create_bitfield(8, &[0, 1, 2, 3, 4, 5, 6, 7]);
@@ -744,7 +745,7 @@ mod tests {
         let (event_tx, _) = mpsc::channel(100);
         let event_tx = Arc::new(event_tx);
 
-        let mut sync = Synchronizer::new(pieces.clone(), 5, event_tx);
+        let mut sync = Synchronizer::new(pieces, 5, event_tx);
 
         // Create a peer bitfield with some pieces
         let peer_bitfield =
@@ -767,6 +768,86 @@ mod tests {
             total_pieces,
         );
         assert!(sync.has_missing_pieces(&peer2_bitfield));
+    }
+
+    #[test]
+    fn test_close_session() {
+        let total_pieces = 10;
+        let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
+        let (event_tx, _) = mpsc::channel(100);
+        let event_tx = Arc::new(event_tx);
+
+        let mut sync = Synchronizer::new(pieces, 5, event_tx);
+
+        // Set up a peer with some bitfield
+        let peer_bitfield =
+            Bitfield::from(&create_bitfield(total_pieces, &[0, 1, 2, 9]), total_pieces);
+        sync.peers_bitfield
+            .insert("peer1".to_string(), peer_bitfield);
+        sync.active_sessions.insert("peer1".to_string());
+
+        // Assign some pieces to the peer
+        let mut peer_pieces = Vec::new();
+        peer_pieces.push(1);
+        peer_pieces.push(2);
+        sync.workers_pending_pieces
+            .insert("peer1".to_string(), peer_pieces);
+
+        // Mark these pieces as assigned
+        sync.assigned_pieces.insert(1);
+        sync.assigned_pieces.insert(2);
+
+        // Close the session
+        sync.close_session("peer1".to_string());
+
+        // Verify the session is removed
+        assert!(!sync.active_sessions.contains("peer1"));
+        assert!(!sync.peers_bitfield.contains_key("peer1"));
+        assert!(!sync.workers_pending_pieces.contains_key("peer1"));
+
+        // Verify the pieces are unassigned
+        assert!(!sync.assigned_pieces.contains(&1));
+        assert!(!sync.assigned_pieces.contains(&2));
+        // Verify the pieces are in the pending pieces list
+        assert!(!sync.pending_pieces.contains(&1));
+        assert!(!sync.pending_pieces.contains(&2));
+    }
+
+    #[test]
+    fn test_download_progress_percent() {
+        let total_pieces = 10;
+        let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
+        let (event_tx, _) = mpsc::channel(100);
+        let event_tx = Arc::new(event_tx);
+
+        let mut sync = Synchronizer::new(pieces, 5, event_tx);
+
+        // No pieces downloaded yet
+        assert_eq!(sync.download_progress_percent(), 0);
+
+        // Mark 3 pieces as complete
+        for i in 0..3 {
+            sync.bitfield.set_piece(i);
+        }
+
+        // Should be 30% complete
+        assert_eq!(sync.download_progress_percent(), 30);
+
+        // Mark 2 more pieces as complete
+        for i in 3..5 {
+            sync.bitfield.set_piece(i);
+        }
+
+        // Should be 50% complete
+        assert_eq!(sync.download_progress_percent(), 50);
+
+        // Mark all remaining pieces as complete
+        for i in 5..total_pieces {
+            sync.bitfield.set_piece(i);
+        }
+
+        // Should be 100% complete
+        assert_eq!(sync.download_progress_percent(), 100);
     }
 }
 
