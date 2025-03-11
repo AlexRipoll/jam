@@ -736,6 +736,38 @@ mod tests {
         // Verify piece is removed from pending pieces
         assert!(!sync.pending_pieces.contains(&1));
     }
+
+    #[test]
+    fn test_has_missing_pieces() {
+        let total_pieces = 14;
+        let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
+        let (event_tx, _) = mpsc::channel(100);
+        let event_tx = Arc::new(event_tx);
+
+        let mut sync = Synchronizer::new(pieces.clone(), 5, event_tx);
+
+        // Create a peer bitfield with some pieces
+        let peer_bitfield =
+            Bitfield::from(&create_bitfield(total_pieces, &[0, 1, 2, 3]), total_pieces);
+
+        // Initially we have no pieces, so the peer has pieces we're missing
+        assert!(sync.has_missing_pieces(&peer_bitfield));
+
+        // Mark all pieces as complete
+        for i in 0..4 {
+            sync.bitfield.set_piece(i);
+        }
+
+        // We should have no missing pieces from this peer
+        assert!(!sync.has_missing_pieces(&peer_bitfield));
+
+        // A different peer with a new piece should be detected as having missing pieces
+        let peer2_bitfield = Bitfield::from(
+            &create_bitfield(total_pieces, &[0, 1, 2, 3, 9]),
+            total_pieces,
+        );
+        assert!(sync.has_missing_pieces(&peer2_bitfield));
+    }
 }
 
 //
