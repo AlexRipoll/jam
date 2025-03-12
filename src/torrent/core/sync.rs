@@ -1108,7 +1108,7 @@ mod tests {
         let (event_tx, _) = mpsc::channel(100);
         let event_tx = Arc::new(event_tx);
 
-        let mut sync = Synchronizer::new(pieces.clone(), 5, event_tx);
+        let mut sync = Synchronizer::new(pieces, 5, event_tx);
 
         // Set up pending pieces
         sync.pending_pieces = vec![0, 1, 2, 3, 4];
@@ -1144,7 +1144,7 @@ mod tests {
         let (event_tx, _) = mpsc::channel(100);
         let event_tx = Arc::new(event_tx);
 
-        let mut sync = Synchronizer::new(pieces.clone(), 5, event_tx);
+        let mut sync = Synchronizer::new(pieces, 5, event_tx);
 
         // All pieces initially have rarity 0
         assert_eq!(sync.pieces_rarity, vec![0, 0, 0, 0, 0, 0, 0, 0]);
@@ -1200,6 +1200,30 @@ mod tests {
         // 0 count pieces should be excluded
         // For equal rarity, sort by index
         assert_eq!(sorted, vec![1, 4, 3, 7, 0, 6]);
+    }
+
+    #[test]
+    fn test_populate_queue() {
+        let pieces = create_pieces_hashmap(8, 16384);
+        let (event_tx, _) = mpsc::channel(100);
+        let event_tx = Arc::new(event_tx);
+
+        let mut sync = Synchronizer::new(pieces, 5, event_tx);
+
+        // Initial queue is empty
+        assert!(sync.pending_pieces.is_empty());
+
+        // Populate queue
+        sync.populate_queue(vec![3, 1, 4, 2]);
+
+        // Verify queue has been populated
+        assert_eq!(sync.pending_pieces, vec![3, 1, 4, 2]);
+
+        // Populate queue again (should clear previous entries)
+        sync.populate_queue(vec![5, 0]);
+
+        // Verify queue has been updated
+        assert_eq!(sync.pending_pieces, vec![5, 0]);
     }
 
     #[test]
