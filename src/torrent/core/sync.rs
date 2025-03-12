@@ -952,6 +952,35 @@ mod tests {
     }
 
     #[test]
+    fn test_downloaded_pieces_count() {
+        let total_pieces = 16;
+        let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
+        let (event_tx, _) = mpsc::channel(100);
+        let event_tx = Arc::new(event_tx);
+
+        let mut sync = Synchronizer::new(pieces.clone(), 5, event_tx);
+
+        // Initially no pieces downloaded
+        assert_eq!(sync.downloaded_pieces_count(), 0);
+
+        // Set some pieces as downloaded
+        sync.bitfield.set_piece(0);
+        sync.bitfield.set_piece(5);
+        sync.bitfield.set_piece(10);
+        sync.bitfield.set_piece(15);
+
+        // Should have 4 pieces downloaded
+        assert_eq!(sync.downloaded_pieces_count(), 4);
+
+        // Set more pieces
+        sync.bitfield.set_piece(2);
+        sync.bitfield.set_piece(3);
+
+        // Should have 6 pieces downloaded
+        assert_eq!(sync.downloaded_pieces_count(), 6);
+    }
+
+    #[test]
     fn test_download_progress_percent() {
         let total_pieces = 10;
         let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
