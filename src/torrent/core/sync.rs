@@ -1139,6 +1139,70 @@ mod tests {
     }
 
     #[test]
+    fn test_increase_pieces_rarity() {
+        let pieces = create_pieces_hashmap(8, 16384);
+        let (event_tx, _) = mpsc::channel(100);
+        let event_tx = Arc::new(event_tx);
+
+        let mut sync = Synchronizer::new(pieces.clone(), 5, event_tx);
+
+        // All pieces initially have rarity 0
+        assert_eq!(sync.pieces_rarity, vec![0, 0, 0, 0, 0, 0, 0, 0]);
+
+        // Create a bitfield with pieces 0, 2, 4, 6
+        let bitfield = Bitfield::from(&create_bitfield(8, &[0, 2, 4, 6]), 8);
+
+        // Increase rarity
+        sync.increase_pieces_rarity(&bitfield);
+
+        // Verify rarity is increased for pieces in bitfield
+        assert_eq!(sync.pieces_rarity[0], 1);
+        assert_eq!(sync.pieces_rarity[1], 0);
+        assert_eq!(sync.pieces_rarity[2], 1);
+        assert_eq!(sync.pieces_rarity[3], 0);
+        assert_eq!(sync.pieces_rarity[4], 1);
+        assert_eq!(sync.pieces_rarity[5], 0);
+        assert_eq!(sync.pieces_rarity[6], 1);
+        assert_eq!(sync.pieces_rarity[7], 0);
+
+        // Create another bitfield with pieces 0, 1, 2, 3
+        let bitfield2 = Bitfield::from(&create_bitfield(8, &[0, 1, 2, 3]), 8);
+
+        // Increase rarity again
+        sync.increase_pieces_rarity(&bitfield2);
+
+        // Verify rarity is increased correctly
+        assert_eq!(sync.pieces_rarity[0], 2); // 1 + 1
+        assert_eq!(sync.pieces_rarity[1], 1); // 0 + 1
+        assert_eq!(sync.pieces_rarity[2], 2); // 1 + 1
+        assert_eq!(sync.pieces_rarity[3], 1); // 0 + 1
+        assert_eq!(sync.pieces_rarity[4], 1); // Unchanged
+        assert_eq!(sync.pieces_rarity[5], 0); // Unchanged
+        assert_eq!(sync.pieces_rarity[6], 1); // Unchanged
+        assert_eq!(sync.pieces_rarity[7], 0); // Unchanged
+    }
+
+    #[test]
+    fn test_sort_pieces() {
+        let pieces = create_pieces_hashmap(8, 16384);
+        let (event_tx, _) = mpsc::channel(100);
+        let event_tx = Arc::new(event_tx);
+
+        let mut sync = Synchronizer::new(pieces.clone(), 5, event_tx);
+
+        // Set up pieces rarity
+        sync.pieces_rarity = vec![3, 1, 0, 2, 1, 0, 4, 2];
+
+        // Sort pieces
+        let sorted = sync.sort_pieces();
+
+        // Pieces should be sorted by rarity (rarest first)
+        // 0 count pieces should be excluded
+        // For equal rarity, sort by index
+        assert_eq!(sorted, vec![1, 4, 3, 7, 0, 6]);
+    }
+
+    #[test]
     fn test_remove_worker_pending_piece() {
         let pieces = create_pieces_hashmap(8, 16384);
         let (event_tx, _) = mpsc::channel(100);
