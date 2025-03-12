@@ -981,6 +981,52 @@ mod tests {
     }
 
     #[test]
+    fn test_assign_piece() {
+        let total_pieces = 9;
+        let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
+        let (event_tx, _) = mpsc::channel(100);
+        let event_tx = Arc::new(event_tx);
+
+        let mut sync = Synchronizer::new(pieces.clone(), 5, event_tx);
+
+        // Set up pending pieces
+        sync.pending_pieces = vec![1, 2, 4, 0, 3];
+
+        // Create peer bitfield with pieces 1, 3, 5, 7
+        let peer_bitfield =
+            Bitfield::from(&create_bitfield(total_pieces, &[1, 3, 5, 7]), total_pieces);
+
+        // Assign first piece
+        let piece = sync.assign_piece(&peer_bitfield);
+
+        // Should assign piece 1 (first matching piece in pending_pieces)
+        assert_eq!(piece, Some(1));
+
+        // Verify piece is now assigned
+        assert!(sync.assigned_pieces.contains(&1));
+
+        // Try to assign another piece
+        let piece = sync.assign_piece(&peer_bitfield);
+
+        // Should assign piece 3 (next matching piece)
+        assert_eq!(piece, Some(3));
+
+        // Piece 5 is in peer's bitfield but not in pending_pieces
+        // Piece 0, 2, 4 are in pending_pieces but not in peer's bitfield
+
+        // Mark all pieces as assigned
+        sync.assigned_pieces.insert(0);
+        sync.assigned_pieces.insert(2);
+        sync.assigned_pieces.insert(4);
+
+        // Try to assign when all pieces are assigned
+        let piece = sync.assign_piece(&peer_bitfield);
+
+        // Should not assign any piece
+        assert_eq!(piece, None);
+    }
+
+    #[test]
     fn test_download_progress_percent() {
         let total_pieces = 10;
         let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
