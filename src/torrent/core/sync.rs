@@ -844,6 +844,75 @@ mod tests {
     }
 
     #[test]
+    fn test_assign_pieces_to_workers() {
+        let total_pieces = 11;
+        let mut peers_bitfield = HashMap::new();
+        let mut workers_pending_pieces = HashMap::new();
+        let pending_pieces = vec![0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11];
+        let assigned_pieces = HashSet::from([2]); // Set piece 2 as already assigned
+
+        // Worker1 has pieces 0, 1, 2, 7
+        let worker1_bitfield =
+            Bitfield::from(&create_bitfield(total_pieces, &[0, 1, 2, 7]), total_pieces);
+        peers_bitfield.insert("worker1".to_string(), worker1_bitfield);
+        workers_pending_pieces.insert("worker1".to_string(), vec![]);
+
+        // Worker2 has pieces 1, 2, 3, 9, 11
+        let worker2_bitfield = Bitfield::from(
+            &create_bitfield(total_pieces, &[1, 2, 3, 6, 9, 11]),
+            total_pieces,
+        );
+        peers_bitfield.insert("worker2".to_string(), worker2_bitfield);
+        workers_pending_pieces.insert("worker2".to_string(), vec![6]); // Already has one piece assigned
+
+        // Worker3 has pieces 0, 3, 5, 7, 10
+        let worker3_bitfield = Bitfield::from(
+            &create_bitfield(total_pieces, &[0, 3, 4, 5, 7, 10]),
+            total_pieces,
+        );
+        peers_bitfield.insert("worker3".to_string(), worker3_bitfield);
+        workers_pending_pieces.insert("worker1".to_string(), vec![4, 5]);
+
+        // Call the function
+        let assignments = Synchronizer::assign_pieces_to_workers(
+            &peers_bitfield,
+            &workers_pending_pieces,
+            &pending_pieces,
+            &assigned_pieces,
+        );
+
+        // Verify assignments
+        assert!(assignments.contains_key("worker1"));
+        assert!(assignments.contains_key("worker2"));
+        assert!(assignments.contains_key("worker3"));
+
+        // Check distribution is fair - since worker1 has 0 pending pieces, it should get assigned first
+        let worker1_assignments = assignments.get("worker1").unwrap();
+        let worker2_assignments = assignments.get("worker2").unwrap();
+        let worker3_assignments = assignments.get("worker3").unwrap();
+
+        // Worker1 should have pieces 7
+        assert!(worker1_assignments.contains(&7));
+
+        // Worker2 should have pieces 1, 6, 9, 11
+        assert!(worker2_assignments.contains(&1));
+        assert!(worker2_assignments.contains(&6));
+        assert!(worker2_assignments.contains(&9));
+        assert!(worker2_assignments.contains(&11));
+
+        // Worker3 should have pieces 0, 3, 4, 5, 10
+        assert!(worker3_assignments.contains(&0));
+        assert!(worker3_assignments.contains(&3));
+        assert!(worker3_assignments.contains(&4));
+        assert!(worker3_assignments.contains(&5));
+        assert!(worker3_assignments.contains(&10));
+
+        // Piece 2 should not be assigned to anyone as it's already assigned
+        assert!(!worker1_assignments.contains(&2));
+        assert!(!worker2_assignments.contains(&2));
+    }
+
+    #[test]
     fn test_download_progress_percent() {
         let total_pieces = 10;
         let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
