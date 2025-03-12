@@ -1103,6 +1103,72 @@ mod tests {
     }
 
     #[test]
+    fn test_remove_pending_piece() {
+        let pieces = create_pieces_hashmap(8, 16384);
+        let (event_tx, _) = mpsc::channel(100);
+        let event_tx = Arc::new(event_tx);
+
+        let mut sync = Synchronizer::new(pieces.clone(), 5, event_tx);
+
+        // Set up pending pieces
+        sync.pending_pieces = vec![0, 1, 2, 3, 4];
+
+        // Remove piece 2
+        sync.remove_pending_piece(2);
+
+        // Verify piece is removed
+        assert_eq!(sync.pending_pieces, vec![0, 1, 3, 4]);
+
+        // Remove piece 0 (first in list)
+        sync.remove_pending_piece(0);
+
+        // Verify piece is removed
+        assert_eq!(sync.pending_pieces, vec![1, 3, 4]);
+
+        // Remove piece 4 (last in list)
+        sync.remove_pending_piece(4);
+
+        // Verify piece is removed
+        assert_eq!(sync.pending_pieces, vec![1, 3]);
+
+        // Remove a piece that's not in the list
+        sync.remove_pending_piece(5);
+
+        // List should not change
+        assert_eq!(sync.pending_pieces, vec![1, 3]);
+    }
+
+    #[test]
+    fn test_remove_worker_pending_piece() {
+        let pieces = create_pieces_hashmap(8, 16384);
+        let (event_tx, _) = mpsc::channel(100);
+        let event_tx = Arc::new(event_tx);
+
+        let mut sync = Synchronizer::new(pieces, 5, event_tx);
+
+        // Set up worker pending pieces
+        sync.workers_pending_pieces
+            .insert("worker1".to_string(), vec![1, 3, 5]);
+        sync.workers_pending_pieces
+            .insert("worker2".to_string(), vec![2, 4, 6]);
+
+        // Remove piece 3 from worker1
+        sync.remove_worker_pending_piece(3);
+
+        // Verify piece is removed from worker1
+        assert_eq!(sync.workers_pending_pieces["worker1"], vec![1, 5]);
+
+        // Verify worker2 is unaffected
+        assert_eq!(sync.workers_pending_pieces["worker2"], vec![2, 4, 6]);
+
+        // Remove piece 6 from worker2
+        sync.remove_worker_pending_piece(6);
+
+        // Verify piece is removed from worker2
+        assert_eq!(sync.workers_pending_pieces["worker2"], vec![2, 4]);
+    }
+
+    #[test]
     fn test_download_progress_percent() {
         let total_pieces = 10;
         let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
