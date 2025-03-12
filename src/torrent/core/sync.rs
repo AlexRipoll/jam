@@ -913,6 +913,45 @@ mod tests {
     }
 
     #[test]
+    fn test_build_interested_pieces_bitfield() {
+        let total_pieces = 13;
+        let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
+        let (event_tx, _) = mpsc::channel(100);
+        let event_tx = Arc::new(event_tx);
+
+        let mut sync = Synchronizer::new(pieces.clone(), 5, event_tx);
+
+        // Set up state bitfield with pieces 0, 2, 4 completed
+        sync.bitfield.set_piece(0);
+        sync.bitfield.set_piece(2);
+        sync.bitfield.set_piece(4);
+
+        // Create peer bitfield with pieces 0, 1, 2, 3, 5, 9, 12
+        let peer_bitfield = Bitfield::from(
+            &create_bitfield(total_pieces, &[0, 1, 2, 3, 5, 9, 12]),
+            total_pieces,
+        );
+
+        // Build interested pieces bitfield
+        let interested = sync.build_interested_pieces_bitfield(&peer_bitfield);
+
+        // Verify interested pieces are 1, 3, 5 (peer has them, we don't)
+        assert!(!interested.has_piece(0)); // We already have piece 0
+        assert!(interested.has_piece(1)); // We need piece 1
+        assert!(!interested.has_piece(2)); // We already have piece 2
+        assert!(interested.has_piece(3)); // We need piece 3
+        assert!(!interested.has_piece(4)); // Peer doesn't have piece 4
+        assert!(interested.has_piece(5)); // We need piece 5
+        assert!(!interested.has_piece(6)); // Neither has piece 6
+        assert!(!interested.has_piece(7)); // Neither has piece 7
+        assert!(!interested.has_piece(8)); // Neither has piece 8
+        assert!(interested.has_piece(9)); // We need piece 9
+        assert!(!interested.has_piece(10)); // Neither has piece 10
+        assert!(!interested.has_piece(11)); // Neither has piece 11
+        assert!(interested.has_piece(12)); // We need piece 12
+    }
+
+    #[test]
     fn test_download_progress_percent() {
         let total_pieces = 10;
         let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
