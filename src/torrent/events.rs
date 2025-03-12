@@ -50,8 +50,14 @@ pub enum Event {
     PieceCompleted {
         piece_index: u32,
     },
-    PieceUnassign(u32),
-    PieceUnassignMany(Vec<u32>),
+    PieceUnassign {
+        session_id: String,
+        piece_index: u32,
+    },
+    PieceUnassignMany {
+        session_id: String,
+        pieces_index: Vec<u32>,
+    },
     PieceCorrupted {
         session_id: String,
         piece_index: u32,

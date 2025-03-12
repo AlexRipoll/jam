@@ -8,7 +8,7 @@ use std::{collections::HashMap, usize};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use crate::torrent::events::{DiskEvent, Event, StateEvent};
+use crate::torrent::events::Event;
 
 use protocol::message::{Message, MessageId, PiecePayload, TransferPayload};
 use protocol::piece::Piece;
@@ -22,7 +22,7 @@ pub struct Worker {
     peer_bitfield_received: bool,
     download_status: DownloadStatus,
     io_wtx: mpsc::Sender<Message>,
-    disk_tx: Arc<mpsc::Sender<DiskEvent>>,
+    disk_tx: Arc<mpsc::Sender<Event>>,
     orchestrator_tx: Arc<mpsc::Sender<Event>>,
 }
 
@@ -73,7 +73,7 @@ impl Worker {
     pub fn new(
         id: String,
         io_wtx: mpsc::Sender<Message>,
-        disk_tx: Arc<mpsc::Sender<DiskEvent>>,
+        disk_tx: Arc<mpsc::Sender<Event>>,
         orchestrator_tx: Arc<mpsc::Sender<Event>>,
     ) -> Self {
         Self {
@@ -120,7 +120,10 @@ impl Worker {
             .remove(&piece_index);
 
         self.orchestrator_tx
-            .send(Event::State(StateEvent::UnassignPiece(piece_index)))
+            .send(Event::PieceUnassign {
+                session_id: self.id.clone(),
+                piece_index,
+            })
             .await
     }
 
@@ -133,7 +136,10 @@ impl Worker {
             .map(|p| p.index())
             .collect();
         self.orchestrator_tx
-            .send(Event::State(StateEvent::UnassignPieces(piece_indexes)))
+            .send(Event::PieceUnassignMany {
+                session_id: self.id.clone(),
+                pieces_index: piece_indexes,
+            })
             .await?;
         self.download_status.in_progress.clear();
         self.download_status.in_progress_timestamps.clear();
@@ -223,10 +229,10 @@ impl Worker {
 
                 self.peer_bitfield_received = true;
                 self.orchestrator_tx
-                    .send(Event::State(StateEvent::PeerBitfield {
-                        worker_id: self.id.clone(),
+                    .send(Event::PeerBitfield {
+                        session_id: self.id.clone(),
                         bitfield,
-                    }))
+                    })
                     .await?;
             }
             MessageId::Request => {
@@ -254,10 +260,10 @@ impl Worker {
         let piece_index = u32::from_be_bytes(piece_index_be) as usize;
 
         self.orchestrator_tx
-            .send(Event::State(StateEvent::PeerHave {
-                worker_id: self.id.clone(),
+            .send(Event::PeerHave {
+                session_id: self.id.clone(),
                 piece_index: piece_index as u32,
-            }))
+            })
             .await?;
 
         Ok(())
@@ -290,9 +296,9 @@ impl Worker {
             if is_valid_piece(piece.hash(), &assembled_blocks) {
                 debug!(piece_index= ?payload.index, "Piece hash verified. Sending to disk");
                 self.disk_tx
-                    .send(DiskEvent::Piece {
-                        piece: piece.clone(),
-                        assembled_blocks,
+                    .send(Event::PieceAssembled {
+                        piece_index: piece.index(),
+                        data: assembled_blocks,
                     })
                     .await?;
 
@@ -300,18 +306,13 @@ impl Worker {
                 self.download_status
                     .in_progress
                     .retain(|p| p.index() != piece.index());
-
-                // FIX: piece completion should be sent by the disk service
-                self.orchestrator_tx
-                    .send(Event::State(StateEvent::CompletedPiece(piece.index())))
-                    .await?;
             } else {
                 warn!(piece_index= ?payload.index, "Piece hash verification failed");
                 self.orchestrator_tx
-                    .send(Event::State(StateEvent::CorruptedPiece {
+                    .send(Event::PieceCorrupted {
+                        session_id: self.id.clone(),
                         piece_index: piece.index(),
-                        worker_id: self.id.clone(),
-                    }))
+                    })
                     .await?;
 
                 return Err(WorkerError::CorruptedPiece(piece.index()));
@@ -387,7 +388,7 @@ pub enum WorkerError {
     CorruptedPiece(u32),
     EventTxError(mpsc::error::SendError<Event>),
     MessageTxError(mpsc::error::SendError<Message>),
-    DiskEventTxError(mpsc::error::SendError<DiskEvent>),
+    DiskEventTxError(mpsc::error::SendError<Event>),
 }
 
 impl Display for WorkerError {
@@ -430,11 +431,11 @@ impl From<mpsc::error::SendError<Message>> for WorkerError {
     }
 }
 
-impl From<mpsc::error::SendError<DiskEvent>> for WorkerError {
-    fn from(err: mpsc::error::SendError<DiskEvent>) -> Self {
-        WorkerError::DiskEventTxError(err)
-    }
-}
+// impl From<mpsc::error::SendError<Event>> for WorkerError {
+//     fn from(err: mpsc::error::SendError<Event>) -> Self {
+//         WorkerError::DiskEventTxError(err)
+//     }
+// }
 
 impl Error for WorkerError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
@@ -461,9 +462,12 @@ mod test {
     };
     use tokio::time::timeout;
 
-    use crate::torrent::{
-        events::{Event, StateEvent},
-        peers::worker::{Worker, MAX_STRIKES},
+    use crate::{
+        session,
+        torrent::{
+            events::Event,
+            peers::worker::{Worker, MAX_STRIKES},
+        },
     };
 
     #[tokio::test]
@@ -667,8 +671,11 @@ mod test {
 
         // Ensure the correct event was sent
         match orchestrator_rx.recv().await {
-            Some(Event::State(StateEvent::UnassignPiece(index))) => {
-                assert_eq!(index, 1);
+            Some(Event::PieceUnassign {
+                session_id,
+                piece_index,
+            }) => {
+                assert_eq!(piece_index, 1);
             }
             _ => {
                 panic!("Expected `UnassignPiece` event was not received");
@@ -719,8 +726,11 @@ mod test {
 
         // Ensure the correct event was sent
         match orchestrator_rx.recv().await {
-            Some(Event::State(StateEvent::UnassignPiece(index))) => {
-                assert_eq!(index, 1);
+            Some(Event::PieceUnassign {
+                session_id,
+                piece_index,
+            }) => {
+                assert_eq!(piece_index, 1);
             }
             _ => {
                 panic!("Expected `UnassignPiece` event was not received");
@@ -768,8 +778,11 @@ mod test {
 
         // Ensure the correct event was sent
         match orchestrator_rx.recv().await {
-            Some(Event::State(StateEvent::UnassignPieces(indexes))) => {
-                assert_eq!(indexes, vec![1, 2, 3]);
+            Some(Event::PieceUnassignMany {
+                session_id,
+                pieces_index,
+            }) => {
+                assert_eq!(pieces_index, vec![1, 2, 3]);
             }
             _ => {
                 panic!("Expected `UnassignPieces` event was not received");
@@ -856,13 +869,16 @@ mod test {
         // Ensure the event is sent
         match orchestrator_rx.recv().await {
             Some(event) => {
-                assert_eq!(
-                    event,
-                    Event::State(StateEvent::PeerHave {
-                        worker_id,
-                        piece_index
-                    })
-                );
+                match event {
+                    Event::PeerHave {
+                        session_id,
+                        piece_index,
+                    } => {
+                        assert_eq!(session_id, worker_id);
+                        assert_eq!(piece_index, piece_index);
+                    }
+                    _ => assert!(false),
+                };
             }
             _ => {
                 panic!("Expected `UnassignPieces` event was not received");
@@ -1097,9 +1113,12 @@ mod test {
 
         assert!(!worker.peer_bitfield_received);
 
-        let bitfield = vec![0b10101010];
+        let bitfield_bytes = vec![0b10101010];
         worker
-            .handle_message(Message::new(MessageId::Bitfield, Some(bitfield.clone())))
+            .handle_message(Message::new(
+                MessageId::Bitfield,
+                Some(bitfield_bytes.clone()),
+            ))
             .await
             .unwrap();
 
@@ -1108,13 +1127,16 @@ mod test {
         // Ensure the event is sent
         match orchestrator_rx.recv().await {
             Some(event) => {
-                assert_eq!(
-                    event,
-                    Event::State(StateEvent::PeerBitfield {
-                        worker_id,
-                        bitfield
-                    })
-                );
+                match event {
+                    Event::PeerBitfield {
+                        session_id,
+                        bitfield,
+                    } => {
+                        assert_eq!(session_id, worker_id);
+                        assert_eq!(bitfield, bitfield_bytes);
+                    }
+                    _ => assert!(false),
+                };
             }
             _ => {
                 panic!("Expected `PeerBitfield` event was not received");

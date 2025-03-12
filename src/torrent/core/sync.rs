@@ -76,8 +76,14 @@ pub enum SynchronizerCommand {
 
     // Piece management commands
     MarkPieceComplete(u32),
-    UnassignPiece(u32),
-    UnassignPieces(Vec<u32>),
+    UnassignPiece {
+        session_id: String,
+        piece_index: u32,
+    },
+    UnassignPieces {
+        session_id: String,
+        pieces_index: Vec<u32>,
+    },
 
     // Query commands (with response channels)
     QueryProgress(mpsc::Sender<u32>),
@@ -220,7 +226,7 @@ impl Synchronizer {
                             .or_insert_with(Vec::new)
                             .push(piece_index);
                         self.assigned_pieces.insert(piece_index);
-                        self.remove_pending_piece(piece_index);
+                        // self.remove_pending_piece(piece_index);
                     }
                     SynchronizerCommand::DispatchCompleted => {
                         self.dispatch_in_progress = false;
@@ -249,7 +255,7 @@ impl Synchronizer {
                                     .await;
                             }
                         } else {
-                            self.close_session(peer_id);
+                            self.close_session(&peer_id);
                             // TODO: send shutdown event to peer
                             // self.self
                             //     .event_tx
@@ -272,11 +278,11 @@ impl Synchronizer {
                         session_id: peer_id,
                         piece_index,
                     } => {
-                        self.unassign_piece(piece_index);
+                        self.unassign_piece(&peer_id, piece_index);
                         // TODO: blacklist worker for this piece index
                     }
-                    SynchronizerCommand::ClosePeerSession(worker_id) => {
-                        self.close_session(worker_id);
+                    SynchronizerCommand::ClosePeerSession(session_id) => {
+                        self.close_session(&session_id);
                         // TODO: send shutdown event to peer
                         // self.self
                         //     .event_tx
@@ -288,11 +294,17 @@ impl Synchronizer {
                     SynchronizerCommand::MarkPieceComplete(piece_index) => {
                         self.mark_piece_complete(piece_index);
                     }
-                    SynchronizerCommand::UnassignPiece(piece_index) => {
-                        self.unassign_piece(piece_index);
+                    SynchronizerCommand::UnassignPiece {
+                        session_id,
+                        piece_index,
+                    } => {
+                        self.unassign_piece(&session_id, piece_index);
                     }
-                    SynchronizerCommand::UnassignPieces(piece_indexes) => {
-                        self.unassign_pieces(piece_indexes);
+                    SynchronizerCommand::UnassignPieces {
+                        session_id,
+                        pieces_index,
+                    } => {
+                        self.unassign_pieces(&session_id, pieces_index);
                     }
                     SynchronizerCommand::QueryProgress(response_tx) => {
                         let progress = self.download_progress_percent();
@@ -428,13 +440,18 @@ impl Synchronizer {
         None
     }
 
-    fn unassign_piece(&mut self, piece_index: u32) {
+    fn unassign_piece(&mut self, session_id: &str, piece_index: u32) {
         self.assigned_pieces.remove(&piece_index);
+        if let Some(pending_pieces) = self.workers_pending_pieces.get_mut(session_id) {
+            if let Some(pos) = pending_pieces.iter().position(|&p| p == piece_index) {
+                pending_pieces.remove(pos);
+            }
+        }
     }
 
-    fn unassign_pieces(&mut self, pieces_index: Vec<u32>) {
+    fn unassign_pieces(&mut self, session_id: &str, pieces_index: Vec<u32>) {
         for piece_index in pieces_index {
-            self.unassign_piece(piece_index);
+            self.unassign_piece(session_id, piece_index);
         }
     }
 
@@ -587,11 +604,11 @@ impl Synchronizer {
         downloaded_pieces * 100 / self.bitfield.total_pieces as u32
     }
 
-    fn close_session(&mut self, id: String) {
-        self.active_sessions.remove(&id);
-        self.peers_bitfield.remove(&id);
-        if let Some(pieces_indexes) = self.workers_pending_pieces.remove(&id) {
-            self.unassign_pieces(pieces_indexes);
+    fn close_session(&mut self, session_id: &str) {
+        self.active_sessions.remove(session_id);
+        self.peers_bitfield.remove(session_id);
+        if let Some(pieces_indexes) = self.workers_pending_pieces.remove(session_id) {
+            self.unassign_pieces(session_id, pieces_indexes);
         }
     }
 }
@@ -798,7 +815,7 @@ mod tests {
         sync.assigned_pieces.insert(2);
 
         // Close the session
-        sync.close_session("peer1".to_string());
+        sync.close_session("peer1");
 
         // Verify the session is removed
         assert!(!sync.active_sessions.contains("peer1"));
@@ -1024,6 +1041,65 @@ mod tests {
 
         // Should not assign any piece
         assert_eq!(piece, None);
+    }
+
+    #[test]
+    fn test_unassign_piece() {
+        let total_pieces = 8;
+        let pieces = create_pieces_hashmap(total_pieces, 16384);
+        let (event_tx, _) = mpsc::channel(100);
+        let event_tx = Arc::new(event_tx);
+
+        let mut sync = Synchronizer::new(pieces, 5, event_tx);
+
+        // Assign some pieces
+        sync.assigned_pieces.insert(1);
+        sync.assigned_pieces.insert(3);
+        sync.assigned_pieces.insert(5);
+
+        // Assign the pieces to the peer sessions
+        sync.workers_pending_pieces
+            .entry("peer1".to_string())
+            .or_insert_with(Vec::new)
+            .push(1);
+        sync.workers_pending_pieces
+            .entry("peer1".to_string())
+            .or_insert_with(Vec::new)
+            .push(3);
+        sync.workers_pending_pieces
+            .entry("peer2".to_string())
+            .or_insert_with(Vec::new)
+            .push(5);
+
+        // Unassign piece 3
+        sync.unassign_piece("peer1", 3);
+
+        // Verify piece 3 is unassigned
+        assert!(!sync.assigned_pieces.contains(&3));
+
+        // Verify other pieces remain assigned
+        assert!(sync.assigned_pieces.contains(&1));
+        assert!(sync.assigned_pieces.contains(&5));
+
+        // Verify piece 3 is not assigned to peer1
+        assert!(!sync
+            .workers_pending_pieces
+            .get("peer1")
+            .unwrap()
+            .contains(&3));
+
+        // Verify piece 1 remain assigned
+        assert!(sync
+            .workers_pending_pieces
+            .get("peer1")
+            .unwrap()
+            .contains(&1));
+
+        // Unassign a piece that's not assigned
+        sync.unassign_piece("peer1", 2);
+
+        // Should not affect assigned pieces
+        assert_eq!(sync.assigned_pieces.len(), 2);
     }
 
     #[test]

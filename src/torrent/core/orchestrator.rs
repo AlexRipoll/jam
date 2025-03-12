@@ -205,14 +205,26 @@ impl Orchestrator {
                             })
                             .await;
                     }
-                    Event::PieceUnassign(piece_index) => {
+                    Event::PieceUnassign {
+                        session_id,
+                        piece_index,
+                    } => {
                         let _ = sync_tx
-                            .send(SynchronizerCommand::UnassignPiece(piece_index))
+                            .send(SynchronizerCommand::UnassignPiece {
+                                session_id,
+                                piece_index,
+                            })
                             .await;
                     }
-                    Event::PieceUnassignMany(pieces_indexes) => {
+                    Event::PieceUnassignMany {
+                        session_id,
+                        pieces_index,
+                    } => {
                         let _ = sync_tx
-                            .send(SynchronizerCommand::UnassignPieces(pieces_indexes))
+                            .send(SynchronizerCommand::UnassignPieces {
+                                session_id,
+                                pieces_index,
+                            })
                             .await;
                     }
                     Event::PieceDispatch { session_id, piece } => {
