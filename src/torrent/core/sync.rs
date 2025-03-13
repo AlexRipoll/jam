@@ -41,9 +41,6 @@ pub struct Synchronizer {
     // Channels for communication
     event_tx: Arc<mpsc::Sender<Event>>,
 
-    // Channel to notify when pieces should be dispatched
-    dispatch_notifier: mpsc::Sender<DispatchData>,
-
     // Keep track of whether dispatching is in progress
     dispatch_in_progress: bool,
 }
@@ -110,9 +107,6 @@ impl Synchronizer {
     ) -> Self {
         let total_pieces = pieces.len();
 
-        // Create a placeholder channel that will be replaced in start()
-        let (tx, _) = mpsc::channel(1);
-
         Self {
             pieces,
             bitfield: Bitfield::new(total_pieces),
@@ -124,7 +118,6 @@ impl Synchronizer {
             workers_pending_pieces: HashMap::new(),
             queue_capacity,
             event_tx,
-            dispatch_notifier: tx,
             dispatch_in_progress: false,
         }
     }
@@ -132,8 +125,6 @@ impl Synchronizer {
     pub fn run(mut self) -> (mpsc::Sender<SynchronizerCommand>, JoinHandle<()>) {
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<SynchronizerCommand>(100);
         let (dispatch_tx, mut dispatch_rx) = mpsc::channel::<DispatchData>(1);
-
-        self.dispatch_notifier = dispatch_tx;
 
         let event_tx_clone = self.event_tx.clone();
         let dispatch_cmd_tx = cmd_tx.clone();
@@ -213,7 +204,7 @@ impl Synchronizer {
                                 queue_capacity: self.queue_capacity,
                             };
 
-                            let _ = self.dispatch_notifier.send(data).await;
+                            let _ = dispatch_tx.send(data).await;
                         }
                     }
                     SynchronizerCommand::PieceDispatched {
