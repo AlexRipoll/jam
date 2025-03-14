@@ -1,11 +1,13 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    fmt::Display,
     sync::Arc,
     time::Duration,
 };
 
 use protocol::{bitfield::Bitfield, piece::Piece};
 use tokio::{sync::mpsc, task::JoinHandle};
+use tracing::error;
 
 use crate::torrent::events::Event;
 
@@ -90,7 +92,7 @@ pub enum SynchronizerCommand {
 
 // Data structure to pass data to the dispatch task
 #[derive(Debug, Clone)]
-struct DispatchData {
+pub struct DispatchData {
     pieces: HashMap<u32, Piece>,
     peers_bitfield: HashMap<String, Bitfield>,
     workers_pending_pieces: HashMap<String, Vec<u32>>,
@@ -133,53 +135,10 @@ impl Synchronizer {
         // Spawn a separate task for handling dispatch operations
         let dispatch_handle = tokio::spawn(async move {
             while let Some(data) = dispatch_rx.recv().await {
-                // Create workers queue locally
-                let workers_queue = Self::assign_pieces_to_workers(
-                    &data.peers_bitfield,
-                    &data.workers_pending_pieces,
-                    &data.pending_pieces,
-                    &data.assigned_pieces,
-                );
-
-                // Process each worker's queue
-                for (worker_id, mut queue) in workers_queue {
-                    let worker_pending = data
-                        .workers_pending_pieces
-                        .get(&worker_id)
-                        .map(|v| v.len())
-                        .unwrap_or(0);
-
-                    let available_slots = data.queue_capacity.saturating_sub(worker_pending);
-                    let pieces_to_dispatch = queue.drain(..queue.len().min(available_slots));
-
-                    for piece_index in pieces_to_dispatch {
-                        if let Some(piece) = data.pieces.get(&piece_index) {
-                            // Dispatch the piece
-                            let _ = event_tx_clone
-                                .send(Event::PieceDispatch {
-                                    session_id: worker_id.clone(),
-                                    piece: piece.clone(),
-                                })
-                                .await;
-
-                            // Notify synchronizer about dispatched piece
-                            let _ = dispatch_cmd_tx
-                                .send(SynchronizerCommand::PieceDispatched {
-                                    session_id: worker_id.clone(),
-                                    piece_index,
-                                })
-                                .await;
-
-                            // Small delay to prevent flooding
-                            tokio::time::sleep(Duration::from_millis(10)).await;
-                        }
-                    }
+                if let Err(e) = Self::handle_dispatch(data, &dispatch_cmd_tx, &event_tx_clone).await
+                {
+                    error!("Error handling dispatch: {}", e);
                 }
-
-                // Notify completion
-                let _ = dispatch_cmd_tx
-                    .send(SynchronizerCommand::DispatchCompleted)
-                    .await;
             }
         });
 
@@ -189,131 +148,191 @@ impl Synchronizer {
             let _dispatch_handle = dispatch_handle;
 
             while let Some(cmd) = cmd_rx.recv().await {
-                match cmd {
-                    SynchronizerCommand::RequestDispatch => {
-                        if !self.dispatch_in_progress && !self.pending_pieces.is_empty() {
-                            self.dispatch_in_progress = true;
-
-                            // Prepare data for the dispatch task
-                            let data = DispatchData {
-                                pieces: self.pieces.clone(),
-                                peers_bitfield: self.peers_bitfield.clone(),
-                                workers_pending_pieces: self.workers_pending_pieces.clone(),
-                                pending_pieces: self.pending_pieces.clone(),
-                                assigned_pieces: self.assigned_pieces.clone(),
-                                queue_capacity: self.queue_capacity,
-                            };
-
-                            let _ = dispatch_tx.send(data).await;
-                        }
-                    }
-                    SynchronizerCommand::PieceDispatched {
-                        session_id: worker_id,
-                        piece_index,
-                    } => {
-                        // Update internal state
-                        self.workers_pending_pieces
-                            .entry(worker_id)
-                            .or_insert_with(Vec::new)
-                            .push(piece_index);
-                        self.assigned_pieces.insert(piece_index);
-                        // self.remove_pending_piece(piece_index);
-                    }
-                    SynchronizerCommand::DispatchCompleted => {
-                        self.dispatch_in_progress = false;
-
-                        // If there are still pending pieces, request another dispatch
-                        if !self.pending_pieces.is_empty() {
-                            let _ = actor_cmd_tx
-                                .send(SynchronizerCommand::RequestDispatch)
-                                .await;
-                        }
-                    }
-                    SynchronizerCommand::ProcessBitfield {
-                        session_id: peer_id,
-                        bitfield,
-                    } => {
-                        let total_pieces = self.bitfield.total_pieces;
-                        let bitfield = Bitfield::from(&bitfield, total_pieces);
-
-                        if self.has_missing_pieces(&bitfield) {
-                            self.process_bitfield(&peer_id, bitfield);
-
-                            // After processing a new bitfield, we might have new pieces to dispatch
-                            if !self.pending_pieces.is_empty() && !self.dispatch_in_progress {
-                                let _ = actor_cmd_tx
-                                    .send(SynchronizerCommand::RequestDispatch)
-                                    .await;
-                            }
-                        } else {
-                            self.close_session(&peer_id);
-                            // TODO: send shutdown event to peer
-                            // self.self
-                            //     .event_tx
-                            //     .send(Event::State(StateEvent::ClosePeerSession(
-                            //         worker_id.clone(),
-                            //     )))
-                            //     .await;
-                        }
-                    }
-                    SynchronizerCommand::ProcessHave {
-                        session_id: peer_id,
-                        piece_index,
-                    } => {
-                        if let Some(bitfield) = self.peers_bitfield.get_mut(&peer_id) {
-                            bitfield.set_piece(piece_index as usize);
-                        }
-                        // TODO: recalculate piece rarity?
-                    }
-                    SynchronizerCommand::CorruptedPiece {
-                        session_id: peer_id,
-                        piece_index,
-                    } => {
-                        self.unassign_piece(&peer_id, piece_index);
-                        // TODO: blacklist worker for this piece index
-                    }
-                    SynchronizerCommand::ClosePeerSession(session_id) => {
-                        self.close_session(&session_id);
-                        // TODO: send shutdown event to peer
-                        // self.self
-                        //     .event_tx
-                        //     .send(Event::State(StateEvent::ClosePeerSession(
-                        //         worker_id.clone(),
-                        //     )))
-                        //     .await;
-                    }
-                    SynchronizerCommand::MarkPieceComplete(piece_index) => {
-                        self.mark_piece_complete(piece_index);
-                    }
-                    SynchronizerCommand::UnassignPiece {
-                        session_id,
-                        piece_index,
-                    } => {
-                        self.unassign_piece(&session_id, piece_index);
-                    }
-                    SynchronizerCommand::UnassignPieces {
-                        session_id,
-                        pieces_index,
-                    } => {
-                        self.unassign_pieces(&session_id, pieces_index);
-                    }
-                    SynchronizerCommand::QueryProgress(response_tx) => {
-                        let progress = self.download_progress_percent();
-                        let _ = response_tx.send(progress).await;
-                    }
-                    SynchronizerCommand::QueryIsCompleted(response_tx) => {
-                        let completed = self.is_completed();
-                        let _ = response_tx.send(completed).await;
-                    }
-                    SynchronizerCommand::QueryHasActiveWorkers(response_tx) => {
-                        let has_active = self.has_active_worker();
-                        let _ = response_tx.send(has_active).await;
-                    }
+                if let Err(e) = self.handle_command(cmd, &dispatch_tx, &actor_cmd_tx).await {
+                    error!("Error handling command: {}", e);
                 }
             }
         });
 
         (cmd_tx, actor_handle)
+    }
+
+    async fn handle_dispatch(
+        data: DispatchData,
+        dispatch_cmd_tx: &mpsc::Sender<SynchronizerCommand>,
+        event_tx: &Arc<mpsc::Sender<Event>>,
+    ) -> Result<(), SynchronizerError> {
+        // Create workers queue locally
+        let workers_queue = Self::assign_pieces_to_workers(
+            &data.peers_bitfield,
+            &data.workers_pending_pieces,
+            &data.pending_pieces,
+            &data.assigned_pieces,
+        );
+
+        // Process each worker's queue
+        for (worker_id, mut queue) in workers_queue {
+            let worker_pending = data
+                .workers_pending_pieces
+                .get(&worker_id)
+                .map(|v| v.len())
+                .unwrap_or(0);
+
+            let available_slots = data.queue_capacity.saturating_sub(worker_pending);
+            let pieces_to_dispatch = queue.drain(..queue.len().min(available_slots));
+
+            for piece_index in pieces_to_dispatch {
+                if let Some(piece) = data.pieces.get(&piece_index) {
+                    // Dispatch the piece
+                    event_tx
+                        .send(Event::PieceDispatch {
+                            session_id: worker_id.clone(),
+                            piece: piece.clone(),
+                        })
+                        .await?;
+
+                    // Notify synchronizer about dispatched piece
+                    dispatch_cmd_tx
+                        .send(SynchronizerCommand::PieceDispatched {
+                            session_id: worker_id.clone(),
+                            piece_index,
+                        })
+                        .await?;
+
+                    // Small delay to prevent flooding
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        }
+
+        // Notify completion
+        dispatch_cmd_tx
+            .send(SynchronizerCommand::DispatchCompleted)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn handle_command(
+        &mut self,
+        command: SynchronizerCommand,
+        dispatch_tx: &mpsc::Sender<DispatchData>,
+        actor_cmd_tx: &mpsc::Sender<SynchronizerCommand>,
+    ) -> Result<(), SynchronizerError> {
+        match command {
+            SynchronizerCommand::RequestDispatch => {
+                if !self.dispatch_in_progress && !self.pending_pieces.is_empty() {
+                    self.dispatch_in_progress = true;
+
+                    // Prepare data for the dispatch task
+                    let data = DispatchData {
+                        pieces: self.pieces.clone(),
+                        peers_bitfield: self.peers_bitfield.clone(),
+                        workers_pending_pieces: self.workers_pending_pieces.clone(),
+                        pending_pieces: self.pending_pieces.clone(),
+                        assigned_pieces: self.assigned_pieces.clone(),
+                        queue_capacity: self.queue_capacity,
+                    };
+
+                    dispatch_tx.send(data).await?;
+                }
+            }
+            SynchronizerCommand::PieceDispatched {
+                session_id,
+                piece_index,
+            } => {
+                // Update internal state
+                self.workers_pending_pieces
+                    .entry(session_id)
+                    .or_insert_with(Vec::new)
+                    .push(piece_index);
+                self.assigned_pieces.insert(piece_index);
+            }
+            SynchronizerCommand::DispatchCompleted => {
+                self.dispatch_in_progress = false;
+
+                // If there are still pending pieces, request another dispatch
+                if !self.pending_pieces.is_empty() {
+                    actor_cmd_tx
+                        .send(SynchronizerCommand::RequestDispatch)
+                        .await?;
+                }
+            }
+            SynchronizerCommand::ProcessBitfield {
+                session_id,
+                bitfield,
+            } => {
+                let total_pieces = self.bitfield.total_pieces;
+                let bitfield = Bitfield::from(&bitfield, total_pieces);
+
+                if self.has_missing_pieces(&bitfield) {
+                    self.process_bitfield(&session_id, bitfield);
+
+                    // After processing a new bitfield, we might have new pieces to dispatch
+                    if !self.pending_pieces.is_empty() && !self.dispatch_in_progress {
+                        actor_cmd_tx
+                            .send(SynchronizerCommand::RequestDispatch)
+                            .await?;
+                    }
+                } else {
+                    self.close_session(&session_id);
+                    self.event_tx
+                        .send(Event::ShutdownPeerSession {
+                            session_id: session_id.clone(),
+                        })
+                        .await?;
+                }
+            }
+            SynchronizerCommand::ProcessHave {
+                session_id,
+                piece_index,
+            } => {
+                if let Some(bitfield) = self.peers_bitfield.get_mut(&session_id) {
+                    bitfield.set_piece(piece_index as usize);
+                }
+                // TODO: check if it is a missing piece and it is not in the remaining
+                // pieces list, if so add it
+            }
+            SynchronizerCommand::CorruptedPiece {
+                session_id,
+                piece_index,
+            } => {
+                self.unassign_piece(&session_id, piece_index);
+                // TODO: blacklist worker for this piece index
+            }
+            SynchronizerCommand::ClosePeerSession(session_id) => {
+                self.close_session(&session_id);
+            }
+            SynchronizerCommand::MarkPieceComplete(piece_index) => {
+                self.mark_piece_complete(piece_index);
+            }
+            SynchronizerCommand::UnassignPiece {
+                session_id,
+                piece_index,
+            } => {
+                self.unassign_piece(&session_id, piece_index);
+            }
+            SynchronizerCommand::UnassignPieces {
+                session_id,
+                pieces_index,
+            } => {
+                self.unassign_pieces(&session_id, pieces_index);
+            }
+            SynchronizerCommand::QueryProgress(response_tx) => {
+                let progress = self.download_progress_percent();
+                response_tx.send(progress).await?;
+            }
+            SynchronizerCommand::QueryIsCompleted(response_tx) => {
+                let completed = self.is_completed();
+                response_tx.send(completed).await?;
+            }
+            SynchronizerCommand::QueryHasActiveWorkers(response_tx) => {
+                let has_active = self.has_active_worker();
+                response_tx.send(has_active).await?;
+            }
+        }
+
+        Ok(())
     }
 
     // Function that runs in a separate task, doesn't access synchronizer state directly
@@ -541,7 +560,7 @@ impl Synchronizer {
 
     // checks if the state bitfield already has downloaded all the availabe pieces of a given peer
     // (state_bitfield & peer_bitfield == peer_bitfield)
-    fn has_concluded(&self, peer_bitfield: &Bitfield) -> bool {
+    fn has_downloaded_all_peer_pieces(&self, peer_bitfield: &Bitfield) -> bool {
         if peer_bitfield.bytes.is_empty() {
             return false;
         }
@@ -601,6 +620,63 @@ impl Synchronizer {
         if let Some(pieces_indexes) = self.workers_pending_pieces.remove(session_id) {
             self.unassign_pieces(session_id, pieces_indexes);
         }
+    }
+}
+
+#[derive(Debug)]
+pub enum SynchronizerError {
+    DispatcherDataTxError(mpsc::error::SendError<DispatchData>),
+    CommandTxError(mpsc::error::SendError<SynchronizerCommand>),
+    EventTxError(mpsc::error::SendError<Event>),
+    QueryTxError(String),
+}
+
+impl Display for SynchronizerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SynchronizerError::DispatcherDataTxError(err) => {
+                write!(f, "Failed to send dispatch data: {}", err)
+            }
+            SynchronizerError::CommandTxError(err) => {
+                write!(f, "Failed to send command: {}", err)
+            }
+            SynchronizerError::EventTxError(err) => {
+                write!(f, "Failed to send event: {}", err)
+            }
+            SynchronizerError::QueryTxError(msg) => {
+                write!(f, "Failed to send response: {}", msg)
+            }
+        }
+    }
+}
+
+impl From<mpsc::error::SendError<DispatchData>> for SynchronizerError {
+    fn from(err: mpsc::error::SendError<DispatchData>) -> Self {
+        SynchronizerError::DispatcherDataTxError(err)
+    }
+}
+
+impl From<mpsc::error::SendError<SynchronizerCommand>> for SynchronizerError {
+    fn from(err: mpsc::error::SendError<SynchronizerCommand>) -> Self {
+        SynchronizerError::CommandTxError(err)
+    }
+}
+
+impl From<mpsc::error::SendError<Event>> for SynchronizerError {
+    fn from(err: mpsc::error::SendError<Event>) -> Self {
+        SynchronizerError::EventTxError(err)
+    }
+}
+
+impl From<mpsc::error::SendError<u32>> for SynchronizerError {
+    fn from(err: mpsc::error::SendError<u32>) -> Self {
+        SynchronizerError::QueryTxError(format!("{}", err))
+    }
+}
+
+impl From<mpsc::error::SendError<bool>> for SynchronizerError {
+    fn from(err: mpsc::error::SendError<bool>) -> Self {
+        SynchronizerError::QueryTxError(format!("{}", err))
     }
 }
 
@@ -711,7 +787,7 @@ mod tests {
         let mut sync = Synchronizer::new(pieces, 5, event_tx);
 
         // Set up initial state with a peer having all pieces
-        let peer_bitfield = create_bitfield(8, &[0, 1, 2, 3, 4, 5, 6, 7]);
+        let peer_bitfield = create_bitfield(8, &[0, 1, 3, 4, 6, 7]);
         sync.process_bitfield("peer1", Bitfield::from(&peer_bitfield, 8));
 
         // Mark some pieces as assigned
@@ -835,20 +911,20 @@ mod tests {
             Bitfield::from(&create_bitfield(total_pieces, &[0, 1, 2]), total_pieces);
 
         // Initially we have no pieces, so we haven't concluded
-        assert!(!sync.has_concluded(&peer_bitfield));
+        assert!(!sync.has_downloaded_all_peer_pieces(&peer_bitfield));
 
         // Mark piece 0 and 1 as complete
         sync.bitfield.set_piece(0);
         sync.bitfield.set_piece(1);
 
         // We still need piece 2, so not concluded
-        assert!(!sync.has_concluded(&peer_bitfield));
+        assert!(!sync.has_downloaded_all_peer_pieces(&peer_bitfield));
 
         // Mark the last piece as complete
         sync.bitfield.set_piece(2);
 
         // Now we should have concluded with this peer (got all their pieces)
-        assert!(sync.has_concluded(&peer_bitfield));
+        assert!(sync.has_downloaded_all_peer_pieces(&peer_bitfield));
     }
 
     #[test]
