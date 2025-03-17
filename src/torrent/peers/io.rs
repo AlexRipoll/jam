@@ -1,13 +1,68 @@
-use std::{error::Error, fmt::Display};
+use std::{error::Error, fmt::Display, sync::Arc};
 
 use tokio::{
     io::{self, AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
+    sync::mpsc,
+    task::JoinHandle,
 };
 
-use protocol::{error::ProtocolError, message::Message};
+use tracing::error;
 
-pub async fn read_message<T>(read_half: &mut T) -> Result<Message, IoError>
+use super::{
+    message::{Message, MessageError},
+    session::PeerSessionCommand,
+};
+
+pub async fn run(
+    stream: TcpStream,
+    cmd_tx: Arc<mpsc::Sender<PeerSessionCommand>>,
+) -> (mpsc::Sender<Message>, JoinHandle<()>, JoinHandle<()>) {
+    let (req_tx, mut req_rx) = mpsc::channel::<Message>(100);
+    let cmd_tx_clone = cmd_tx.clone();
+
+    let (mut read_half, mut write_half) = tokio::io::split(stream);
+
+    // peer listener task
+    let res_handle = tokio::spawn(async move {
+        loop {
+            match read_message(&mut read_half).await {
+                Ok(message) => {
+                    if let Err(e) = cmd_tx_clone
+                        .send(PeerSessionCommand::PeerMessage { message })
+                        .await
+                    {
+                        error!("Failed to forward peer message: {}", e);
+                    }
+                }
+                Err(e) => match e {
+                    IoError::IncompleteMessage => {
+                        if let Err(e) = cmd_tx_clone
+                            .send(PeerSessionCommand::ConnectionClosed)
+                            .await
+                        {
+                            error!("Failed to notify connection closure: {}", e);
+                        }
+                    }
+                    _ => error!("Error reading peer message: {}", e),
+                },
+            }
+        }
+    });
+
+    // peer requester task
+    let req_handle = tokio::spawn(async move {
+        while let Some(message) = req_rx.recv().await {
+            if let Err(e) = send_message(&mut write_half, message).await {
+                error!("Failed to send message: {}", e);
+            }
+        }
+    });
+
+    (req_tx, req_handle, res_handle)
+}
+
+async fn read_message<T>(read_half: &mut T) -> Result<Message, IoError>
 where
     T: AsyncRead + Unpin,
 {
@@ -52,7 +107,7 @@ where
     Ok(message)
 }
 
-pub async fn send_message(
+async fn send_message(
     write_half: &mut tokio::io::WriteHalf<TcpStream>,
     message: Message,
 ) -> Result<(), IoError> {
@@ -63,7 +118,7 @@ pub async fn send_message(
 
 #[derive(Debug)]
 pub enum IoError {
-    Protocol(ProtocolError),
+    Message(MessageError),
     IncompleteMessage,
     Io(io::Error),
 }
@@ -71,7 +126,7 @@ pub enum IoError {
 impl Display for IoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            IoError::Protocol(err) => write!(f, "Protocol error: {}", err),
+            IoError::Message(err) => write!(f, "Message error: {}", err),
             IoError::IncompleteMessage => {
                 write!(f, "Connection closed before reading full message")
             }
@@ -80,9 +135,9 @@ impl Display for IoError {
     }
 }
 
-impl From<ProtocolError> for IoError {
-    fn from(err: ProtocolError) -> Self {
-        IoError::Protocol(err)
+impl From<MessageError> for IoError {
+    fn from(err: MessageError) -> Self {
+        IoError::Message(err)
     }
 }
 
@@ -95,7 +150,7 @@ impl From<io::Error> for IoError {
 impl Error for IoError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            IoError::Protocol(err) => Some(err),
+            IoError::Message(err) => Some(err),
             IoError::Io(err) => Some(err),
             _ => None,
         }
