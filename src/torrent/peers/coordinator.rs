@@ -52,8 +52,8 @@ pub enum CoordinatorCommand {
     AddPiece { piece: Piece },
     DownloadPiece { payload: Option<Vec<u8>> },
 
-    UnassignPiece { piece_index: u32 },
-    UnassignPieces,
+    ReleasePiece { piece_index: u32 },
+    ReleasePieces,
     RequestDispatched { piece: Piece },
 }
 
@@ -123,10 +123,10 @@ impl Coordinator {
                 // trigger piece download if conditions allow it
                 self.send_next_piece(requester_tx).await?;
             }
-            CoordinatorCommand::UnassignPiece { piece_index } => {
+            CoordinatorCommand::ReleasePiece { piece_index } => {
                 self.release_piece(piece_index).await?
             }
-            CoordinatorCommand::UnassignPieces => self.release_pieces().await?,
+            CoordinatorCommand::ReleasePieces => self.release_pieces().await?,
             CoordinatorCommand::RequestDispatched { piece } => {
                 self.active_pieces
                     .entry(piece.index() as usize)
