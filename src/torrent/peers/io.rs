@@ -11,12 +11,12 @@ use tracing::error;
 
 use super::{
     message::{Message, MessageError},
-    session::PeerSessionCommand,
+    session::PeerSessionEvent,
 };
 
 pub async fn run(
     stream: TcpStream,
-    cmd_tx: Arc<mpsc::Sender<PeerSessionCommand>>,
+    cmd_tx: Arc<mpsc::Sender<PeerSessionEvent>>,
 ) -> (mpsc::Sender<Message>, JoinHandle<()>, JoinHandle<()>) {
     let (req_tx, mut req_rx) = mpsc::channel::<Message>(100);
     let cmd_tx_clone = cmd_tx.clone();
@@ -29,7 +29,7 @@ pub async fn run(
             match read_message(&mut read_half).await {
                 Ok(message) => {
                     if let Err(e) = cmd_tx_clone
-                        .send(PeerSessionCommand::PeerMessage { message })
+                        .send(PeerSessionEvent::PeerMessageIn { message })
                         .await
                     {
                         error!("Failed to forward peer message: {}", e);
@@ -37,9 +37,7 @@ pub async fn run(
                 }
                 Err(e) => match e {
                     IoError::IncompleteMessage => {
-                        if let Err(e) = cmd_tx_clone
-                            .send(PeerSessionCommand::ConnectionClosed)
-                            .await
+                        if let Err(e) = cmd_tx_clone.send(PeerSessionEvent::ConnectionClosed).await
                         {
                             error!("Failed to notify connection closure: {}", e);
                         }
