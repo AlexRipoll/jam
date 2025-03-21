@@ -1,4 +1,5 @@
 use std::{
+    cmp::{max, min},
     collections::HashMap,
     error::Error,
     fmt::Display,
@@ -10,6 +11,7 @@ use protocol::{error::ProtocolError, piece::Piece};
 use sha1::{Digest, Sha1};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{debug, error};
+use tracing_subscriber::fmt::writer::OrElse;
 
 use crate::torrent::peers::{
     message::{MessageError, MessageId, PiecePayload, TransferPayload},
@@ -19,6 +21,10 @@ use crate::torrent::peers::{
 use super::message::Message;
 
 const MAX_STRIKES: u8 = 3;
+
+// Timeout checker intervals
+const MIN_CHECK_INTERVAL: u64 = 1;
+const MAX_CHECK_INTERVAL: u64 = 10;
 
 #[derive(Debug)]
 pub struct Coordinator {
@@ -35,6 +41,9 @@ pub struct Coordinator {
 
     // timestamps of the las time a block os a piece
     in_progress_timestamps: HashMap<u32, Instant>,
+
+    // max seconds for downloading a in progress piece
+    timeout_threshold: u64,
 
     // number of times a in_progress piece has been removed from the download in progress pieces vector (in_progress) because the timeout has been reached
     strikes: u8,
@@ -55,16 +64,24 @@ pub enum CoordinatorCommand {
     ReleasePiece { piece_index: u32 },
     ReleasePieces,
     RequestDispatched { piece: Piece },
+    CheckTimeouts,
 }
 
 impl Coordinator {
-    pub fn new(event_tx: mpsc::Sender<PeerSessionEvent>) -> Self {
+    pub fn new(timeout_threshold: u64, event_tx: mpsc::Sender<PeerSessionEvent>) -> Self {
+        let timeout_threshold = if timeout_threshold == 0 {
+            5
+        } else {
+            timeout_threshold
+        };
+
         Self {
             is_choked: true,
             active_pieces: HashMap::new(),
             queue: vec![],
             in_progress: vec![],
             in_progress_timestamps: HashMap::new(),
+            timeout_threshold,
             strikes: 0,
             event_tx,
             request_in_progress: false,
@@ -87,12 +104,31 @@ impl Coordinator {
             }
         });
 
+        // Create a new task for timeout watching
+        let interval = max(
+            MIN_CHECK_INTERVAL,
+            min(self.timeout_threshold / 5, MAX_CHECK_INTERVAL),
+        );
+        let timeout_cmd_tx = cmd_tx.clone();
+        let timeout_handle = tokio::spawn(async move {
+            loop {
+                // Check for timeouts every X interval of seconds
+                tokio::time::sleep(Duration::from_secs(interval)).await;
+
+                // Send a command to check for timed out pieces
+                if let Err(e) = timeout_cmd_tx.send(CoordinatorCommand::CheckTimeouts).await {
+                    error!("Failed to send timeout check command: {}", e);
+                }
+            }
+        });
+
         let requester_tx_clone = requester_tx.clone();
 
         // Main actor task
         let actor_handle = tokio::spawn(async move {
             // Store handle to ensure it is dropped properly when actor_handle completes
             let _request_handle = request_handle;
+            let _timeout_handle = timeout_handle;
 
             while let Some(cmd) = cmd_rx.recv().await {
                 if let Err(e) = self.handle_command(cmd, &requester_tx_clone).await {
@@ -144,6 +180,16 @@ impl Coordinator {
             }
             CoordinatorCommand::DownloadPiece { payload } => {
                 self.process_piece_message(payload).await?
+            }
+            CoordinatorCommand::CheckTimeouts => {
+                if self.has_pieces_in_progress() {
+                    self.release_timed_out_pieces().await?;
+
+                    // Check if we've reached max strikes
+                    if self.is_strikeout() {
+                        self.release_pieces().await?;
+                    }
+                }
             }
         }
 
@@ -300,7 +346,7 @@ impl Coordinator {
             .iter()
             .filter(|piece| {
                 if let Some(&request_time) = self.in_progress_timestamps.get(&piece.index()) {
-                    now.duration_since(request_time) > Duration::new(15, 0)
+                    now.duration_since(request_time) > Duration::new(self.timeout_threshold, 0)
                 } else {
                     false
                 }
