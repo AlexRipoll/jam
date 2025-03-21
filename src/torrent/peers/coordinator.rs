@@ -21,7 +21,7 @@ use super::message::Message;
 const MAX_STRIKES: u8 = 3;
 
 #[derive(Debug)]
-struct Coordinator {
+pub struct Coordinator {
     is_choked: bool,
 
     // the status of the pieces that are being downloaded or have been downloaded from this peer
@@ -39,7 +39,7 @@ struct Coordinator {
     // number of times a in_progress piece has been removed from the download in progress pieces vector (in_progress) because the timeout has been reached
     strikes: u8,
 
-    event_tx: Arc<mpsc::Sender<PeerSessionEvent>>,
+    event_tx: mpsc::Sender<PeerSessionEvent>,
 
     // Keep track of whether a piece request is in progress
     request_in_progress: bool,
@@ -58,7 +58,7 @@ pub enum CoordinatorCommand {
 }
 
 impl Coordinator {
-    fn new(event_tx: Arc<mpsc::Sender<PeerSessionEvent>>) -> Self {
+    pub fn new(event_tx: mpsc::Sender<PeerSessionEvent>) -> Self {
         Self {
             is_choked: true,
             active_pieces: HashMap::new(),
@@ -193,6 +193,7 @@ impl Coordinator {
                 debug!(piece_index= ?payload.index, "Piece hash verified. Sending to disk");
                 self.event_tx
                     .send(PeerSessionEvent::PieceAssembled {
+                        piece_index: piece.index(),
                         data: assembled_blocks,
                     })
                     .await?;
@@ -217,7 +218,7 @@ impl Coordinator {
     pub async fn request(
         piece: &Piece,
         cmd_tx: &mpsc::Sender<CoordinatorCommand>,
-        event_tx: &Arc<mpsc::Sender<PeerSessionEvent>>,
+        event_tx: &mpsc::Sender<PeerSessionEvent>,
     ) -> Result<(), CoordinatorError> {
         Self::request_from_offset(&piece, 0, cmd_tx, event_tx).await?;
 
@@ -229,7 +230,7 @@ impl Coordinator {
         piece: &Piece,
         start_offset: u32,
         cmd_tx: &mpsc::Sender<CoordinatorCommand>,
-        event_tx: &Arc<mpsc::Sender<PeerSessionEvent>>,
+        event_tx: &mpsc::Sender<PeerSessionEvent>,
     ) -> Result<(), CoordinatorError> {
         let total_blocks = (piece.size() + 16384 - 1) / 16384;
 
