@@ -16,15 +16,15 @@ use super::{
 
 pub async fn run(
     stream: TcpStream,
-    cmd_tx: Arc<mpsc::Sender<PeerSessionEvent>>,
+    event_tx: mpsc::Sender<PeerSessionEvent>,
 ) -> (mpsc::Sender<Message>, JoinHandle<()>, JoinHandle<()>) {
-    let (req_tx, mut req_rx) = mpsc::channel::<Message>(100);
-    let cmd_tx_clone = cmd_tx.clone();
+    let (out_tx, mut out_rx) = mpsc::channel::<Message>(100);
+    let cmd_tx_clone = event_tx.clone();
 
     let (mut read_half, mut write_half) = tokio::io::split(stream);
 
     // peer listener task
-    let res_handle = tokio::spawn(async move {
+    let in_handle = tokio::spawn(async move {
         loop {
             match read_message(&mut read_half).await {
                 Ok(message) => {
@@ -49,15 +49,15 @@ pub async fn run(
     });
 
     // peer requester task
-    let req_handle = tokio::spawn(async move {
-        while let Some(message) = req_rx.recv().await {
+    let out_handle = tokio::spawn(async move {
+        while let Some(message) = out_rx.recv().await {
             if let Err(e) = send_message(&mut write_half, message).await {
                 error!("Failed to send message: {}", e);
             }
         }
     });
 
-    (req_tx, req_handle, res_handle)
+    (out_tx, in_handle, out_handle)
 }
 
 async fn read_message<T>(read_half: &mut T) -> Result<Message, IoError>
