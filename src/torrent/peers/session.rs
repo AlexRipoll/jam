@@ -44,7 +44,7 @@ struct ConnectionState {
 
 #[derive(Debug)]
 pub enum PeerSessionEvent {
-    AppendPiece { piece: Piece },
+    AssignPiece { piece: Piece },
     PeerMessageOut { message: Message },
     PeerMessageIn { message: Message },
     PieceAssembled { piece_index: u32, data: Vec<u8> },
@@ -106,15 +106,6 @@ impl PeerSession {
         {
             Ok(stream) => stream,
             Err(err) => {
-                // Notify orchestrator and return error
-                if let Err(e) = self
-                    .orchestrator_event_tx
-                    .send(Event::PeerSessionFailed { session_id: id })
-                    .await
-                {
-                    error!("Failed to send PeerSessionFailed event: {}", e);
-                }
-
                 return Err(PeerSessionError::Connection(err));
             }
         };
@@ -122,15 +113,6 @@ impl PeerSession {
         // Perform handshake
         let handshake_metadata = Handshake::new(self.info_hash, self.peer_id);
         if let Err(err) = perform_handshake(&mut stream, &handshake_metadata).await {
-            // Notify orchestrator and return error
-            if let Err(e) = self
-                .orchestrator_event_tx
-                .send(Event::PeerSessionFailed { session_id: id })
-                .await
-            {
-                error!("Failed to send PeerSessionFailed event: {}", e);
-            }
-
             return Err(PeerSessionError::Handshake(err));
         }
 
@@ -158,7 +140,7 @@ impl PeerSession {
 
             while let Some(cmd) = self.event_rx.recv().await {
                 match cmd {
-                    PeerSessionEvent::AppendPiece { piece } => {
+                    PeerSessionEvent::AssignPiece { piece } => {
                         if let Err(e) = coordinator_tx
                             .send(CoordinatorCommand::AddPiece { piece })
                             .await
