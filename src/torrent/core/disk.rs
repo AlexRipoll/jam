@@ -51,7 +51,7 @@ pub struct DiskWriter {
     stats: DiskWriterStats,
 
     // Communication channels
-    event_tx: Arc<mpsc::Sender<Event>>,
+    event_tx: mpsc::Sender<Event>,
 }
 
 impl DiskWriter {
@@ -60,7 +60,7 @@ impl DiskWriter {
         file_size: u64,
         piece_size: u64,
         pieces: HashMap<u32, Piece>,
-        event_tx: Arc<mpsc::Sender<Event>>,
+        event_tx: mpsc::Sender<Event>,
     ) -> Self {
         // Ensure the download directory exists
         if let Some(parent_dir) = Path::new(&download_path).parent() {
@@ -279,7 +279,6 @@ mod test {
 
         // Create channel for events
         let (event_tx, _event_rx) = mpsc::channel(10);
-        let event_tx = Arc::new(event_tx);
 
         // Create a new DiskWriter
         let disk_writer = DiskWriter::new(download_path.clone(), 2048, 1024, pieces, event_tx);
@@ -310,7 +309,6 @@ mod test {
         pieces.insert(0, piece);
 
         let (event_tx, _event_rx) = mpsc::channel(10);
-        let event_tx = Arc::new(event_tx);
 
         let disk_writer = DiskWriter::new(download_path.clone(), 2048, 1024, pieces, event_tx);
 
@@ -341,7 +339,6 @@ mod test {
 
         // Create channel for events
         let (event_tx, mut event_rx) = mpsc::channel(10);
-        let event_tx = Arc::new(event_tx);
 
         // Create a new DiskWriter
         let mut disk_writer = DiskWriter::new(download_path.clone(), 2048, 1024, pieces, event_tx);
@@ -403,7 +400,6 @@ mod test {
 
         // Create channel for events
         let (event_tx, _event_rx) = mpsc::channel(10);
-        let event_tx = Arc::new(event_tx);
 
         // Create a new DiskWriter
         let mut disk_writer = DiskWriter::new(download_path.clone(), 1024, 1024, pieces, event_tx);
@@ -446,7 +442,6 @@ mod test {
 
         // Create channel for events
         let (event_tx, _event_rx) = mpsc::channel(10);
-        let event_tx = Arc::new(event_tx);
 
         // Create a new DiskWriter with a smaller file size
         let mut disk_writer = DiskWriter::new(
@@ -497,7 +492,6 @@ mod test {
 
         // Create channel for events
         let (event_tx, mut event_rx) = mpsc::channel(10);
-        let event_tx = Arc::new(event_tx);
 
         // Create a new DiskWriter
         let disk_writer = DiskWriter::new(download_path.clone(), 2048, 1024, pieces, event_tx);
@@ -602,7 +596,6 @@ mod test {
 
         // Create channel for events
         let (event_tx, _event_rx) = mpsc::channel(10);
-        let event_tx = Arc::new(event_tx);
 
         // Create a new DiskWriter
         let disk_writer = DiskWriter::new(download_path.clone(), 1024, 1024, pieces, event_tx);
