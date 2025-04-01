@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::Arc,
     time::Duration,
 };
 
@@ -15,7 +14,6 @@ pub enum MonitorCommand {
     RemovePeerSession(String),              // Remove a session from active tracking
     AddPeer(Peer),                          // Add a new peer to the queue
     PeerSessionEstablished(String),         // Confirm a peer connection was established
-    PeerSessionFailed(String, Peer),        // Notify that a connection attempt failed
     GetStatus(mpsc::Sender<MonitorStatus>), // Request monitor status
     Shutdown,                               // Signal to shutdown the monitor
 }
@@ -46,7 +44,7 @@ pub struct Monitor {
     failed_peers: HashMap<String, (Peer, Instant)>,
 
     // Channels for communication
-    event_tx: Arc<mpsc::Sender<Event>>,
+    event_tx: mpsc::Sender<Event>,
 
     // Configuration
     connection_timeout: Duration,
@@ -58,7 +56,7 @@ impl Monitor {
     pub fn new(
         max_connections: usize,
         peer_queue: VecDeque<Peer>,
-        event_tx: Arc<mpsc::Sender<Event>>,
+        event_tx: mpsc::Sender<Event>,
     ) -> Self {
         Self {
             max_connections,
@@ -119,11 +117,6 @@ impl Monitor {
                             },
                             MonitorCommand::PeerSessionEstablished(session_id) => {
                                 monitor.confirm_peer_connection(&session_id);
-                            },
-                            MonitorCommand::PeerSessionFailed(session_id, peer) => {
-                                monitor.handle_connection_failure(session_id, peer);
-                                // Try to establish other connections
-                                monitor.check_and_request_connections().await;
                             },
                             MonitorCommand::GetStatus(response_tx) => {
                                 let status = MonitorStatus {
@@ -314,9 +307,8 @@ mod test {
     }
 
     // Helper function to create a Monitor instance for testing
-    fn create_test_monitor() -> (Monitor, Arc<mpsc::Sender<Event>>) {
+    fn create_test_monitor() -> (Monitor, mpsc::Sender<Event>) {
         let (event_tx, _) = mpsc::channel(100);
-        let event_tx = Arc::new(event_tx);
         let peer_queue = VecDeque::new();
 
         let monitor = Monitor::new(5, peer_queue, event_tx.clone()).with_config(
@@ -331,7 +323,6 @@ mod test {
     #[test]
     fn test_new_and_with_config() {
         let (event_tx, _) = mpsc::channel(100);
-        let event_tx = Arc::new(event_tx);
         let peer_queue = VecDeque::new();
 
         // Test default constructor
@@ -463,7 +454,7 @@ mod test {
         let (verify_tx, mut verify_rx) = mpsc::channel::<Event>(10);
 
         // Replace the event sender with test sender
-        monitor.event_tx = Arc::new(verify_tx);
+        monitor.event_tx = verify_tx;
 
         // Add a pending session that should time out
         let session_id = "session_1".to_string();
@@ -506,7 +497,7 @@ mod test {
 
         // Create a channel to verify events
         let (verify_tx, mut verify_rx) = mpsc::channel::<Event>(10);
-        monitor.event_tx = Arc::new(verify_tx);
+        monitor.event_tx = verify_tx;
 
         // Add some peers to the queue
         monitor
@@ -606,7 +597,6 @@ mod test {
     //     // Setup
     //     let max_connections = 3;
     //     let (event_tx, mut event_rx) = mpsc::channel(100);
-    //     let event_tx = Arc::new(event_tx);
     //     let peer_queue = VecDeque::new();
     //
     //     // Create monitor with short intervals for faster testing
