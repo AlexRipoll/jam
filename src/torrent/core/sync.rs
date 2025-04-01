@@ -41,7 +41,7 @@ pub struct Synchronizer {
     queue_capacity: usize,
 
     // Channels for communication
-    event_tx: Arc<mpsc::Sender<Event>>,
+    event_tx: mpsc::Sender<Event>,
 
     // Keep track of whether dispatching is in progress
     dispatch_in_progress: bool,
@@ -105,7 +105,7 @@ impl Synchronizer {
     pub fn new(
         pieces: HashMap<u32, Piece>,
         queue_capacity: usize,
-        event_tx: Arc<mpsc::Sender<Event>>,
+        event_tx: mpsc::Sender<Event>,
     ) -> Self {
         let total_pieces = pieces.len();
 
@@ -160,7 +160,7 @@ impl Synchronizer {
     async fn handle_dispatch(
         data: DispatchData,
         dispatch_cmd_tx: &mpsc::Sender<SynchronizerCommand>,
-        event_tx: &Arc<mpsc::Sender<Event>>,
+        event_tx: &mpsc::Sender<Event>,
     ) -> Result<(), SynchronizerError> {
         // Create workers queue locally
         let workers_queue = Self::assign_pieces_to_workers(
@@ -277,7 +277,7 @@ impl Synchronizer {
                 } else {
                     self.close_session(&session_id);
                     self.event_tx
-                        .send(Event::ShutdownPeerSession {
+                        .send(Event::DisconnectPeerSession {
                             session_id: session_id.clone(),
                         })
                         .await?;
@@ -305,6 +305,16 @@ impl Synchronizer {
             }
             SynchronizerCommand::MarkPieceComplete(piece_index) => {
                 self.mark_piece_complete(piece_index);
+                for (session_id, pending_pieces) in self.workers_pending_pieces.clone().iter() {
+                    if pending_pieces.is_empty() {
+                        self.event_tx
+                            .send(Event::DisconnectPeerSession {
+                                session_id: session_id.clone(),
+                            })
+                            .await?;
+                        self.close_session(&session_id);
+                    }
+                }
             }
             SynchronizerCommand::UnassignPiece {
                 session_id,
@@ -713,7 +723,6 @@ mod tests {
     async fn test_new_synchronizer() {
         let pieces = create_pieces_hashmap(10, 16834);
         let (event_tx, _) = mpsc::channel(100);
-        let event_tx = Arc::new(event_tx);
 
         let sync = Synchronizer::new(pieces, 5, event_tx);
 
@@ -734,7 +743,6 @@ mod tests {
         let total_pieces = 14;
         let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
         let (event_tx, _) = mpsc::channel(100);
-        let event_tx = Arc::new(event_tx);
 
         let mut sync = Synchronizer::new(pieces.clone(), 5, event_tx);
 
@@ -782,7 +790,6 @@ mod tests {
     fn test_mark_piece_complete() {
         let pieces = create_pieces_hashmap(8, 16384);
         let (event_tx, _) = mpsc::channel(100);
-        let event_tx = Arc::new(event_tx);
 
         let mut sync = Synchronizer::new(pieces, 5, event_tx);
 
@@ -827,7 +834,6 @@ mod tests {
         let total_pieces = 14;
         let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
         let (event_tx, _) = mpsc::channel(100);
-        let event_tx = Arc::new(event_tx);
 
         let mut sync = Synchronizer::new(pieces, 5, event_tx);
 
@@ -859,7 +865,6 @@ mod tests {
         let total_pieces = 10;
         let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
         let (event_tx, _) = mpsc::channel(100);
-        let event_tx = Arc::new(event_tx);
 
         let mut sync = Synchronizer::new(pieces, 5, event_tx);
 
@@ -902,7 +907,6 @@ mod tests {
         let total_pieces = 8;
         let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
         let (event_tx, _) = mpsc::channel(100);
-        let event_tx = Arc::new(event_tx);
 
         let mut sync = Synchronizer::new(pieces.clone(), 5, event_tx);
 
@@ -1001,7 +1005,6 @@ mod tests {
         let total_pieces = 13;
         let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
         let (event_tx, _) = mpsc::channel(100);
-        let event_tx = Arc::new(event_tx);
 
         let mut sync = Synchronizer::new(pieces.clone(), 5, event_tx);
 
@@ -1040,7 +1043,6 @@ mod tests {
         let total_pieces = 16;
         let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
         let (event_tx, _) = mpsc::channel(100);
-        let event_tx = Arc::new(event_tx);
 
         let mut sync = Synchronizer::new(pieces.clone(), 5, event_tx);
 
@@ -1069,7 +1071,6 @@ mod tests {
         let total_pieces = 9;
         let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
         let (event_tx, _) = mpsc::channel(100);
-        let event_tx = Arc::new(event_tx);
 
         let mut sync = Synchronizer::new(pieces.clone(), 5, event_tx);
 
@@ -1115,7 +1116,6 @@ mod tests {
         let total_pieces = 8;
         let pieces = create_pieces_hashmap(total_pieces, 16384);
         let (event_tx, _) = mpsc::channel(100);
-        let event_tx = Arc::new(event_tx);
 
         let mut sync = Synchronizer::new(pieces, 5, event_tx);
 
@@ -1173,7 +1173,6 @@ mod tests {
     fn test_remove_pending_piece() {
         let pieces = create_pieces_hashmap(8, 16384);
         let (event_tx, _) = mpsc::channel(100);
-        let event_tx = Arc::new(event_tx);
 
         let mut sync = Synchronizer::new(pieces, 5, event_tx);
 
@@ -1209,7 +1208,6 @@ mod tests {
     fn test_increase_pieces_rarity() {
         let pieces = create_pieces_hashmap(8, 16384);
         let (event_tx, _) = mpsc::channel(100);
-        let event_tx = Arc::new(event_tx);
 
         let mut sync = Synchronizer::new(pieces, 5, event_tx);
 
@@ -1253,7 +1251,6 @@ mod tests {
     fn test_sort_pieces() {
         let pieces = create_pieces_hashmap(8, 16384);
         let (event_tx, _) = mpsc::channel(100);
-        let event_tx = Arc::new(event_tx);
 
         let mut sync = Synchronizer::new(pieces.clone(), 5, event_tx);
 
@@ -1273,7 +1270,6 @@ mod tests {
     fn test_populate_queue() {
         let pieces = create_pieces_hashmap(8, 16384);
         let (event_tx, _) = mpsc::channel(100);
-        let event_tx = Arc::new(event_tx);
 
         let mut sync = Synchronizer::new(pieces, 5, event_tx);
 
@@ -1297,7 +1293,6 @@ mod tests {
     fn test_remove_worker_pending_piece() {
         let pieces = create_pieces_hashmap(8, 16384);
         let (event_tx, _) = mpsc::channel(100);
-        let event_tx = Arc::new(event_tx);
 
         let mut sync = Synchronizer::new(pieces, 5, event_tx);
 
@@ -1328,7 +1323,6 @@ mod tests {
         let total_pieces = 10;
         let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
         let (event_tx, _) = mpsc::channel(100);
-        let event_tx = Arc::new(event_tx);
 
         let mut sync = Synchronizer::new(pieces, 5, event_tx);
 
