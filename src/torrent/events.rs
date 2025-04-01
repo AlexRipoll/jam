@@ -11,16 +11,8 @@ pub enum Event {
         session_id: String,
         peer_addr: String,
     },
-    PeerSessionEstablished {
-        session_id: String,
-        peer_addr: String,
-    },
-    // Event sent to notify a peer connection failed
-    PeerSessionFailed {
-        session_id: String,
-    },
     // Event sent to a peer session to close the connection
-    ShutdownPeerSession {
+    DisconnectPeerSession {
         session_id: String,
     },
     // Event sent to notify a peer closed the connection
