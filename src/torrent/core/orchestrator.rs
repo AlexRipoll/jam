@@ -6,9 +6,14 @@ use std::{
 
 use protocol::piece::Piece;
 use tokio::{sync::mpsc, task::JoinHandle};
-use tracing::debug;
+use tracing::{debug, error};
 
-use crate::torrent::{core::disk::DiskWriterCommand, events::Event, peer::Peer};
+use crate::torrent::{
+    core::disk::DiskWriterCommand,
+    events::Event,
+    peer::Peer,
+    peers::session::{PeerSession, PeerSessionEvent},
+};
 
 use super::{
     disk::DiskWriter,
@@ -19,10 +24,17 @@ use super::{
 // Main Orchestrator that coordinates the Synchronizer and Monitor
 #[derive(Debug)]
 pub struct Orchestrator {
+    peer_id: [u8; 20],
+    info_hash: [u8; 20],
+
+    // FIX: remove unnecessary
     // Channels
-    event_tx: Arc<mpsc::Sender<Event>>,
+    event_tx: mpsc::Sender<Event>,
     event_rx: mpsc::Receiver<Event>,
 
+    peer_sessions: HashMap<String, PeerSessionData>,
+
+    // FIX: remove unnecessary
     // Internal components
     synchronizer: Option<Synchronizer>,
     synchronizer_tx: Option<mpsc::Sender<SynchronizerCommand>>,
@@ -38,10 +50,21 @@ pub struct Orchestrator {
     download_path: String,
     file_size: u64,
     pieces_size: u64,
+    timeout_threshold: u64,
+}
+
+// Define a structure to group session-related data
+#[derive(Debug)]
+struct PeerSessionData {
+    tx: mpsc::Sender<PeerSessionEvent>,
+    // Using underscore prefix to indicate this field is kept only to maintain the lifetime
+    _handle: JoinHandle<()>,
 }
 
 impl Orchestrator {
     pub fn new(
+        peer_id: [u8; 20],
+        info_hash: [u8; 20],
         max_connections: usize,
         queue_capacity: usize,
         pieces: HashMap<u32, Piece>,
@@ -49,14 +72,18 @@ impl Orchestrator {
         download_path: String,
         file_size: u64,
         pieces_size: u64,
+        timeout_threshold: u64,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel(100);
 
         Self {
-            event_tx: Arc::new(event_tx),
+            peer_id,
+            info_hash,
+            event_tx,
             event_rx,
             synchronizer: None,
             synchronizer_tx: None,
+            peer_sessions: HashMap::new(),
             monitor: None,
             monitor_tx: None,
             max_connections,
@@ -66,6 +93,7 @@ impl Orchestrator {
             download_path,
             file_size,
             pieces_size,
+            timeout_threshold,
         }
     }
 
@@ -74,7 +102,7 @@ impl Orchestrator {
         let synchronizer = Synchronizer::new(
             self.pieces.clone(),
             self.queue_capacity,
-            Arc::clone(&self.event_tx),
+            self.event_tx.clone(),
         );
 
         // Start the synchronizer
@@ -87,7 +115,7 @@ impl Orchestrator {
         let monitor = Monitor::new(
             self.max_connections,
             self.peers.clone(),
-            Arc::clone(&self.event_tx),
+            self.event_tx.clone(),
         );
 
         // Start the monitor
@@ -99,7 +127,7 @@ impl Orchestrator {
             self.file_size,
             self.pieces_size,
             self.pieces.clone(),
-            Arc::clone(&self.event_tx),
+            self.event_tx.clone(),
         );
 
         let (disk_tx, disk_handle) = disk_writer.run();
@@ -112,45 +140,79 @@ impl Orchestrator {
             let _disk_handle = disk_handle;
 
             while let Some(event) = self.event_rx.recv().await {
+                // Handle events from peer sessions
                 match event {
-                    // Handle events from peer sessions
-                    Event::PeerSessionEstablished {
-                        session_id,
-                        peer_addr,
-                    } => {
-                        let _ = monitor_tx
-                            .send(MonitorCommand::PeerSessionEstablished(session_id.clone()))
-                            .await;
-                        debug!("[{}]:: Peer session {} established", peer_addr, session_id);
-                    }
-
                     Event::SpawnPeerSession {
                         session_id,
                         peer_addr,
                     } => {
-                        // TODO: refactor PeerSession to follow the same pattern as the
-                        // Synchronizer and the Monitor
-                        //
-                        //  PeerSession::new(
-                        //      session_id,
-                        //      self.peer_id,
-                        //      self.info_hash,
-                        //      peer_addr,
-                        //      disk_tx,
-                        // Arc::clone(&self.event_tx),
-                        //      rx,
-                        //  )
-                        //  .initialize();
-                        //
-                        //  -> insert the peer session tx
+                        let session = PeerSession::new(
+                            session_id.clone(),
+                            self.peer_id,
+                            self.info_hash,
+                            peer_addr.clone(),
+                            self.timeout_threshold,
+                            self.event_tx.clone(),
+                        );
+
+                        match session.run().await {
+                            Ok((session_tx, session_handle)) => {
+                                self.peer_sessions.insert(
+                                    session_id.clone(),
+                                    PeerSessionData {
+                                        tx: session_tx,
+                                        _handle: session_handle,
+                                    },
+                                );
+
+                                // Notify the monitor that this session is established
+                                let _ = monitor_tx
+                                    .send(MonitorCommand::PeerSessionEstablished(
+                                        session_id.clone(),
+                                    ))
+                                    .await;
+
+                                debug!("[{peer_addr}]:: Peer session {session_id} established");
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Could not establish connection with peer at {peer_addr}: {e}"
+                                );
+                                // notify monitor to remove peer session
+                                let _ = monitor_tx
+                                    .send(MonitorCommand::RemovePeerSession(session_id.clone()))
+                                    .await;
+
+                                // Also notify synchronizer to clean up any assigned pieces
+                                let _ = sync_tx
+                                    .send(SynchronizerCommand::ClosePeerSession(session_id))
+                                    .await;
+                            }
+                        }
                     }
-                    Event::ShutdownPeerSession { session_id } => {
+                    // Event sent by the synchronizer
+                    Event::DisconnectPeerSession { session_id } => {
+                        if let Some(peer_session_data) = self.peer_sessions.get(&session_id) {
+                            // send shutdown signal to peer session
+                            let _ = peer_session_data.tx.send(PeerSessionEvent::Shutdown).await;
+                        } else {
+                            error!("Peer session with ID {session_id} not found");
+                        }
+
                         // notify monitor to remove peer session
                         let _ = monitor_tx
                             .send(MonitorCommand::RemovePeerSession(session_id))
                             .await;
                     }
+                    // Event sent by the peer session
                     Event::PeerSessionClosed { session_id } => {
+                        if let Some(peer_session_data) = self.peer_sessions.get(&session_id) {
+                            // send shutdown signal to peer session
+                            let _ = peer_session_data.tx.send(PeerSessionEvent::Shutdown).await;
+                        } else {
+                            error!("Peer session with ID {} not found", session_id.clone());
+                        }
+
                         // notify monitor to remove peer session
                         let _ = monitor_tx
                             .send(MonitorCommand::RemovePeerSession(session_id.clone()))
@@ -158,7 +220,7 @@ impl Orchestrator {
 
                         // Also notify synchronizer to clean up any assigned pieces
                         let _ = sync_tx
-                            .send(SynchronizerCommand::ClosePeerSession(session_id))
+                            .send(SynchronizerCommand::ClosePeerSession(session_id.clone()))
                             .await;
                     }
                     Event::PeerBitfield {
@@ -228,9 +290,25 @@ impl Orchestrator {
                             .await;
                     }
                     Event::PieceDispatch { session_id, piece } => {
-                        // let _ = session_tx
-                        //     .send(PeerSessionCommand::DispatchPieces(piece_index))
-                        //     .await;
+                        if let Some(peer_session_data) = self.peer_sessions.get(&session_id) {
+                            // dispatch piece to peer session
+                            let _ = peer_session_data
+                                .tx
+                                .send(PeerSessionEvent::AssignPiece { piece })
+                                .await;
+                        } else {
+                            error!("Peer session with ID {} not found", session_id.clone());
+
+                            // notify monitor to remove peer session
+                            let _ = monitor_tx
+                                .send(MonitorCommand::RemovePeerSession(session_id.clone()))
+                                .await;
+
+                            // Also notify synchronizer to clean up any assigned pieces
+                            let _ = sync_tx
+                                .send(SynchronizerCommand::ClosePeerSession(session_id.clone()))
+                                .await;
+                        }
                     }
                     Event::PeerSessionTimeout { session_id } => {
                         // TODO: remove peer channels and send shutdown event
@@ -245,7 +323,7 @@ impl Orchestrator {
             }
 
             // The main loop has exited, clean up
-            println!("Orchestrator shutting down");
+            debug!("Orchestrator shutting down");
         });
 
         orchestrator_handle
@@ -282,19 +360,6 @@ impl Orchestrator {
     // }
 }
 
-// #[derive(Debug)]
-// struct Orchestrator {
-//     peer_id: [u8; 20],
-//     info_hash: [u8; 20],
-//     action: Action,
-//     // state: State,
-//     peers: HashSet<Peer>,
-//     workers: HashSet<String>,
-//     workers_channel: HashMap<String, mpsc::Sender<Event>>, // worker_id -> worker sender for sending Events to worker
-//     queue_capacity: usize,
-//     disk_tx: Arc<mpsc::Sender<DiskEvent>>,
-// }
-
 #[derive(Debug)]
 pub enum OrchestratorError {
     WorkerNotFound(String),
@@ -327,201 +392,3 @@ impl From<mpsc::error::SendError<Event>> for OrchestratorError {
         OrchestratorError::ChannelTxError(err)
     }
 }
-//
-// #[cfg(test)]
-// mod test {
-//     use super::Orchestrator;
-//     use crate::torrent::{events::Event, state::State};
-//     use protocol::{bitfield::Bitfield, piece::Piece};
-//     use std::collections::{HashMap, HashSet, VecDeque};
-//     use tokio::sync::mpsc;
-//
-//     pub fn mock_pieces(total_piece: u32) -> HashMap<u32, Piece> {
-//         (0..total_piece)
-//             .map(|i| (i, Piece::new(i, 1024, [i as u8; 20])))
-//             .collect()
-//     }
-//
-//     #[test]
-//     fn test_assign_pieces_to_workers() {
-//         let total_pieces = 15;
-//         let pieces = mock_pieces(total_pieces);
-//         let mut state = State::new(pieces);
-//
-//         let peer1 = (
-//             "worker1",
-//             Bitfield::from(&vec![0b11001000, 0b0], total_pieces as usize),
-//         );
-//         let peer2 = (
-//             "worker2",
-//             Bitfield::from(&vec![0b01001101, 0b10000000], total_pieces as usize),
-//         );
-//         let peer3 = (
-//             "worker3",
-//             Bitfield::from(&vec![0b11100010, 0b01010000], total_pieces as usize),
-//         );
-//         let peer4 = (
-//             "worker4",
-//             Bitfield::from(&vec![0b11101101, 0b10110000], total_pieces as usize),
-//         );
-//
-//         for (id, bitfield) in [&peer1, &peer2, &peer3, &peer4] {
-//             state.process_bitfield(id, bitfield.clone());
-//         }
-//
-//         let orchestrator = Orchestrator::new(state, 5, HashSet::new());
-//
-//         let assignments = orchestrator.assign_pieces_to_workers();
-//         assert_eq!(assignments.get(peer1.0), Some(&VecDeque::from([0])));
-//         assert_eq!(assignments.get(peer2.0), Some(&VecDeque::from([1, 5, 8])));
-//         assert_eq!(
-//             assignments.get(peer3.0),
-//             Some(&VecDeque::from([2, 6, 9, 11]))
-//         );
-//         assert_eq!(assignments.get(peer4.0), Some(&VecDeque::from([4, 7, 10])));
-//     }
-//
-//     #[tokio::test]
-//     async fn test_dispatch_pending_pieces() {
-//         let total_pieces = 10;
-//         let pieces = mock_pieces(total_pieces);
-//         let mut state = State::new(pieces);
-//         state.bitfield = Bitfield::from(&vec![0b10000001, 0b01101100], total_pieces as usize);
-//
-//         let peer1 = (
-//             "worker1",
-//             Bitfield::from(&vec![0b11001010, 0b0], total_pieces as usize),
-//         );
-//         let peer2 = (
-//             "worker2",
-//             Bitfield::from(&vec![0b01001101, 0b10000000], total_pieces as usize),
-//         );
-//
-//         let peer3 = (
-//             "worker3",
-//             Bitfield::from(&vec![0b10001001, 0b00000000], total_pieces as usize),
-//         );
-//
-//         for (id, bitfield) in [&peer1, &peer2, &peer3] {
-//             state.process_bitfield(id, bitfield.clone());
-//         }
-//
-//         state.pending_pieces = vec![1, 4, 5, 6, 8];
-//
-//         let mut orchestrator = Orchestrator::new(state, 5, HashSet::new());
-//
-//         // Create a test channel (1 slot to ensure async behavior)
-//         let (worker1_tx, worker1_rx) = mpsc::channel::<Event>(10);
-//         // Insert mock channel into orchestrator
-//         orchestrator
-//             .workers_channel
-//             .insert(peer1.0.to_string(), worker1_tx);
-//
-//         let (worker2_tx, worker2_rx) = mpsc::channel::<Event>(10);
-//         orchestrator
-//             .workers_channel
-//             .insert(peer2.0.to_string(), worker2_tx);
-//
-//         let (worker3_tx, worker3_rx) = mpsc::channel::<Event>(10);
-//         orchestrator
-//             .workers_channel
-//             .insert(peer3.0.to_string(), worker3_tx);
-//
-//         orchestrator.dispatch_pending_pieces().await.unwrap();
-//
-//         // Check that workers have been assigned pieces to download
-//         let worker1_pending_pieces = orchestrator
-//             .state
-//             .workers_pending_pieces
-//             .get(peer1.0)
-//             .unwrap();
-//         assert_eq!(worker1_pending_pieces, &vec![1, 6]);
-//         let worker2_pending_pieces = orchestrator
-//             .state
-//             .workers_pending_pieces
-//             .get(peer2.0)
-//             .unwrap();
-//         assert_eq!(worker2_pending_pieces, &vec![5, 8]);
-//         let worker3_pending_pieces = orchestrator
-//             .state
-//             .workers_pending_pieces
-//             .get(peer3.0)
-//             .unwrap();
-//         assert_eq!(worker3_pending_pieces, &vec![4]);
-//     }
-//
-//     #[tokio::test]
-//     async fn test_dispatch_pending_pieces_append_to_non_empty_queues() {
-//         let total_pieces = 10;
-//         let pieces = mock_pieces(total_pieces);
-//         let mut state = State::new(pieces);
-//         state.bitfield = Bitfield::from(&vec![0b10000001, 0b01101100], total_pieces as usize);
-//
-//         let peer1 = (
-//             "worker1",
-//             Bitfield::from(&vec![0b11001010, 0b0], total_pieces as usize),
-//         );
-//         let peer2 = (
-//             "worker2",
-//             Bitfield::from(&vec![0b01001101, 0b10000000], total_pieces as usize),
-//         );
-//
-//         let peer3 = (
-//             "worker3",
-//             Bitfield::from(&vec![0b10001001, 0b00000000], total_pieces as usize),
-//         );
-//
-//         for (id, bitfield) in [&peer1, &peer2, &peer3] {
-//             state.process_bitfield(id, bitfield.clone());
-//         }
-//
-//         state.pending_pieces = vec![1, 4, 5, 6, 8];
-//         state
-//             .workers_pending_pieces
-//             .insert(peer1.0.to_string(), vec![7, 9]);
-//         state
-//             .workers_pending_pieces
-//             .insert(peer3.0.to_string(), vec![2]);
-//
-//         let mut orchestrator = Orchestrator::new(state, 5, HashSet::new());
-//
-//         // Create a test channel (1 slot to ensure async behavior)
-//         let (worker1_tx, worker1_rx) = mpsc::channel::<Event>(10);
-//         // Insert mock channel into orchestrator
-//         orchestrator
-//             .workers_channel
-//             .insert(peer1.0.to_string(), worker1_tx);
-//
-//         let (worker2_tx, worker2_rx) = mpsc::channel::<Event>(10);
-//         orchestrator
-//             .workers_channel
-//             .insert(peer2.0.to_string(), worker2_tx);
-//
-//         let (worker3_tx, worker3_rx) = mpsc::channel::<Event>(10);
-//         orchestrator
-//             .workers_channel
-//             .insert(peer3.0.to_string(), worker3_tx);
-//
-//         orchestrator.dispatch_pending_pieces().await.unwrap();
-//
-//         // Check that workers have been assigned pieces to download
-//         let worker1_pending_pieces = orchestrator
-//             .state
-//             .workers_pending_pieces
-//             .get(peer1.0)
-//             .unwrap();
-//         assert_eq!(worker1_pending_pieces, &vec![7, 9, 1, 6]);
-//         let worker2_pending_pieces = orchestrator
-//             .state
-//             .workers_pending_pieces
-//             .get(peer2.0)
-//             .unwrap();
-//         assert_eq!(worker2_pending_pieces, &vec![5, 8]);
-//         let worker3_pending_pieces = orchestrator
-//             .state
-//             .workers_pending_pieces
-//             .get(peer3.0)
-//             .unwrap();
-//         assert_eq!(worker3_pending_pieces, &vec![2, 4]);
-//     }
-// }
