@@ -306,6 +306,7 @@ impl Synchronizer {
                 self.mark_piece_complete(piece_index);
                 // check if any of the peer session has completed all the work
                 for (session_id, pending_pieces) in self.workers_pending_pieces.clone().iter() {
+                    // TODO: check also if has_assignable_pieces
                     if pending_pieces.is_empty() {
                         self.event_tx
                             .send(Event::DisconnectPeerSession {
