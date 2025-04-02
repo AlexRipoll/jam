@@ -275,7 +275,6 @@ impl Synchronizer {
                             .await?;
                     }
                 } else {
-                    self.close_session(&session_id);
                     self.event_tx
                         .send(Event::DisconnectPeerSession {
                             session_id: session_id.clone(),
@@ -305,6 +304,7 @@ impl Synchronizer {
             }
             SynchronizerCommand::MarkPieceComplete(piece_index) => {
                 self.mark_piece_complete(piece_index);
+                // check if any of the peer session has completed all the work
                 for (session_id, pending_pieces) in self.workers_pending_pieces.clone().iter() {
                     if pending_pieces.is_empty() {
                         self.event_tx

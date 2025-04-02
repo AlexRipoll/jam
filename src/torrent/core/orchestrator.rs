@@ -182,11 +182,6 @@ impl Orchestrator {
                                 let _ = monitor_tx
                                     .send(MonitorCommand::RemovePeerSession(session_id.clone()))
                                     .await;
-
-                                // Also notify synchronizer to clean up any assigned pieces
-                                let _ = sync_tx
-                                    .send(SynchronizerCommand::ClosePeerSession(session_id))
-                                    .await;
                             }
                         }
                     }
