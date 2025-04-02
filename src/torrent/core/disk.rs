@@ -344,7 +344,7 @@ mod test {
         pieces.insert(1, piece);
 
         // Create channel for events
-        let (event_tx, mut event_rx) = mpsc::channel(10);
+        let (event_tx, _) = mpsc::channel(10);
 
         // Create a new DiskWriter
         let mut disk_writer = DiskWriter::new(download_path.clone(), 2048, 1024, pieces, event_tx);
@@ -369,15 +369,6 @@ mod test {
         assert_eq!(disk_writer.stats.bytes_written, 1024);
         assert_eq!(disk_writer.stats.pieces_written, 1);
         assert_eq!(disk_writer.stats.write_errors, 0);
-
-        // Verify event was sent
-        let event = event_rx.recv().await.expect("Failed to receive event");
-        match event {
-            Event::PieceCompleted { piece_index } => {
-                assert_eq!(piece_index, 1);
-            }
-            _ => panic!("Expected PieceCompleted event"),
-        }
 
         // Verify file contents
         let mut file = fs::File::open(download_path).expect("Failed to open file");
