@@ -102,11 +102,22 @@ impl DiskWriter {
             // Process commands until channel closes or shutdown received
             while let Some(command) = command_rx.recv().await {
                 match command {
-                    // FIX: send piece instead of piece_index so there is no need to have the piece field
+                    // FIX: send piece instead of piece_index so there is no need to have the pieces hashmap field
                     DiskWriterCommand::WritePiece { piece_index, data } => {
                         if let Err(e) = self.write_piece(&mut writer, piece_index, data).await {
                             error!("Failed to write piece {}: {}", piece_index, e);
                             self.stats.write_errors += 1;
+                        } else {
+                            // Send event notification
+                            if let Err(e) = self
+                                .event_tx
+                                .send(Event::PieceCompleted { piece_index })
+                                .await
+                            {
+                                // TODO: add piece index to queue and retry notifying the
+                                // orchestrator
+                                error!("Failed to send PieceCompleted event: {}", e);
+                            }
                         }
                     }
                     DiskWriterCommand::Flush => {
@@ -191,11 +202,6 @@ impl DiskWriter {
         // Update stats
         self.stats.bytes_written += data.len() as u64;
         self.stats.pieces_written += 1;
-
-        // Send event notification
-        self.event_tx
-            .send(Event::PieceCompleted { piece_index })
-            .await?;
 
         debug!(
             piece_index = ?piece_index,
