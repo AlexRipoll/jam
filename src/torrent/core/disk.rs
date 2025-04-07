@@ -3,7 +3,6 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, BufWriter, Seek, SeekFrom, Write},
     path::Path,
-    sync::Arc,
 };
 
 use protocol::piece::Piece;
