@@ -3,7 +3,6 @@ use std::{
     collections::HashMap,
     error::Error,
     fmt::Display,
-    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -11,7 +10,6 @@ use protocol::{error::ProtocolError, piece::Piece};
 use sha1::{Digest, Sha1};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{debug, error};
-use tracing_subscriber::fmt::writer::OrElse;
 
 use crate::torrent::peers::{
     message::{MessageError, MessageId, PiecePayload, TransferPayload},
@@ -454,5 +452,228 @@ impl Error for CoordinatorError {
             CoordinatorError::RequesterTxError(err) => Some(err),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn test_new_coordinator() {
+        let (tx, _) = mpsc::channel::<PeerSessionEvent>(100);
+        let coordinator = Coordinator::new(10, tx);
+
+        assert!(coordinator.is_choked);
+        assert!(coordinator.active_pieces.is_empty());
+        assert!(coordinator.queue.is_empty());
+        assert!(coordinator.in_progress.is_empty());
+        assert!(coordinator.in_progress_timestamps.is_empty());
+        assert_eq!(coordinator.timeout_threshold, 10);
+        assert_eq!(coordinator.strikes, 0);
+        assert!(!coordinator.request_in_progress);
+    }
+
+    #[tokio::test]
+    async fn test_new_coordinator_with_zero_timeout() {
+        let (tx, _) = mpsc::channel::<PeerSessionEvent>(100);
+        let coordinator = Coordinator::new(0, tx);
+
+        // Should use default of 5 seconds when 0 is provided
+        assert_eq!(coordinator.timeout_threshold, 5);
+    }
+
+    #[tokio::test]
+    async fn test_handle_choked_command() {
+        let (event_tx, _) = mpsc::channel::<PeerSessionEvent>(100);
+        let mut coordinator = Coordinator::new(10, event_tx);
+        let (requester_tx, _) = mpsc::channel::<Piece>(1);
+
+        coordinator.is_choked = false; // Start unchoked
+
+        // Handle the choked command
+        coordinator
+            .handle_command(CoordinatorCommand::Choked, &requester_tx)
+            .await
+            .unwrap();
+
+        assert!(coordinator.is_choked);
+    }
+
+    #[tokio::test]
+    async fn test_handle_unchoked_command() {
+        let (event_tx, _) = mpsc::channel::<PeerSessionEvent>(100);
+        let mut coordinator = Coordinator::new(10, event_tx);
+        let (requester_tx, _) = mpsc::channel::<Piece>(1);
+
+        // Start choked
+        assert!(coordinator.is_choked);
+
+        // Handle the unchoked command
+        coordinator
+            .handle_command(CoordinatorCommand::Unchoked, &requester_tx)
+            .await
+            .unwrap();
+
+        assert!(!coordinator.is_choked);
+    }
+
+    #[tokio::test]
+    async fn test_add_piece_to_queue() {
+        let (event_tx, _) = mpsc::channel::<PeerSessionEvent>(100);
+        let mut coordinator = Coordinator::new(10, event_tx);
+        let (requester_tx, mut requester_rx) = mpsc::channel::<Piece>(1);
+
+        // assert that the queue is initially empty
+        assert!(coordinator.queue.is_empty());
+
+        // Create a test piece
+        let piece = Piece::new(1, 16384, [0u8; 20]);
+
+        // Add the piece to the queue
+        coordinator
+            .handle_command(
+                CoordinatorCommand::AddPiece {
+                    piece: piece.clone(),
+                },
+                &requester_tx,
+            )
+            .await
+            .unwrap();
+
+        // Piece should be in queue
+        assert_eq!(coordinator.queue.len(), 1);
+        assert_eq!(coordinator.queue[0].index(), piece.index());
+
+        // Since we're choked, no piece should be sent to requester
+        assert!(requester_rx.try_recv().is_err());
+
+        // Now unchoke and add another piece
+        coordinator
+            .handle_command(CoordinatorCommand::Unchoked, &requester_tx)
+            .await
+            .unwrap();
+
+        let piece2 = Piece::new(2, 16384, [0u8; 20]);
+        coordinator
+            .handle_command(
+                CoordinatorCommand::AddPiece {
+                    piece: piece2.clone(),
+                },
+                &requester_tx,
+            )
+            .await
+            .unwrap();
+
+        // Now we should receive a piece request
+        let requested_piece = requester_rx.try_recv().unwrap();
+        assert_eq!(requested_piece.index(), 1); // First piece should be requested
+    }
+
+    #[tokio::test]
+    async fn test_request_dispatched() {
+        let (event_tx, _) = mpsc::channel::<PeerSessionEvent>(100);
+        let mut coordinator = Coordinator::new(10, event_tx);
+        let (requester_tx, _) = mpsc::channel::<Piece>(1);
+
+        // Create a test piece
+        let piece = Piece::new(1, 16384, [0u8; 20]);
+
+        // Add piece to the queue
+        coordinator.queue.push(piece.clone());
+        assert_eq!(coordinator.queue.len(), 1);
+
+        // Mark piece as being requested
+        coordinator.request_in_progress = true;
+
+        // Handle request dispatched
+        coordinator
+            .handle_command(
+                CoordinatorCommand::RequestDispatched {
+                    piece: piece.clone(),
+                },
+                &requester_tx,
+            )
+            .await
+            .unwrap();
+
+        // Check piece state
+        assert!(coordinator
+            .active_pieces
+            .contains_key(&(piece.index() as usize)));
+        assert_eq!(coordinator.in_progress.len(), 1);
+        assert_eq!(coordinator.in_progress[0].index(), piece.index());
+        assert!(coordinator
+            .in_progress_timestamps
+            .contains_key(&piece.index()));
+        // Check queue state
+        assert!(coordinator.queue.is_empty());
+        assert!(!coordinator.request_in_progress);
+
+        // since the queue is empty no other piece is sent
+    }
+
+    #[tokio::test]
+    async fn test_process_piece_message() {
+        let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
+        let mut coordinator = Coordinator::new(10, event_tx);
+        let (requester_tx, _) = mpsc::channel::<Piece>(1);
+
+        // Create a piece payload
+        let block_data = vec![1; 16384];
+        let payload = PiecePayload {
+            index: 1,
+            begin: 0,
+            block: block_data.clone(),
+        };
+
+        // Set the piece hash to match what is_valid_piece would compute
+        let mut hasher = Sha1::new();
+        hasher.update(&block_data);
+        let hash = hasher.finalize();
+
+        // Create a test piece and add it to active pieces
+        let piece = Piece::new(1, 16384, hash.into());
+        coordinator
+            .active_pieces
+            .insert(piece.index() as usize, piece.clone());
+        coordinator.in_progress.push(piece.clone());
+
+        let serialized = payload.serialize();
+
+        // Process the piece message
+        coordinator
+            .handle_command(
+                CoordinatorCommand::DownloadPiece {
+                    payload: Some(serialized.clone()),
+                },
+                &requester_tx,
+            )
+            .await
+            .unwrap();
+
+        // In a real implementation, we would need to properly hash the data
+        let active_piece = coordinator
+            .active_pieces
+            .get_mut(&(piece.index() as usize))
+            .unwrap();
+
+        assert!(active_piece.is_ready());
+        assert!(!active_piece.is_finalized());
+
+        // Since the piece is now complete, we should get a PieceAssembled event
+        if let Some(PeerSessionEvent::PieceAssembled { piece_index, data }) =
+            event_rx.try_recv().ok()
+        {
+            assert_eq!(piece_index, piece.index());
+            assert_eq!(data.len(), piece.size());
+        } else {
+            panic!("Expected PieceAssembled event");
+        }
+
+        // The piece should be removed from in_progress
+        assert!(coordinator.in_progress.is_empty());
     }
 }
