@@ -252,7 +252,14 @@ impl Coordinator {
                     })
                     .await?;
 
-                return Err(CoordinatorError::CorruptedPiece(piece.index()));
+                // remove the corrupted piece from the peer
+                let piece_index = piece.index();
+                self.active_pieces.remove(&(piece_index as usize));
+                self.in_progress
+                    .retain(|unconfirmed_piece| unconfirmed_piece.index() != piece_index);
+                self.in_progress_timestamps.remove(&piece_index);
+
+                return Err(CoordinatorError::CorruptedPiece(piece_index));
             }
         }
 
@@ -675,5 +682,58 @@ mod test {
 
         // The piece should be removed from in_progress
         assert!(coordinator.in_progress.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_process_piece_message_corrupted_piece() {
+        let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
+        let mut coordinator = Coordinator::new(10, event_tx);
+        let (requester_tx, _) = mpsc::channel::<Piece>(1);
+
+        // Create a piece payload
+        let block_data = vec![1; 16384];
+        let payload = PiecePayload {
+            index: 1,
+            begin: 0,
+            block: block_data.clone(),
+        };
+
+        // Create a test piece and add it to active pieces
+        let piece = Piece::new(1, 16384, [1u8; 20]);
+        coordinator
+            .active_pieces
+            .insert(piece.index() as usize, piece.clone());
+        coordinator.in_progress.push(piece.clone());
+
+        let serialized = payload.serialize();
+
+        // Process the piece message
+        coordinator
+            .handle_command(
+                CoordinatorCommand::DownloadPiece {
+                    payload: Some(serialized.clone()),
+                },
+                &requester_tx,
+            )
+            .await
+            .unwrap_err();
+
+        // Since the piece is now complete, we should get a PieceAssembled event
+        if let Some(PeerSessionEvent::PieceCorrupted { piece_index }) = event_rx.try_recv().ok() {
+            assert_eq!(piece_index, piece.index());
+        } else {
+            panic!("Expected PieceCorrupted event");
+        }
+
+        // The piece should be removed from all the peer's fields
+        assert!(coordinator
+            .active_pieces
+            .get(&(piece.index() as usize))
+            .is_none());
+        assert!(!coordinator.in_progress.contains(&piece));
+        assert!(coordinator
+            .in_progress_timestamps
+            .get(&(piece.index()))
+            .is_none());
     }
 }
