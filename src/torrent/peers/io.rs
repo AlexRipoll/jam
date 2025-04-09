@@ -157,10 +157,12 @@ impl Error for IoError {
 
 #[cfg(test)]
 mod test {
-    use crate::download::io::read_message;
-    use crate::error::error::JamError;
-    use protocol::message::{Message, MessageId};
     use tokio::io::{duplex, AsyncWriteExt};
+
+    use crate::torrent::peers::{
+        io::{read_message, IoError},
+        message::{Message, MessageId},
+    };
 
     #[tokio::test]
     async fn test_read_message() {
@@ -232,7 +234,12 @@ mod test {
         let result = read_message(&mut read_half).await;
 
         // Assertions
-        assert_eq!(result.unwrap_err(), JamError::IncompleteMessage);
+        match result.unwrap_err() {
+            IoError::IncompleteMessage => {
+                // do nothing: expected result
+            }
+            _ => panic!("IoError::IncompleteMessage error expected"),
+        }
     }
 
     #[tokio::test]
@@ -245,6 +252,11 @@ mod test {
         let result = read_message(&mut read_half).await;
 
         // Assertions
-        assert_eq!(result.unwrap_err(), JamError::IncompleteMessage);
+        match result.unwrap_err() {
+            IoError::IncompleteMessage => {
+                // do nothing: expected result
+            }
+            _ => panic!("IoError::IncompleteMessage error expected"),
+        }
     }
 }
