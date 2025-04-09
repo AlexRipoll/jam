@@ -160,7 +160,7 @@ impl Coordinator {
             CoordinatorCommand::ReleasePiece { piece_index } => {
                 self.release_piece(piece_index).await?
             }
-            CoordinatorCommand::ReleasePieces => self.release_pieces().await?,
+            CoordinatorCommand::ReleasePieces => self.release_all_pieces().await?,
             CoordinatorCommand::RequestDispatched { piece } => {
                 self.active_pieces
                     .entry(piece.index() as usize)
@@ -185,7 +185,7 @@ impl Coordinator {
 
                     // Check if we've reached max strikes
                     if self.is_strikeout() {
-                        self.release_pieces().await?;
+                        self.release_all_pieces().await?;
                     }
                 }
             }
@@ -333,7 +333,7 @@ impl Coordinator {
     }
 
     // release pieces in progress so they are no longuer assigned to the current worker
-    async fn release_pieces(&mut self) -> Result<(), CoordinatorError> {
+    async fn release_all_pieces(&mut self) -> Result<(), CoordinatorError> {
         let pieces_index: Vec<u32> = self.in_progress.iter().map(|p| p.index()).collect();
         self.event_tx
             .send(PeerSessionEvent::UnassignPieces { pieces_index })
@@ -735,5 +735,117 @@ mod test {
             .in_progress_timestamps
             .get(&(piece.index()))
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_release_piece() {
+        let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
+        let mut coordinator = Coordinator::new(10, event_tx);
+
+        // Add a piece to in_progress
+        let piece = Piece::new(1, 16384, [1u8; 20]);
+        coordinator.in_progress.push(piece.clone());
+        coordinator
+            .in_progress_timestamps
+            .insert(piece.index(), Instant::now());
+
+        // Release the piece
+        coordinator.release_piece(piece.index()).await.unwrap();
+
+        // Check that piece was released
+        assert!(coordinator.in_progress.is_empty());
+        assert!(coordinator.in_progress_timestamps.is_empty());
+
+        // Check that UnassignPiece event was sent
+        if let Some(PeerSessionEvent::UnassignPiece { piece_index }) = event_rx.try_recv().ok() {
+            assert_eq!(piece_index, piece.index());
+        } else {
+            panic!("Expected UnassignPiece event");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_release_pieces() {
+        let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
+        let mut coordinator = Coordinator::new(10, event_tx);
+
+        // Add multiple pieces to in_progress
+        let piece1 = Piece::new(1, 16384, [1u8; 20]);
+        let piece2 = Piece::new(2, 16384, [1u8; 20]);
+        let piece2 = Piece::new(3, 16384, [1u8; 20]);
+        coordinator.in_progress.push(piece1.clone());
+        coordinator.in_progress.push(piece2.clone());
+        coordinator
+            .in_progress_timestamps
+            .insert(piece1.index(), Instant::now());
+        coordinator
+            .in_progress_timestamps
+            .insert(piece2.index(), Instant::now());
+
+        // Release all pieces
+        coordinator.release_all_pieces().await.unwrap();
+
+        // Check that all pieces were released
+        assert!(coordinator.in_progress.is_empty());
+        assert!(coordinator.in_progress_timestamps.is_empty());
+
+        // Check that UnassignPieces event was sent with correct piece indices
+        if let Some(PeerSessionEvent::UnassignPieces { pieces_index }) = event_rx.try_recv().ok() {
+            assert_eq!(pieces_index.len(), 2);
+            assert!(pieces_index.contains(&piece1.index()));
+            assert!(pieces_index.contains(&piece2.index()));
+        } else {
+            panic!("Expected UnassignPieces event");
+        }
+    }
+
+    async fn test_timeout_pieces() {
+        let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
+        let mut coordinator = Coordinator::new(1, event_tx); // 1 second timeout
+        let (requester_tx, _) = mpsc::channel::<Piece>(1);
+
+        // Add a piece to in_progress with an old timestamp
+        let piece1 = Piece::new(1, 16384, [1u8; 20]);
+        let piece2 = Piece::new(2, 16384, [1u8; 20]);
+        coordinator.in_progress.push(piece1.clone());
+        coordinator.in_progress.push(piece2.clone());
+
+        // Set timestamp to be longer than timeout threshold
+        let old_time = Instant::now() - Duration::from_secs(2);
+        coordinator
+            .in_progress_timestamps
+            .insert(piece1.index(), old_time);
+
+        // Set timestamp to be less than timeout threshold
+        let old_time = Instant::now() + Duration::from_secs(2);
+        coordinator
+            .in_progress_timestamps
+            .insert(piece1.index(), old_time);
+
+        // Check for timeouts
+        coordinator
+            .handle_command(CoordinatorCommand::CheckTimeouts, &requester_tx)
+            .await
+            .unwrap();
+
+        // Piece should be released
+        assert!(!coordinator.in_progress.contains(&piece1));
+        assert!(coordinator.in_progress.contains(&piece2));
+        assert!(coordinator
+            .in_progress_timestamps
+            .get(&piece1.index())
+            .is_none());
+        assert!(coordinator
+            .in_progress_timestamps
+            .get(&piece2.index())
+            .is_some());
+        assert_eq!(coordinator.strikes, 1);
+
+        // Check for UnassignPiece event
+        if let Some(PeerSessionEvent::UnassignPiece { piece_index }) = event_rx.try_recv().ok() {
+            assert_eq!(piece_index, piece1.index());
+        } else {
+            panic!("Expected UnassignPiece event");
+        }
     }
 }
