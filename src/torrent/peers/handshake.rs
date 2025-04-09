@@ -147,3 +147,165 @@ impl From<tokio::io::Error> for HandshakeError {
         HandshakeError::IoError(err)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[test]
+    fn test_handshake_new() {
+        let info_hash = [1u8; 20];
+        let peer_id = [2u8; 20];
+
+        let handshake = Handshake::new(info_hash, peer_id);
+
+        assert_eq!(handshake.pstr, "BitTorrent protocol");
+        assert_eq!(handshake.reserved, [0u8; 8]);
+        assert_eq!(handshake.info_hash, info_hash);
+        assert_eq!(handshake.peer_id, peer_id);
+    }
+
+    #[test]
+    fn test_handshake_serialize() {
+        let info_hash = [1u8; 20];
+        let peer_id = [2u8; 20];
+        let handshake = Handshake::new(info_hash, peer_id);
+
+        let serialized = handshake.serialize();
+
+        // Expected format:
+        // 1 byte for pstr length (19)
+        // 19 bytes for "BitTorrent protocol"
+        // 8 bytes for reserved
+        // 20 bytes for info_hash
+        // 20 bytes for peer_id
+        assert_eq!(serialized.len(), 68);
+        assert_eq!(serialized[0], 19); // pstr length
+        assert_eq!(&serialized[1..20], PSTR.as_bytes()); // pstr
+        assert_eq!(&serialized[20..28], &[0u8; 8]); // reserved
+        assert_eq!(&serialized[28..48], &[1u8; 20]); // info_hash
+        assert_eq!(&serialized[48..68], &[2u8; 20]); // peer_id
+    }
+
+    #[test]
+    fn test_handshake_deserialize_valid() {
+        let info_hash = [1u8; 20];
+        let peer_id = [2u8; 20];
+        let original = Handshake::new(info_hash, peer_id);
+
+        let serialized = original.serialize();
+        let deserialized = Handshake::deserialize(serialized).unwrap();
+
+        assert_eq!(deserialized.pstr, original.pstr);
+        assert_eq!(deserialized.reserved, original.reserved);
+        assert_eq!(deserialized.info_hash, original.info_hash);
+        assert_eq!(deserialized.peer_id, original.peer_id);
+    }
+
+    #[test]
+    fn test_handshake_deserialize_invalid_pstr_length() {
+        let mut buffer = vec![0u8; 68];
+        buffer[0] = 18; // Wrong pstr length (should be 19)
+
+        let result = Handshake::deserialize(buffer);
+        assert!(matches!(result, Err(HandshakeError::InvalidPstrLength)));
+    }
+
+    #[test]
+    fn test_handshake_deserialize_invalid_pstr() {
+        let mut buffer = vec![0u8; 68];
+        buffer[0] = 19; // Correct length
+                        // Insert invalid UTF-8 bytes
+        buffer[10] = 0xFF;
+        buffer[11] = 0xFF;
+
+        let result = Handshake::deserialize(buffer);
+        assert!(matches!(result, Err(HandshakeError::InvalidPstr)));
+    }
+
+    #[test]
+    fn test_handshake_deserialize_truncated_message() {
+        // Create a truncated message with only peer_id partially filled
+        let mut buffer = Vec::with_capacity(65);
+        buffer.push(19); // pstr length
+        buffer.extend_from_slice(PSTR.as_bytes());
+        buffer.extend_from_slice(&[0u8; 8]); // reserved
+        buffer.extend_from_slice(&[1u8; 20]); // info_hash
+        buffer.extend_from_slice(&[2u8; 17]); // peer_id (truncated)
+
+        // Should still work, with the peer_id padded with zeros
+        let result = Handshake::deserialize(buffer).unwrap();
+        let mut expected_peer_id = [0u8; 20];
+        expected_peer_id[..17].copy_from_slice(&[2u8; 17]);
+
+        assert_eq!(result.peer_id, expected_peer_id);
+    }
+
+    #[tokio::test]
+    async fn test_perform_handshake() {
+        // Start a mock server in a separate task
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Client handshake data
+        let client_info_hash = [1u8; 20];
+        let client_peer_id = [2u8; 20];
+        let client_handshake = Handshake::new(client_info_hash.clone(), client_peer_id.clone());
+
+        // Server handshake data
+        let server_info_hash = [3u8; 20];
+        let server_peer_id = [4u8; 20];
+        let server_handshake = Handshake::new(server_info_hash.clone(), server_peer_id.clone());
+
+        // Start the server
+        let server_handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+
+            // Read client handshake
+            let mut buf = vec![0u8; 68];
+            socket.read_exact(&mut buf).await.unwrap();
+
+            let client_hs = Handshake::deserialize(buf).unwrap();
+            assert_eq!(client_hs.info_hash, client_info_hash);
+            assert_eq!(client_hs.peer_id, client_peer_id);
+
+            // Send server handshake
+            socket
+                .write_all(&server_handshake.serialize())
+                .await
+                .unwrap();
+        });
+
+        // Client connects and performs handshake
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let response = perform_handshake(&mut stream, &client_handshake)
+            .await
+            .unwrap();
+
+        // Verify response
+        let server_hs = Handshake::deserialize(response).unwrap();
+        assert_eq!(server_hs.info_hash, server_info_hash);
+        assert_eq!(server_hs.peer_id, server_peer_id);
+
+        // Wait for server to complete
+        server_handle.await.unwrap();
+    }
+
+    #[test]
+    fn test_handshake_error_display() {
+        let err1 = HandshakeError::InvalidPstrLength;
+        let err2 = HandshakeError::InvalidPstr;
+        let err3 = HandshakeError::InvalidLength;
+        let err4 = HandshakeError::IoError(io::Error::new(io::ErrorKind::Other, "test error"));
+
+        assert_eq!(err1.to_string(), "Peer responded with invalid PSTR length");
+        assert_eq!(err2.to_string(), "Invalid UTF-8 PSTR format");
+        assert_eq!(
+            err3.to_string(),
+            "Invalid handshake length, must be 68 bytes long"
+        );
+        assert_eq!(err4.to_string(), "I/O error: test error");
+    }
+}
