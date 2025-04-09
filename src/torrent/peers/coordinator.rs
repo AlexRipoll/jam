@@ -28,6 +28,7 @@ const MAX_CHECK_INTERVAL: u64 = 10;
 pub struct Coordinator {
     is_choked: bool,
 
+    // FIX: check if necessary field
     // the status of the pieces that are being downloaded or have been downloaded from this peer
     active_pieces: HashMap<usize, Piece>,
 
@@ -321,6 +322,7 @@ impl Coordinator {
 
     // release a piece in progress so they are no longuer assigned to the current worker
     async fn release_piece(&mut self, piece_index: u32) -> Result<(), CoordinatorError> {
+        self.active_pieces.remove(&(piece_index as usize));
         self.in_progress
             .retain(|unconfirmed_piece| unconfirmed_piece.index() != piece_index);
         self.in_progress_timestamps.remove(&piece_index);
@@ -338,6 +340,7 @@ impl Coordinator {
         self.event_tx
             .send(PeerSessionEvent::UnassignPieces { pieces_index })
             .await?;
+        self.active_pieces.clear();
         self.in_progress.clear();
         self.in_progress_timestamps.clear();
 
@@ -846,6 +849,192 @@ mod test {
             assert_eq!(piece_index, piece1.index());
         } else {
             panic!("Expected UnassignPiece event");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_max_strikes_release_all() {
+        let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
+        let mut coordinator = Coordinator::new(1, event_tx); // 1 second timeout
+        let (requester_tx, _) = mpsc::channel::<Piece>(1);
+
+        // Set strikes to max-1
+        coordinator.strikes = MAX_STRIKES - 1;
+
+        // Add pieces to in_progress with old timestamps
+        let piece1 = Piece::new(1, 16384, [1u8; 20]);
+        let piece2 = Piece::new(2, 16384, [1u8; 20]);
+        let piece3 = Piece::new(3, 16384, [1u8; 20]);
+        coordinator.in_progress.push(piece1.clone());
+        coordinator.in_progress.push(piece2.clone());
+        coordinator.in_progress.push(piece3.clone());
+
+        // Set timestamps to be longer than timeout
+        let old_time = Instant::now() - Duration::from_secs(2);
+        coordinator
+            .in_progress_timestamps
+            .insert(piece1.index(), old_time);
+
+        // Check for timeouts - this should trigger MAX_STRIKES
+        coordinator
+            .handle_command(CoordinatorCommand::CheckTimeouts, &requester_tx)
+            .await
+            .unwrap();
+
+        // First we should get an UnassignPiece event for piece1 (timed out)
+        if let Some(PeerSessionEvent::UnassignPiece { piece_index }) = event_rx.try_recv().ok() {
+            assert_eq!(piece_index, piece1.index());
+        } else {
+            panic!("Expected UnassignPiece event for timed out piece");
+        }
+
+        // Then we should get an UnassignPieces event for all pieces due to max strikes (pieces 2
+        // and 3)
+        if let Some(PeerSessionEvent::UnassignPieces { pieces_index }) = event_rx.try_recv().ok() {
+            // Should have both pieces (although piece1 was already unassigned, it's included in the list)
+            assert_eq!(pieces_index.len(), 2);
+            assert!(pieces_index.contains(&piece2.index()));
+            assert!(pieces_index.contains(&piece3.index()));
+        } else {
+            panic!("Expected UnassignPieces event");
+        }
+
+        // All pieces should be released due to max strikes
+        assert!(coordinator.in_progress.is_empty());
+        assert!(coordinator.in_progress_timestamps.is_empty());
+        assert_eq!(coordinator.strikes, MAX_STRIKES);
+    }
+
+    #[tokio::test]
+    async fn test_is_valid_piece() {
+        // Create test data
+        let data = vec![1, 2, 3, 4, 5];
+
+        // Calculate hash
+        let mut hasher = Sha1::new();
+        hasher.update(&data);
+        let hash = hasher.finalize();
+        let hash_array: [u8; 20] = hash.as_slice().try_into().unwrap();
+
+        // Test valid piece
+        assert!(is_valid_piece(hash_array, &data));
+
+        // Test invalid piece
+        let wrong_data = vec![5, 4, 3, 2, 1];
+        assert!(!is_valid_piece(hash_array, &wrong_data));
+    }
+
+    async fn test_send_next_piece() {
+        let (event_tx, _) = mpsc::channel::<PeerSessionEvent>(100);
+        let mut coordinator = Coordinator::new(10, event_tx);
+        let (requester_tx, mut requester_rx) = mpsc::channel::<Piece>(1);
+
+        // Create a test piece
+        let piece = Piece::new(1, 16384, [1u8; 20]);
+
+        // Nothing should be sent when choked
+        coordinator.is_choked = true;
+        coordinator.queue.push(piece.clone());
+        coordinator.send_next_piece(&requester_tx).await.unwrap();
+        assert!(requester_rx.try_recv().is_err());
+
+        // Nothing should be sent when request is in progress
+        coordinator.is_choked = false;
+        coordinator.request_in_progress = true;
+        coordinator.send_next_piece(&requester_tx).await.unwrap();
+        assert!(requester_rx.try_recv().is_err());
+
+        // Piece should be sent when unchoked and no request in progress
+        coordinator.request_in_progress = false;
+        coordinator.send_next_piece(&requester_tx).await.unwrap();
+
+        let sent_piece = requester_rx.try_recv().unwrap();
+        assert_eq!(sent_piece.index(), piece.index());
+        assert!(coordinator.request_in_progress);
+    }
+
+    #[tokio::test]
+    async fn test_run_lifecycle() {
+        let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
+        let coordinator = Coordinator::new(10, event_tx);
+
+        // Start the coordinator
+        let (cmd_tx, handle) = coordinator.run();
+
+        // Create a test piece
+        let piece = Piece::new(1, 16384, [1u8; 20]);
+
+        // Send commands
+        cmd_tx.send(CoordinatorCommand::Unchoked).await.unwrap();
+        cmd_tx
+            .send(CoordinatorCommand::AddPiece {
+                piece: piece.clone(),
+            })
+            .await
+            .unwrap();
+
+        // Wait a bit for tasks to process
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Request should be sent to the peer
+        while let Ok(event) = event_rx.try_recv() {
+            if let PeerSessionEvent::PeerMessageOut { message } = event {
+                if message.message_id == MessageId::Request {
+                    // Successfully got a request message
+                    break;
+                }
+            } else {
+                panic!(
+                    "Expected PeerSessionEvent::PeerMessageOut event, got {:?}",
+                    event
+                );
+            }
+        }
+
+        // Clean up
+        drop(cmd_tx);
+        let _ = tokio::time::timeout(Duration::from_millis(100), handle).await;
+    }
+
+    #[tokio::test]
+    async fn test_corrupted_piece() {
+        let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
+        let mut coordinator = Coordinator::new(10, event_tx);
+
+        // Create a test piece and add it to active pieces
+        let piece = Piece::new(1, 16384, [1u8; 20]);
+        coordinator
+            .active_pieces
+            .insert(piece.index() as usize, piece.clone());
+        coordinator.in_progress.push(piece.clone());
+
+        // Create a piece payload
+        let block_data = vec![1; 16384];
+        let payload = PiecePayload {
+            index: piece.index(),
+            begin: 0,
+            block: block_data.clone(),
+        };
+        let serialized = payload.serialize();
+
+        // Set up the piece to be complete but with wrong hash
+        let active_piece = coordinator
+            .active_pieces
+            .get_mut(&(piece.index() as usize))
+            .unwrap();
+        active_piece.blocks[0] = block_data.clone();
+
+        // Process the piece message - this should fail hash verification
+        let result = coordinator.process_piece_message(Some(serialized)).await;
+
+        // Should return corrupted piece error
+        assert!(matches!(result, Err(CoordinatorError::CorruptedPiece(_))));
+
+        // Should send PieceCorrupted event
+        if let Some(PeerSessionEvent::PieceCorrupted { piece_index }) = event_rx.try_recv().ok() {
+            assert_eq!(piece_index, piece.index());
+        } else {
+            panic!("Expected PieceCorrupted event");
         }
     }
 }
