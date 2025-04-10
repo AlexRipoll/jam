@@ -304,9 +304,8 @@ impl PeerSession {
         Ok(())
     }
 
-    pub fn ready_to_request(&self) -> bool {
+    pub fn is_allowed_to_request(&self) -> bool {
         !self.connection_state.is_choked && self.connection_state.is_interested
-        // && !self.download_state.queue.is_empty()
     }
 
     pub fn has_received_peer_bitfield(&self) -> bool {
@@ -391,6 +390,313 @@ impl Error for PeerSessionError {
             PeerSessionError::Connection(err) => Some(err),
             PeerSessionError::EventTxError(err) => Some(err),
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::time::Duration;
+
+    use tokio::{sync::mpsc, time::timeout};
+
+    use crate::torrent::{
+        events::Event,
+        peers::{
+            coordinator::CoordinatorCommand,
+            message::{Message, MessageId},
+            session::{ConnectionState, PeerSession, PeerSessionError},
+        },
+    };
+
+    // Helper function to create a test peer session
+    fn create_test_peer_session() -> (PeerSession, mpsc::Receiver<Event>) {
+        let (orchestrator_tx, orchestrator_rx) = mpsc::channel::<Event>(100);
+
+        let peer_session = PeerSession::new(
+            "test-peer-id".to_string(),
+            [1u8; 20],
+            [2u8; 20],
+            "127.0.0.1:12345".to_string(),
+            60, // timeout threshold in seconds
+            orchestrator_tx,
+        );
+
+        (peer_session, orchestrator_rx)
+    }
+
+    #[test]
+    fn test_peer_session_new() {
+        let (orchestrator_tx, _) = mpsc::channel::<Event>(100);
+
+        let session = PeerSession::new(
+            "test-peer-id".to_string(),
+            [1u8; 20],
+            [2u8; 20],
+            "127.0.0.1:12345".to_string(),
+            60,
+            orchestrator_tx,
+        );
+
+        assert_eq!(session.id, "test-peer-id");
+        assert_eq!(session.peer_id, [1u8; 20]);
+        assert_eq!(session.info_hash, [2u8; 20]);
+        assert_eq!(session.peer_addr, "127.0.0.1:12345");
+        assert_eq!(session.timeout_threshold, 60);
+        assert_eq!(session.peer_bitfield_received, false);
+        // choked when initialize
+        assert!(session.connection_state.is_choked);
+        // not interested when initialize
+        assert!(!session.connection_state.is_interested);
+        // choked when initialize
+        assert!(session.connection_state.peer_choked);
+        // not interested when initialize
+        assert!(!session.connection_state.peer_interested);
+    }
+
+    #[test]
+    fn test_connection_state_default() {
+        let state = ConnectionState::default();
+
+        assert!(state.is_choked);
+        assert!(!state.is_interested);
+        assert!(state.peer_choked);
+        assert!(!state.peer_interested);
+    }
+
+    #[test]
+    fn test_ready_to_request() {
+        let (mut session, _) = create_test_peer_session();
+
+        // Default state - should not be ready
+        assert!(!session.is_allowed_to_request());
+
+        // Set interested but still choked - should not be ready
+        session.connection_state.is_interested = true;
+        assert!(!session.is_allowed_to_request());
+
+        // Set unchoked - should be ready
+        session.connection_state.is_choked = false;
+        assert!(session.is_allowed_to_request());
+
+        // Set not interested - should not be ready
+        session.connection_state.is_interested = false;
+        assert!(!session.is_allowed_to_request());
+    }
+
+    #[test]
+    fn test_has_received_peer_bitfield() {
+        let (mut session, _) = create_test_peer_session();
+
+        // Default state
+        assert!(!session.has_received_peer_bitfield());
+
+        // Set received
+        session.peer_bitfield_received = true;
+        assert!(session.has_received_peer_bitfield());
+    }
+
+    #[tokio::test]
+    async fn test_request_unchoke() {
+        let (mut session, _) = create_test_peer_session();
+
+        // Default state
+        assert!(!session.connection_state.is_interested);
+
+        // Request unchoke
+        let result = session.request_unchoke().await;
+        assert!(result.is_ok());
+        assert!(session.connection_state.is_interested);
+    }
+
+    #[tokio::test]
+    async fn test_handle_peer_message_keep_alive() {
+        let (mut session, _) = create_test_peer_session();
+        let (io_tx, _) = mpsc::channel::<Message>(10);
+        let (coordinator_tx, _) = mpsc::channel::<CoordinatorCommand>(10);
+
+        let message = Message::new(MessageId::KeepAlive, None);
+        let result = session
+            .handle_peer_message(message, &io_tx, &coordinator_tx)
+            .await;
+
+        assert!(result.is_ok());
+        // No state changes for keep-alive
+    }
+
+    #[tokio::test]
+    async fn test_handle_peer_message_unchoke() {
+        let (mut session, _) = create_test_peer_session();
+        let (io_tx, _) = mpsc::channel::<Message>(10);
+        let (coordinator_tx, _) = mpsc::channel::<CoordinatorCommand>(10);
+
+        // Verify initial state is choked
+        assert!(session.connection_state.is_choked);
+
+        let message = Message::new(MessageId::Unchoke, None);
+        let result = session
+            .handle_peer_message(message, &io_tx, &coordinator_tx)
+            .await;
+
+        assert!(result.is_ok());
+        assert!(!session.connection_state.is_choked);
+    }
+
+    #[tokio::test]
+    async fn test_handle_peer_message_interested() {
+        let (mut session, _) = create_test_peer_session();
+        let (io_tx, mut io_rx) = mpsc::channel::<Message>(10);
+        let (coordinator_tx, _) = mpsc::channel::<CoordinatorCommand>(10);
+
+        // Verify initial state
+        assert!(!session.connection_state.peer_interested);
+        assert!(session.connection_state.peer_choked);
+
+        let message = Message::new(MessageId::Interested, None);
+        let result = session
+            .handle_peer_message(message, &io_tx, &coordinator_tx)
+            .await;
+
+        assert!(result.is_ok());
+        assert!(session.connection_state.peer_interested);
+        assert!(!session.connection_state.peer_choked);
+
+        // Verify an unchoke message was sent to peer
+        let timeout_result = timeout(Duration::from_millis(100), io_rx.recv()).await;
+        assert!(timeout_result.is_ok());
+        let sent_message = timeout_result.unwrap().unwrap();
+        assert_eq!(sent_message.message_id, MessageId::Unchoke);
+    }
+
+    #[tokio::test]
+    async fn test_handle_peer_message_not_interested() {
+        let (mut session, _) = create_test_peer_session();
+        let (io_tx, _) = mpsc::channel::<Message>(10);
+        let (coordinator_tx, _) = mpsc::channel::<CoordinatorCommand>(10);
+
+        // First set to interested
+        session.connection_state.peer_interested = true;
+
+        let message = Message::new(MessageId::NotInterested, None);
+        let result = session
+            .handle_peer_message(message, &io_tx, &coordinator_tx)
+            .await;
+
+        assert!(result.is_ok());
+        assert!(!session.connection_state.peer_interested);
+    }
+
+    #[tokio::test]
+    async fn test_handle_peer_message_have() {
+        let (mut session, mut orchestrator_rx) = create_test_peer_session();
+        let (io_tx, _) = mpsc::channel::<Message>(10);
+        let (coordinator_tx, _) = mpsc::channel::<CoordinatorCommand>(10);
+
+        // Create a have message for piece index 42
+        let piece_index: u32 = 42;
+        let payload = Some(piece_index.to_be_bytes().to_vec());
+        let message = Message::new(MessageId::Have, payload);
+
+        let result = session
+            .handle_peer_message(message, &io_tx, &coordinator_tx)
+            .await;
+
+        assert!(result.is_ok());
+
+        // Verify PeerHave event was sent to orchestrator
+        let timeout_result = timeout(Duration::from_millis(100), orchestrator_rx.recv()).await;
+        assert!(timeout_result.is_ok());
+
+        if let Some(Event::PeerHave {
+            session_id,
+            piece_index: received_index,
+        }) = timeout_result.unwrap()
+        {
+            assert_eq!(session_id, "test-peer-id");
+            assert_eq!(received_index, piece_index);
+        } else {
+            panic!("Expected PeerHave event");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_peer_message_bitfield() {
+        let (mut session, mut orchestrator_rx) = create_test_peer_session();
+        let (io_tx, _) = mpsc::channel::<Message>(10);
+        let (coordinator_tx, _) = mpsc::channel::<CoordinatorCommand>(10);
+
+        // Create a bitfield message
+        let bitfield = vec![0b10101010, 0b11110000];
+        let message = Message::new(MessageId::Bitfield, Some(bitfield.clone()));
+
+        let result = session
+            .handle_peer_message(message, &io_tx, &coordinator_tx)
+            .await;
+
+        assert!(result.is_ok());
+        assert!(session.peer_bitfield_received);
+
+        // Verify PeerBitfield event was sent to orchestrator
+        let timeout_result = timeout(Duration::from_millis(100), orchestrator_rx.recv()).await;
+        assert!(timeout_result.is_ok());
+
+        if let Some(Event::PeerBitfield {
+            session_id,
+            bitfield: received_bitfield,
+        }) = timeout_result.unwrap()
+        {
+            assert_eq!(session_id, "test-peer-id");
+            assert_eq!(received_bitfield, bitfield);
+        } else {
+            panic!("Expected PeerBitfield event");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_peer_message_piece() {
+        let (mut session, _) = create_test_peer_session();
+        let (io_tx, _) = mpsc::channel::<Message>(10);
+        let (coordinator_tx, mut coordinator_rx) = mpsc::channel::<CoordinatorCommand>(10);
+
+        // Create a piece message
+        let piece_data = vec![1, 2, 3, 4, 5];
+        let message = Message::new(MessageId::Piece, Some(piece_data.clone()));
+
+        let result = session
+            .handle_peer_message(message, &io_tx, &coordinator_tx)
+            .await;
+
+        assert!(result.is_ok());
+
+        // Verify DownloadPiece command was sent to coordinator
+        let timeout_result = timeout(Duration::from_millis(100), coordinator_rx.recv()).await;
+        assert!(timeout_result.is_ok());
+
+        if let Some(CoordinatorCommand::DownloadPiece { payload }) = timeout_result.unwrap() {
+            assert_eq!(payload.unwrap(), piece_data);
+        } else {
+            panic!("Expected DownloadPiece command");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_peer_message_empty_payload() {
+        let (mut session, _) = create_test_peer_session();
+        let (io_tx, _) = mpsc::channel::<Message>(10);
+        let (coordinator_tx, _) = mpsc::channel::<CoordinatorCommand>(10);
+
+        // Create a have message with empty payload (which should cause an error)
+        let message = Message::new(MessageId::Have, None);
+
+        let result = session
+            .handle_peer_message(message, &io_tx, &coordinator_tx)
+            .await;
+
+        assert!(result.is_err());
+        if let Err(PeerSessionError::EmptyPayload) = result {
+            // Expected error
+        } else {
+            panic!("Expected EmptyPayload error");
         }
     }
 }
