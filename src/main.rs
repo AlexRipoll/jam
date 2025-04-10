@@ -4,12 +4,10 @@ use std::{
     time::Instant,
 };
 
-use client::client::Client;
 use config::Config;
-use download::message_handler::generate_peer_id;
 use torrent::{
     metainfo::Metainfo,
-    torrent::{Metadata, Torrent},
+    torrent::{generate_peer_id, Metadata, Torrent},
     tracker,
 };
 use tracing::{debug, error, info, trace, warn, Level};
@@ -20,12 +18,7 @@ use tracing_subscriber::{
     EnvFilter, Registry,
 };
 
-pub mod client;
 pub mod config;
-pub mod disk;
-pub mod download;
-pub mod error;
-pub mod session;
 pub mod torrent;
 
 #[tokio::main]
