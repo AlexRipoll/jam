@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
     fmt::Display,
-    sync::Arc,
 };
 
 use protocol::piece::Piece;

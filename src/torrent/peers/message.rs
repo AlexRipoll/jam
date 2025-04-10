@@ -1,7 +1,5 @@
 use std::fmt::{self, Display};
 
-use tokio::io;
-
 #[derive(Debug, PartialEq, Eq)]
 pub struct Message {
     pub message_id: MessageId,
