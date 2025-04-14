@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
     io::{self, BufWriter, Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use protocol::piece::Piece;
@@ -39,7 +39,7 @@ pub struct DiskWriterStats {
 #[derive(Debug)]
 pub struct DiskWriter {
     // File information
-    download_path: String,
+    absolute_file_path: String,
     file_size: u64,
     piece_size: u64,
 
@@ -55,21 +55,21 @@ pub struct DiskWriter {
 
 impl DiskWriter {
     pub fn new(
-        download_path: String,
+        absolute_file_path: String,
         file_size: u64,
         piece_size: u64,
         pieces: HashMap<u32, Piece>,
         event_tx: mpsc::Sender<Event>,
     ) -> Self {
         // Ensure the download directory exists
-        if let Some(parent_dir) = Path::new(&download_path).parent() {
+        if let Some(parent_dir) = Path::new(&absolute_file_path).parent() {
             if let Err(e) = fs::create_dir_all(parent_dir) {
                 warn!("Failed to create directory structure: {}", e);
             }
         }
 
         Self {
-            download_path,
+            absolute_file_path,
             file_size,
             piece_size,
             pieces,
@@ -152,7 +152,7 @@ impl DiskWriter {
             .write(true)
             .create(true)
             .truncate(false)
-            .open(&self.download_path)?;
+            .open(PathBuf::from(format!("{}.part", &self.absolute_file_path)))?;
 
         // Allocate the full file size if it's a new file
         let metadata = file.metadata()?;
@@ -252,7 +252,6 @@ mod test {
         fs,
         io::{Read, Seek, SeekFrom, Write},
         path::Path,
-        sync::Arc,
     };
 
     use protocol::piece::Piece;
@@ -270,7 +269,7 @@ mod test {
     fn test_disk_writer_new() {
         // Create a temporary directory that will be deleted after the test
         let temp_dir = tempdir().expect("Failed to create temp dir");
-        let download_path = temp_dir
+        let absolute_file_path = temp_dir
             .path()
             .join("test_file.dat")
             .to_str()
@@ -286,10 +285,10 @@ mod test {
         let (event_tx, _event_rx) = mpsc::channel(10);
 
         // Create a new DiskWriter
-        let disk_writer = DiskWriter::new(download_path.clone(), 2048, 1024, pieces, event_tx);
+        let disk_writer = DiskWriter::new(absolute_file_path.clone(), 2048, 1024, pieces, event_tx);
 
         // Check if the directory is created
-        assert!(Path::new(&download_path).parent().unwrap().exists());
+        assert!(Path::new(&absolute_file_path).parent().unwrap().exists());
 
         // Verify the initial state
         assert_eq!(disk_writer.file_size, 2048);
@@ -302,7 +301,7 @@ mod test {
     #[test]
     fn test_open_file() {
         let temp_dir = tempdir().expect("Failed to create temp dir");
-        let download_path = temp_dir
+        let absolute_file_path = temp_dir
             .path()
             .join("test_file.dat")
             .to_str()
@@ -315,7 +314,7 @@ mod test {
 
         let (event_tx, _event_rx) = mpsc::channel(10);
 
-        let disk_writer = DiskWriter::new(download_path.clone(), 2048, 1024, pieces, event_tx);
+        let disk_writer = DiskWriter::new(absolute_file_path.clone(), 2048, 1024, pieces, event_tx);
 
         // Test opening the file
         let file = disk_writer.open_file().expect("Failed to open file");
@@ -324,13 +323,13 @@ mod test {
         assert_eq!(file.metadata().unwrap().len(), 2048);
 
         // Verify file exists
-        assert!(Path::new(&download_path).exists());
+        assert!(Path::new(&absolute_file_path).exists());
     }
 
     #[tokio::test]
     async fn test_write_piece() {
         let temp_dir = tempdir().expect("Failed to create temp dir");
-        let download_path = temp_dir
+        let absolute_file_path = temp_dir
             .path()
             .join("test_file.dat")
             .to_str()
@@ -346,7 +345,8 @@ mod test {
         let (event_tx, _) = mpsc::channel(10);
 
         // Create a new DiskWriter
-        let mut disk_writer = DiskWriter::new(download_path.clone(), 2048, 1024, pieces, event_tx);
+        let mut disk_writer =
+            DiskWriter::new(absolute_file_path.clone(), 2048, 1024, pieces, event_tx);
 
         // Open the file
         let file = disk_writer.open_file().expect("Failed to open file");
@@ -370,7 +370,7 @@ mod test {
         assert_eq!(disk_writer.stats.write_errors, 0);
 
         // Verify file contents
-        let mut file = fs::File::open(download_path).expect("Failed to open file");
+        let mut file = fs::File::open(absolute_file_path).expect("Failed to open file");
         // Skip the first piece's worth of bytes since we're verifying the second piece
         file.seek(SeekFrom::Start(1024)).unwrap();
 
@@ -382,7 +382,7 @@ mod test {
     #[tokio::test]
     async fn test_write_piece_error_piece_not_found() {
         let temp_dir = tempdir().expect("Failed to create temp dir");
-        let download_path = temp_dir
+        let absolute_file_path = temp_dir
             .path()
             .join("test_file.dat")
             .to_str()
@@ -398,7 +398,8 @@ mod test {
         let (event_tx, _event_rx) = mpsc::channel(10);
 
         // Create a new DiskWriter
-        let mut disk_writer = DiskWriter::new(download_path.clone(), 1024, 1024, pieces, event_tx);
+        let mut disk_writer =
+            DiskWriter::new(absolute_file_path.clone(), 1024, 1024, pieces, event_tx);
 
         // Open the file
         let file = disk_writer.open_file().expect("Failed to open file");
@@ -424,7 +425,7 @@ mod test {
     #[tokio::test]
     async fn test_write_piece_error_exceeds_file_size() {
         let temp_dir = tempdir().expect("Failed to create temp dir");
-        let download_path = temp_dir
+        let absolute_file_path = temp_dir
             .path()
             .join("test_file.dat")
             .to_str()
@@ -441,7 +442,7 @@ mod test {
 
         // Create a new DiskWriter with a smaller file size
         let mut disk_writer = DiskWriter::new(
-            download_path.clone(),
+            absolute_file_path.clone(),
             512, // Smaller file size
             1024,
             pieces,
@@ -472,7 +473,7 @@ mod test {
     #[tokio::test]
     async fn test_full_disk_writer_workflow() {
         let temp_dir = tempdir().expect("Failed to create temp dir");
-        let download_path = temp_dir
+        let absolute_file_path = temp_dir
             .path()
             .join("test_file.dat")
             .to_str()
@@ -490,7 +491,7 @@ mod test {
         let (event_tx, mut event_rx) = mpsc::channel(10);
 
         // Create a new DiskWriter
-        let disk_writer = DiskWriter::new(download_path.clone(), 2048, 1024, pieces, event_tx);
+        let disk_writer = DiskWriter::new(absolute_file_path.clone(), 2048, 1024, pieces, event_tx);
 
         // Start the disk writer
         let (command_tx, join_handle) = disk_writer.run();
@@ -560,7 +561,7 @@ mod test {
         join_handle.await.expect("Failed to join handle");
 
         // Verify file contents
-        let mut file = fs::File::open(download_path).expect("Failed to open file");
+        let mut file = fs::File::open(absolute_file_path).expect("Failed to open file");
 
         // Read and verify first piece
         let mut contents1 = vec![0u8; 1024];
@@ -578,7 +579,7 @@ mod test {
     #[tokio::test]
     async fn test_error_handling() {
         let temp_dir = tempdir().expect("Failed to create temp dir");
-        let download_path = temp_dir
+        let absolute_file_path = temp_dir
             .path()
             .join("test_file.dat")
             .to_str()
@@ -594,7 +595,7 @@ mod test {
         let (event_tx, _event_rx) = mpsc::channel(10);
 
         // Create a new DiskWriter
-        let disk_writer = DiskWriter::new(download_path.clone(), 1024, 1024, pieces, event_tx);
+        let disk_writer = DiskWriter::new(absolute_file_path.clone(), 1024, 1024, pieces, event_tx);
 
         // Start the disk writer
         let (command_tx, join_handle) = disk_writer.run();
