@@ -39,7 +39,7 @@ pub struct DiskWriterStats {
 #[derive(Debug)]
 pub struct DiskWriter {
     // File information
-    absolute_file_path: String,
+    absolute_file_path: PathBuf,
     file_size: u64,
     piece_size: u64,
 
@@ -55,7 +55,7 @@ pub struct DiskWriter {
 
 impl DiskWriter {
     pub fn new(
-        absolute_file_path: String,
+        absolute_file_path: PathBuf,
         file_size: u64,
         piece_size: u64,
         pieces: HashMap<u32, Piece>,
@@ -152,7 +152,7 @@ impl DiskWriter {
             .write(true)
             .create(true)
             .truncate(false)
-            .open(PathBuf::from(format!("{}.part", &self.absolute_file_path)))?;
+            .open(self.absolute_file_path.with_extension("part"))?;
 
         // Allocate the full file size if it's a new file
         let metadata = file.metadata()?;
@@ -269,12 +269,7 @@ mod test {
     fn test_disk_writer_new() {
         // Create a temporary directory that will be deleted after the test
         let temp_dir = tempdir().expect("Failed to create temp dir");
-        let absolute_file_path = temp_dir
-            .path()
-            .join("test_file.dat")
-            .to_str()
-            .unwrap()
-            .to_string();
+        let absolute_file_path = temp_dir.path().join("test_file.dat");
 
         // Create a piece
         let piece = Piece::new(0, 1024, [0; 20]);
@@ -301,12 +296,7 @@ mod test {
     #[test]
     fn test_open_file() {
         let temp_dir = tempdir().expect("Failed to create temp dir");
-        let absolute_file_path = temp_dir
-            .path()
-            .join("test_file.dat")
-            .to_str()
-            .unwrap()
-            .to_string();
+        let absolute_file_path = temp_dir.path().join("test_file.dat");
 
         let piece = Piece::new(0, 1024, [0; 20]);
         let mut pieces = HashMap::new();
@@ -323,18 +313,13 @@ mod test {
         assert_eq!(file.metadata().unwrap().len(), 2048);
 
         // Verify file exists
-        assert!(Path::new(&absolute_file_path).exists());
+        assert!(Path::new(&absolute_file_path.with_extension("part")).exists());
     }
 
     #[tokio::test]
     async fn test_write_piece() {
         let temp_dir = tempdir().expect("Failed to create temp dir");
-        let absolute_file_path = temp_dir
-            .path()
-            .join("test_file.dat")
-            .to_str()
-            .unwrap()
-            .to_string();
+        let absolute_file_path = temp_dir.path().join("test_file.dat");
 
         // Create a piece
         let piece = Piece::new(1, 1024, [0; 20]);
@@ -370,7 +355,8 @@ mod test {
         assert_eq!(disk_writer.stats.write_errors, 0);
 
         // Verify file contents
-        let mut file = fs::File::open(absolute_file_path).expect("Failed to open file");
+        let mut file =
+            fs::File::open(absolute_file_path.with_extension("part")).expect("Failed to open file");
         // Skip the first piece's worth of bytes since we're verifying the second piece
         file.seek(SeekFrom::Start(1024)).unwrap();
 
@@ -382,12 +368,7 @@ mod test {
     #[tokio::test]
     async fn test_write_piece_error_piece_not_found() {
         let temp_dir = tempdir().expect("Failed to create temp dir");
-        let absolute_file_path = temp_dir
-            .path()
-            .join("test_file.dat")
-            .to_str()
-            .unwrap()
-            .to_string();
+        let absolute_file_path = temp_dir.path().join("test_file.dat");
 
         // Create a piece
         let piece = Piece::new(0, 1024, [0; 20]);
@@ -425,12 +406,7 @@ mod test {
     #[tokio::test]
     async fn test_write_piece_error_exceeds_file_size() {
         let temp_dir = tempdir().expect("Failed to create temp dir");
-        let absolute_file_path = temp_dir
-            .path()
-            .join("test_file.dat")
-            .to_str()
-            .unwrap()
-            .to_string();
+        let absolute_file_path = temp_dir.path().join("test_file.dat");
 
         // Create a piece
         let piece = Piece::new(0, 1024, [0; 20]);
@@ -473,12 +449,7 @@ mod test {
     #[tokio::test]
     async fn test_full_disk_writer_workflow() {
         let temp_dir = tempdir().expect("Failed to create temp dir");
-        let absolute_file_path = temp_dir
-            .path()
-            .join("test_file.dat")
-            .to_str()
-            .unwrap()
-            .to_string();
+        let absolute_file_path = temp_dir.path().join("test_file.dat");
 
         // Create pieces
         let piece1 = Piece::new(0, 1024, [0; 20]);
@@ -561,7 +532,8 @@ mod test {
         join_handle.await.expect("Failed to join handle");
 
         // Verify file contents
-        let mut file = fs::File::open(absolute_file_path).expect("Failed to open file");
+        let mut file =
+            fs::File::open(absolute_file_path.with_extension("part")).expect("Failed to open file");
 
         // Read and verify first piece
         let mut contents1 = vec![0u8; 1024];
@@ -579,12 +551,7 @@ mod test {
     #[tokio::test]
     async fn test_error_handling() {
         let temp_dir = tempdir().expect("Failed to create temp dir");
-        let absolute_file_path = temp_dir
-            .path()
-            .join("test_file.dat")
-            .to_str()
-            .unwrap()
-            .to_string();
+        let absolute_file_path = temp_dir.path().join("test_file.dat");
 
         // Create pieces
         let piece = Piece::new(0, 1024, [0; 20]);
