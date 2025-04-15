@@ -7,7 +7,7 @@ const CONFIG_PATH: &str = "config.toml";
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 pub struct Config {
     pub disk: DiskConfig,
-    pub p2p: P2pConfig,
+    pub network: NetworkConfig,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -16,9 +16,10 @@ pub struct DiskConfig {
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
-pub struct P2pConfig {
+pub struct NetworkConfig {
     pub max_peer_connections: u32,
-    pub timeout_duration: u64,
+    pub queue_capacity: u32,
+    pub timeout_threshold: u64,
     pub connection_retries: u32,
     pub block_size: u64,
 }
@@ -49,11 +50,12 @@ mod tests {
                         disk: DiskConfig {
                             download_path: "./tmp/downloads".to_string(),
                         },
-                        p2p: P2pConfig {
-                            max_peer_connections: 2,
-                            timeout_duration: 3000,
-                            connection_retries: 2,
-                            block_size: 16384
+                        network: NetworkConfig {
+                            max_peer_connections: 1,
+                            timeout_threshold: 10,
+                            connection_retries: 1,
+                            block_size: 16384,
+                            queue_capacity: 40
                         },
                     }
                 );

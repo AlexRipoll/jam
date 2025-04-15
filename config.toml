@@ -1,8 +1,9 @@
 [disk]
-download_path = "./tmp/downloads"
+download_path = "./downloads/"
 
-[p2p]
-max_peer_connections = 2
-timeout_duration = 3000
-connection_retries = 2
+[network]
+max_peer_connections = 1
+queue_capacity = 40
+timeout_threshold = 15
+connection_retries = 1
 block_size = 16384
