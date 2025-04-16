@@ -48,11 +48,11 @@ mod tests {
                     config,
                     Config {
                         disk: DiskConfig {
-                            download_path: "./tmp/downloads".to_string(),
+                            download_path: "./downloads/".to_string(),
                         },
                         network: NetworkConfig {
                             max_peer_connections: 1,
-                            timeout_threshold: 10,
+                            timeout_threshold: 15,
                             connection_retries: 1,
                             block_size: 16384,
                             queue_capacity: 40
