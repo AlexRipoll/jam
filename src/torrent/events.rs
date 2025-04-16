@@ -1,11 +1,16 @@
 use protocol::piece::Piece;
 use tokio::sync::mpsc;
 
-use super::core::disk::DiskWriterStats;
+use super::{core::disk::DiskWriterStats, peer::Peer};
 
 // Enum defining all possible commands the Orchestrator can handle
 #[derive(Debug)]
 pub enum Event {
+    // Add peers to the queue
+    AddPeers {
+        peers: Vec<Peer>,
+    },
+
     // Peer session related commands
     SpawnPeerSession {
         session_id: String,
@@ -31,6 +36,9 @@ pub enum Event {
     PeerHave {
         session_id: String,
         piece_index: u32,
+    },
+    NotifyInterest {
+        session_id: String,
     },
 
     // Piece management commands

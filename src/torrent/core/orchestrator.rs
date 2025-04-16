@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     fmt::Display,
+    path::PathBuf,
 };
 
 use protocol::piece::Piece;
@@ -12,6 +13,7 @@ use crate::torrent::{
     events::Event,
     peer::Peer,
     peers::session::{PeerSession, PeerSessionEvent},
+    torrent::TorrentCommand,
 };
 
 use super::{
@@ -44,12 +46,13 @@ pub struct Orchestrator {
     max_connections: usize,
     queue_capacity: usize,
     pieces: HashMap<u32, Piece>,
-    peers: VecDeque<Peer>,
+    peers: VecDeque<Peer>, // FIX: remove unnecessary
     // File information needed for DiskWriter
-    download_path: String,
+    download_path: PathBuf,
     file_size: u64,
     pieces_size: u64,
     timeout_threshold: u64,
+    torrent_tx: mpsc::Sender<TorrentCommand>,
 }
 
 // Define a structure to group session-related data
@@ -68,10 +71,11 @@ impl Orchestrator {
         queue_capacity: usize,
         pieces: HashMap<u32, Piece>,
         peers: VecDeque<Peer>,
-        download_path: String,
+        download_path: PathBuf,
         file_size: u64,
         pieces_size: u64,
         timeout_threshold: u64,
+        torrent_tx: mpsc::Sender<TorrentCommand>,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel(100);
 
@@ -93,10 +97,13 @@ impl Orchestrator {
             file_size,
             pieces_size,
             timeout_threshold,
+            torrent_tx,
         }
     }
 
-    pub async fn run(mut self) -> JoinHandle<()> {
+    pub async fn run(mut self) -> (mpsc::Sender<Event>, JoinHandle<()>) {
+        let event_tx = self.event_tx.clone();
+
         // Initialize the synchronizer
         let synchronizer = Synchronizer::new(
             self.pieces.clone(),
@@ -141,6 +148,9 @@ impl Orchestrator {
             while let Some(event) = self.event_rx.recv().await {
                 // Handle events from peer sessions
                 match event {
+                    Event::AddPeers { peers } => {
+                        let _ = monitor_tx.send(MonitorCommand::AddPeers(peers)).await;
+                    }
                     Event::SpawnPeerSession {
                         session_id,
                         peer_addr,
@@ -171,7 +181,10 @@ impl Orchestrator {
                                     ))
                                     .await;
 
-                                debug!("[{peer_addr}]:: Peer session {session_id} established");
+                                debug!(
+                                    "Peer session {} for {} established successfully",
+                                    session_id, peer_addr
+                                );
                             }
                             Err(e) => {
                                 error!(
@@ -240,6 +253,30 @@ impl Orchestrator {
                             })
                             .await;
                     }
+                    Event::NotifyInterest { session_id } => {
+                        if let Some(peer_session_data) = self.peer_sessions.get(&session_id) {
+                            // dispatch piece to peer session
+                            let _ = peer_session_data
+                                .tx
+                                .send(PeerSessionEvent::NotifyInterest)
+                                .await;
+                        } else {
+                            error!(
+                                "Failed to notify interest: peer session with ID {} not found",
+                                session_id
+                            );
+
+                            // notify monitor to remove peer session
+                            let _ = monitor_tx
+                                .send(MonitorCommand::RemovePeerSession(session_id.clone()))
+                                .await;
+
+                            // Also notify synchronizer to clean up any assigned pieces
+                            let _ = sync_tx
+                                .send(SynchronizerCommand::ClosePeerSession(session_id.clone()))
+                                .await;
+                        }
+                    }
                     Event::PieceAssembled { piece_index, data } => {
                         let _ = disk_tx
                             .send(DiskWriterCommand::WritePiece { piece_index, data })
@@ -291,7 +328,10 @@ impl Orchestrator {
                                 .send(PeerSessionEvent::AssignPiece { piece })
                                 .await;
                         } else {
-                            error!("Peer session with ID {} not found", session_id.clone());
+                            error!(
+                                "Failed to dispatch piece: peer session with ID {} not found",
+                                session_id
+                            );
 
                             // notify monitor to remove peer session
                             let _ = monitor_tx
@@ -317,10 +357,10 @@ impl Orchestrator {
             }
 
             // The main loop has exited, clean up
-            debug!("Orchestrator shutting down");
+            debug!("Orchestrator event loop terminated, shutting down");
         });
 
-        orchestrator_handle
+        (event_tx, orchestrator_handle)
     }
 
     // // Method to check download progress
