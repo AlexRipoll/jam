@@ -6,7 +6,7 @@ use std::{
 
 use protocol::{bitfield::Bitfield, piece::Piece};
 use tokio::{sync::mpsc, task::JoinHandle};
-use tracing::error;
+use tracing::{error, info};
 
 use crate::torrent::events::Event;
 
@@ -265,6 +265,11 @@ impl Synchronizer {
                 let bitfield = Bitfield::from(&bitfield, total_pieces);
 
                 if self.has_missing_pieces(&bitfield) {
+                    self.event_tx
+                        .send(Event::NotifyInterest {
+                            session_id: session_id.clone(),
+                        })
+                        .await?;
                     self.process_bitfield(&session_id, bitfield);
 
                     // After processing a new bitfield, we might have new pieces to dispatch
@@ -315,6 +320,7 @@ impl Synchronizer {
                         self.close_session(&session_id);
                     }
                 }
+                info!("Download progress: {}%", self.download_progress_percent());
             }
             SynchronizerCommand::UnassignPiece {
                 session_id,
