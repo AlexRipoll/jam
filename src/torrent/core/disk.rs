@@ -103,6 +103,11 @@ impl DiskWriter {
                 match command {
                     // FIX: send piece instead of piece_index so there is no need to have the pieces hashmap field
                     DiskWriterCommand::WritePiece { piece_index, data } => {
+                        debug!(
+                            piece_index = piece_index,
+                            size = %data.len(),
+                            "Writing to disk"
+                        );
                         if let Err(e) = self.write_piece(&mut writer, piece_index, data).await {
                             error!("Failed to write piece {}: {}", piece_index, e);
                             self.stats.write_errors += 1;
@@ -130,7 +135,7 @@ impl DiskWriter {
                         }
                     }
                     DiskWriterCommand::Shutdown => {
-                        info!("DiskWriter shutting down");
+                        info!(task = "DiskWriter", "Shutting down");
                         break;
                     }
                 }
