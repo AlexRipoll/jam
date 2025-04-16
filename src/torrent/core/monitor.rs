@@ -12,7 +12,7 @@ use crate::torrent::{events::Event, peer::Peer};
 pub enum MonitorCommand {
     CheckPeerSessions,                      // Trigger connection check cycle
     RemovePeerSession(String),              // Remove a session from active tracking
-    AddPeer(Peer),                          // Add a new peer to the queue
+    AddPeers(Vec<Peer>),                    // Add  new peers to the queue
     PeerSessionEstablished(String),         // Confirm a peer connection was established
     GetStatus(mpsc::Sender<MonitorStatus>), // Request monitor status
     Shutdown,                               // Signal to shutdown the monitor
@@ -110,9 +110,9 @@ impl Monitor {
                                 // After removing a session, check if we need to request new connections
                                 monitor.check_and_request_connections().await;
                             },
-                            MonitorCommand::AddPeer(peer) => {
-                                monitor.add_peer(peer);
-                                // After adding a peer, check if we can establish new connections
+                            MonitorCommand::AddPeers(peers) => {
+                                peers.into_iter().for_each(|peer| monitor.add_peer(peer));
+                                // After adding the peers, check if we can establish new connections
                                 monitor.check_and_request_connections().await;
                             },
                             MonitorCommand::PeerSessionEstablished(session_id) => {
