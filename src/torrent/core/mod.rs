@@ -1,4 +1,4 @@
 pub mod disk;
 mod monitor;
-mod orchestrator;
+pub mod orchestrator;
 mod sync;
