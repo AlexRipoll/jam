@@ -182,8 +182,9 @@ impl Orchestrator {
                                     .await;
 
                                 debug!(
-                                    "Peer session {} for {} established successfully",
-                                    session_id, peer_addr
+                                    session_id = %session_id,
+                                    ip = %peer_addr,
+                                    "Peer session established"
                                 );
                             }
                             Err(e) => {
@@ -199,10 +200,7 @@ impl Orchestrator {
                     }
                     // Event sent by the synchronizer
                     Event::DisconnectPeerSession { session_id } => {
-                        if let Some(peer_session_data) = self.peer_sessions.get(&session_id) {
-                            // send shutdown signal to peer session
-                            let _ = peer_session_data.tx.send(PeerSessionEvent::Shutdown).await;
-                        } else {
+                        if self.peer_sessions.remove(&session_id).is_none() {
                             error!("Peer session with ID {session_id} not found");
                         }
 
