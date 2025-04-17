@@ -6,7 +6,7 @@ use std::{
 
 use protocol::{bitfield::Bitfield, piece::Piece};
 use tokio::{sync::mpsc, task::JoinHandle};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::torrent::events::Event;
 
@@ -261,6 +261,11 @@ impl Synchronizer {
                 session_id,
                 bitfield,
             } => {
+                debug!(
+                    session_id = %session_id,
+                    bitfield = ?bitfield,
+                    "Peer bitfield received"
+                );
                 let total_pieces = self.bitfield.total_pieces;
                 let bitfield = Bitfield::from(&bitfield, total_pieces);
 
@@ -290,6 +295,11 @@ impl Synchronizer {
                 session_id,
                 piece_index,
             } => {
+                debug!(
+                    session_id = %session_id,
+                    piece_index = %piece_index,
+                    "'Have' message received"
+                );
                 if let Some(bitfield) = self.peers_bitfield.get_mut(&session_id) {
                     bitfield.set_piece(piece_index as usize);
                 }
@@ -300,13 +310,26 @@ impl Synchronizer {
                 session_id,
                 piece_index,
             } => {
+                debug!(
+                    session_id = %session_id,
+                    piece_index = %piece_index,
+                    "Corrupted piece"
+                );
                 self.unassign_piece(&session_id, piece_index);
                 // TODO: blacklist worker for this piece index
             }
             SynchronizerCommand::ClosePeerSession(session_id) => {
+                debug!(
+                    session_id = %session_id,
+                    "Closing peer session"
+                );
                 self.close_session(&session_id);
             }
             SynchronizerCommand::MarkPieceComplete(piece_index) => {
+                debug!(
+                    piece_index = %piece_index,
+                    "Piece completed"
+                );
                 self.mark_piece_complete(piece_index);
                 // check if any of the peer session has completed all the work
                 for (session_id, pending_pieces) in self.workers_pending_pieces.clone().iter() {
@@ -320,18 +343,29 @@ impl Synchronizer {
                         self.close_session(&session_id);
                     }
                 }
+
                 info!("Download progress: {}%", self.download_progress_percent());
             }
             SynchronizerCommand::UnassignPiece {
                 session_id,
                 piece_index,
             } => {
+                debug!(
+                    session_id = %session_id,
+                    piece_index = %piece_index,
+                    "Unassign piece"
+                );
                 self.unassign_piece(&session_id, piece_index);
             }
             SynchronizerCommand::UnassignPieces {
                 session_id,
                 pieces_index,
             } => {
+                debug!(
+                    session_id = %session_id,
+                    pieces_index = ?pieces_index,
+                    "Unassign pieces"
+                );
                 self.unassign_pieces(&session_id, pieces_index);
             }
             SynchronizerCommand::QueryProgress(response_tx) => {
