@@ -206,7 +206,12 @@ impl Orchestrator {
 
                         // notify monitor to remove peer session
                         let _ = monitor_tx
-                            .send(MonitorCommand::RemovePeerSession(session_id))
+                            .send(MonitorCommand::RemovePeerSession(session_id.clone()))
+                            .await;
+
+                        // Also notify synchronizer to remove the peer session
+                        let _ = sync_tx
+                            .send(SynchronizerCommand::ClosePeerSession(session_id))
                             .await;
                     }
                     // Event sent by the peer session
