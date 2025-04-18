@@ -125,11 +125,6 @@ impl PeerSession {
 
         // Main actor task
         let actor_handle = tokio::spawn(async move {
-            // Store handle to ensure it is dropped properly when actor_handle completes
-            let _coordinator_handle = coordinator_handle;
-            let _io_in_handle = io_in_handle;
-            let _io_out_handle = io_out_handle;
-
             let id = self.id.clone();
             let peer_addr = self.peer_addr.clone();
 
@@ -289,6 +284,12 @@ impl PeerSession {
                                 "Error sending shutdown event"
                             );
                         }
+
+                        // aboort all session related tasks
+                        io_in_handle.abort();
+                        io_out_handle.abort();
+                        coordinator_handle.abort();
+
                         break;
                     }
                     PeerSessionEvent::ConnectionClosed => {
@@ -315,10 +316,7 @@ impl PeerSession {
                     }
                 }
             }
-            warn!("Session task ended");
         });
-
-        event_tx.send(PeerSessionEvent::Shutdown).await.unwrap();
 
         Ok((event_tx, actor_handle))
     }
