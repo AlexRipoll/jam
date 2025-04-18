@@ -6,7 +6,7 @@ use std::{
 
 use protocol::piece::Piece;
 use tokio::{sync::mpsc, task::JoinHandle};
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use crate::torrent::{
     core::disk::DiskWriterCommand,
@@ -188,7 +188,7 @@ impl Orchestrator {
                                 );
                             }
                             Err(e) => {
-                                error!(
+                                warn!(
                                     "Could not establish connection with peer at {peer_addr}: {e}"
                                 );
                                 // notify monitor to remove peer session
@@ -341,6 +341,12 @@ impl Orchestrator {
                                 .send(SynchronizerCommand::ClosePeerSession(session_id.clone()))
                                 .await;
                         }
+                    }
+                    Event::DownloadCompleted => {
+                        let _ = self
+                            .torrent_tx
+                            .send(TorrentCommand::DownloadCompleted)
+                            .await;
                     }
                     Event::PeerSessionTimeout { session_id } => {
                         // TODO: remove peer channels and send shutdown event
