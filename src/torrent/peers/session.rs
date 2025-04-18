@@ -2,7 +2,7 @@ use std::{error::Error, fmt::Display};
 
 use protocol::{error::ProtocolError, piece::Piece};
 use tokio::{sync::mpsc, task::JoinHandle};
-use tracing::error;
+use tracing::{debug, error, warn};
 
 use crate::torrent::events::Event;
 
@@ -37,6 +37,7 @@ struct ConnectionState {
 
 #[derive(Debug)]
 pub enum PeerSessionEvent {
+    NotifyInterest,
     AssignPiece { piece: Piece },
     PeerMessageOut { message: Message },
     PeerMessageIn { message: Message },
@@ -92,8 +93,8 @@ impl PeerSession {
         // Connect to peer
         let mut stream = match connect(
             &self.peer_addr,
-            3000, // TODO: inject values from config
-            2,    // TODO: inject values from config
+            1000, // TODO: inject values from config
+            1,    // TODO: inject values from config
         )
         .await
         {
@@ -130,15 +131,50 @@ impl PeerSession {
             let _io_out_handle = io_out_handle;
 
             let id = self.id.clone();
+            let peer_addr = self.peer_addr.clone();
 
             while let Some(cmd) = self.event_rx.recv().await {
                 match cmd {
+                    PeerSessionEvent::NotifyInterest => {
+                        if let Err(e) = io_out_tx
+                            .send(Message::new(MessageId::Interested, None))
+                            .await
+                        {
+                            tracing::error!(
+                                session_id = %id,
+                                peer = %peer_addr,
+                                error = %e,
+                                "Error forwarding message to IO"
+                            );
+                        }
+                        if let Err(e) = io_out_tx.send(Message::new(MessageId::Unchoke, None)).await
+                        {
+                            tracing::error!(
+                                session_id = %id,
+                                peer = %peer_addr,
+                                error = %e,
+                                "Error forwarding message to IO"
+                            );
+                        }
+                    }
                     PeerSessionEvent::AssignPiece { piece } => {
+                        tracing::debug!(
+                            session_id = %id,
+                            ip = %peer_addr,
+                            piece_index = piece.index(),
+                            "Piece assigned"
+                        );
+
                         if let Err(e) = coordinator_tx
                             .send(CoordinatorCommand::AddPiece { piece })
                             .await
                         {
-                            error!("Error forwarding message to Coordinator: {}", e);
+                            tracing::error!(
+                                session_id = %id,
+                                peer = %peer_addr,
+                                error = %e,
+                                "Error forwarding message to Coordinator"
+                            );
                         }
                     }
                     PeerSessionEvent::PeerMessageIn { message } => {
@@ -146,21 +182,44 @@ impl PeerSession {
                             .handle_peer_message(message, &io_out_tx, &coordinator_tx)
                             .await
                         {
-                            error!("Error processing message: {}", e);
+                            tracing::error!(
+                                session_id = %id,
+                                peer = %peer_addr,
+                                error = %e,
+                                "Error processing message"
+                            );
                         }
                     }
                     PeerSessionEvent::PeerMessageOut { message } => {
                         if let Err(e) = io_out_tx.send(message).await {
-                            error!("Error forwarding message to IO: {}", e);
+                            tracing::error!(
+                                session_id = %id,
+                                peer = %peer_addr,
+                                error = %e,
+                                "Error forwarding message to IO"
+                            );
                         }
                     }
                     PeerSessionEvent::PieceAssembled { piece_index, data } => {
+                        tracing::debug!(
+                            session_id = %id,
+                            peer = %peer_addr,
+                            piece_index = piece_index,
+                            data_size = data.len(),
+                            "Piece assembled"
+                        );
+
                         if let Err(e) = self
                             .orchestrator_event_tx
                             .send(Event::PieceAssembled { piece_index, data })
                             .await
                         {
-                            error!("Error forwarding event: {}", e);
+                            tracing::error!(
+                                session_id = %id,
+                                peer = %peer_addr,
+                                error = %e,
+                                "Error forwarding assembled piece event"
+                            );
                         }
                     }
                     PeerSessionEvent::PieceCorrupted { piece_index } => {
@@ -172,7 +231,12 @@ impl PeerSession {
                             })
                             .await
                         {
-                            error!("Error forwarding event: {}", e);
+                            tracing::error!(
+                                session_id = %id,
+                                peer = %peer_addr,
+                                error = %e,
+                                "Error forwarding corrupted piece event"
+                            );
                         }
                     }
                     PeerSessionEvent::UnassignPiece { piece_index } => {
@@ -184,7 +248,12 @@ impl PeerSession {
                             })
                             .await
                         {
-                            error!("Error forwarding event: {}", e);
+                            tracing::error!(
+                                session_id = %id,
+                                peer = %peer_addr,
+                                error = %e,
+                                "Error forwarding unassign piece event"
+                            );
                         }
                     }
                     PeerSessionEvent::UnassignPieces { pieces_index } => {
@@ -196,11 +265,39 @@ impl PeerSession {
                             })
                             .await
                         {
-                            error!("Error forwarding event: {}", e);
+                            tracing::error!(
+                                session_id = %id,
+                                peer = %peer_addr,
+                                error = %e,
+                                "Error forwarding unassign pieces event"
+                            );
                         }
                     }
-                    PeerSessionEvent::Shutdown => break,
+                    PeerSessionEvent::Shutdown => {
+                        debug!(task = "Session", session_id = %id,peer = %peer_addr, "Shutting down");
+                        if let Err(e) = self
+                            .orchestrator_event_tx
+                            .send(Event::DisconnectPeerSession {
+                                session_id: id.clone(),
+                            })
+                            .await
+                        {
+                            tracing::error!(
+                                session_id = %id,
+                                peer = %peer_addr,
+                                error = %e,
+                                "Error sending shutdown event"
+                            );
+                        }
+                        break;
+                    }
                     PeerSessionEvent::ConnectionClosed => {
+                        tracing::debug!(
+                            session_id = %id,
+                            peer = %peer_addr,
+                            "Connection closed"
+                        );
+
                         if let Err(e) = self
                             .orchestrator_event_tx
                             .send(Event::PeerSessionClosed {
@@ -208,12 +305,20 @@ impl PeerSession {
                             })
                             .await
                         {
-                            error!("Error forwarding event: {}", e);
+                            tracing::error!(
+                                session_id = %id,
+                                peer = %peer_addr,
+                                error = %e,
+                                "Error forwarding connection closed event"
+                            );
                         }
                     }
                 }
             }
+            warn!("Session task ended");
         });
+
+        event_tx.send(PeerSessionEvent::Shutdown).await.unwrap();
 
         Ok((event_tx, actor_handle))
     }
@@ -224,28 +329,62 @@ impl PeerSession {
         io_out_tx: &mpsc::Sender<Message>,
         coordinator_tx: &mpsc::Sender<CoordinatorCommand>,
     ) -> Result<(), PeerSessionError> {
+        let id = &self.id;
+        let peer_addr = &self.peer_addr;
+
         match message.message_id {
             MessageId::KeepAlive => {
+                tracing::trace!(session_id = %id, peer = %peer_addr, "KeepAlive message received ");
                 // TODO: extend stream alive
             }
             MessageId::Choke => {
-                self.connection_state.is_choked = true;
+                tracing::debug!(session_id = %id, peer = %peer_addr, "Choked by peer");
+                if let Err(e) = coordinator_tx.send(CoordinatorCommand::Choked).await {
+                    tracing::error!(
+                        session_id = %id,
+                        peer = %peer_addr,
+                        error = %e,
+                        "Failed to forward 'Choked' event to coordinator"
+                    );
+                } else {
+                    self.connection_state.is_choked = true;
+                }
                 // TODO: logic in case peer chokes but client is still interested
             }
             MessageId::Unchoke => {
-                self.connection_state.is_choked = false;
+                tracing::debug!(session_id = %id, peer = %peer_addr, "Unchoked by peer");
+                if let Err(e) = coordinator_tx.send(CoordinatorCommand::Unchoked).await {
+                    tracing::error!(
+                        session_id = %id,
+                        peer = %peer_addr,
+                        error = %e,
+                        "Failed to forward 'Unchoked' event to coordinator"
+                    );
+                } else {
+                    self.connection_state.is_choked = false;
+                }
             }
             MessageId::Interested => {
+                tracing::debug!(session_id = %id, peer = %peer_addr, "Peer interested");
                 self.connection_state.peer_interested = true;
 
                 // TODO: logic for unchoking peer
                 if self.connection_state.peer_choked {
+                    tracing::debug!(session_id = %id, peer = %peer_addr, "Unchoking peer");
                     self.connection_state.peer_choked = false;
                     // notify peer it has been unchoked
-                    io_out_tx.send(Message::new(MessageId::Unchoke, None)).await;
+                    if let Err(e) = io_out_tx.send(Message::new(MessageId::Unchoke, None)).await {
+                        tracing::error!(
+                            session_id = %id,
+                            peer = %peer_addr,
+                            error = %e,
+                            "Failed to send Unchoke message"
+                        );
+                    }
                 }
             }
             MessageId::NotInterested => {
+                tracing::debug!(session_id = %id, peer = %peer_addr, "Peer not interested");
                 self.connection_state.peer_interested = false;
             }
             MessageId::Have => {
@@ -253,6 +392,13 @@ impl PeerSession {
             }
             MessageId::Bitfield => {
                 let bitfield = message.payload.ok_or(PeerSessionError::EmptyPayload)?;
+
+                tracing::debug!(
+                    session_id = %id,
+                    peer = %peer_addr,
+                    bitfield_size = bitfield.len(),
+                    "Received Bitfield message"
+                );
 
                 self.peer_bitfield_received = true;
                 self.orchestrator_event_tx
@@ -267,11 +413,30 @@ impl PeerSession {
                 unimplemented!()
             }
             MessageId::Piece => {
-                coordinator_tx
+                tracing::debug!(
+                    session_id = %id,
+                    peer = %peer_addr,
+                    "Piece data received"
+                );
+
+                if let Err(e) = coordinator_tx
                     .send(CoordinatorCommand::DownloadPiece {
                         payload: message.payload,
                     })
-                    .await;
+                    .await
+                {
+                    tracing::error!(
+                        session_id = %id,
+                        peer = %peer_addr,
+                        error = %e,
+                        "Failed to forward piece to coordinator"
+                    );
+                }
+                tracing::debug!(
+                    session_id = %id,
+                    peer = %peer_addr,
+                    "Piece data sent to coordinator"
+                );
             }
             MessageId::Cancel => {
                 unimplemented!()
@@ -528,7 +693,7 @@ mod test {
     async fn test_handle_peer_message_unchoke() {
         let (mut session, _) = create_test_peer_session();
         let (io_tx, _) = mpsc::channel::<Message>(10);
-        let (coordinator_tx, _) = mpsc::channel::<CoordinatorCommand>(10);
+        let (coordinator_tx, mut coordinator_rx) = mpsc::channel::<CoordinatorCommand>(10);
 
         // Verify initial state is choked
         assert!(session.connection_state.is_choked);
@@ -539,6 +704,13 @@ mod test {
             .await;
 
         assert!(result.is_ok());
+
+        if let Some(CoordinatorCommand::Unchoked) = coordinator_rx.try_recv().ok() {
+            assert!(true);
+        } else {
+            panic!("Expected Unchoked event");
+        }
+
         assert!(!session.connection_state.is_choked);
     }
 
