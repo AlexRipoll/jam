@@ -7,7 +7,7 @@ use std::{
 
 use protocol::piece::Piece;
 use tokio::{sync::mpsc, task::JoinHandle};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use crate::torrent::events::Event;
 
@@ -135,7 +135,7 @@ impl DiskWriter {
                         }
                     }
                     DiskWriterCommand::Shutdown => {
-                        info!(task = "DiskWriter", "Shutting down");
+                        debug!(task = "DiskWriter", "Shutting down");
                         break;
                     }
                 }

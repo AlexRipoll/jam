@@ -4,6 +4,7 @@ use std::{
 };
 
 use tokio::{sync::mpsc, task::JoinHandle, time::Instant};
+use tracing::debug;
 use uuid::Uuid;
 
 use crate::torrent::{events::Event, peer::Peer};
@@ -106,11 +107,19 @@ impl Monitor {
                                 monitor.check_and_request_connections().await;
                             },
                             MonitorCommand::RemovePeerSession(session_id) => {
+                                debug!(
+                                    session_id = %session_id,
+                                    "Removing peer session"
+                                );
                                 monitor.remove_session(&session_id);
                                 // After removing a session, check if we need to request new connections
                                 monitor.check_and_request_connections().await;
                             },
                             MonitorCommand::AddPeers(peers) => {
+                                debug!(
+                                    count = %peers.len(),
+                                    "Adding new peers to set"
+                                );
                                 peers.into_iter().for_each(|peer| monitor.add_peer(peer));
                                 // After adding the peers, check if we can establish new connections
                                 monitor.check_and_request_connections().await;
@@ -128,7 +137,7 @@ impl Monitor {
                                 let _ = response_tx.send(status).await;
                             },
                             MonitorCommand::Shutdown => {
-                                println!("Monitor shutting down");
+                                debug!(task = "Monitor", "Shutting down");
                                 break;
                             }
                         }
