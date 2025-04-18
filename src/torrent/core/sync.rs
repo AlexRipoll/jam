@@ -345,6 +345,11 @@ impl Synchronizer {
                 }
 
                 info!("Download progress: {}%", self.download_progress_percent());
+
+                if self.is_completed() {
+                    info!("Download completed");
+                    self.event_tx.send(Event::DownloadCompleted).await?;
+                }
             }
             SynchronizerCommand::UnassignPiece {
                 session_id,

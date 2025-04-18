@@ -67,6 +67,8 @@ pub enum Event {
         piece_index: u32,
     },
 
+    DownloadCompleted,
+
     // Query
     DiskStats {
         response_channel: mpsc::Sender<DiskWriterStats>,
