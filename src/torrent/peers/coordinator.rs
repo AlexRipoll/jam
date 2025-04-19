@@ -108,15 +108,25 @@ impl Coordinator {
             MIN_CHECK_INTERVAL,
             min(self.timeout_threshold / 5, MAX_CHECK_INTERVAL),
         );
+
+        //  create a shutdown channel
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
+
         let timeout_cmd_tx = cmd_tx.clone();
         let timeout_handle = tokio::spawn(async move {
-            loop {
-                // Check for timeouts every X interval of seconds
-                tokio::time::sleep(Duration::from_secs(interval)).await;
+            let mut interval = tokio::time::interval(Duration::from_secs(interval));
 
-                // Send a command to check for timed out pieces
-                if let Err(e) = timeout_cmd_tx.send(CoordinatorCommand::CheckTimeouts).await {
-                    error!("Failed to send timeout check command: {}", e);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        if let Err(e) = timeout_cmd_tx.send(CoordinatorCommand::CheckTimeouts).await {
+                            error!("Failed to send timeout check command: {}", e);
+                            break;
+                        }
+                    }
+                    _ = shutdown_rx.recv() => {
+                        break;
+                    }
                 }
             }
         });
@@ -125,15 +135,19 @@ impl Coordinator {
 
         // Main actor task
         let actor_handle = tokio::spawn(async move {
-            // Store handle to ensure it is dropped properly when actor_handle completes
-            let _request_handle = request_handle;
-            let _timeout_handle = timeout_handle;
-
             while let Some(cmd) = cmd_rx.recv().await {
                 if let Err(e) = self.handle_command(cmd, &requester_tx_clone).await {
                     error!("Error handling coordinator command: {}", e);
                 }
             }
+
+            // send shutdown signal
+            let _ = shutdown_tx.send(());
+
+            // If shutdown signal might be missed, can still abort as backup
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            timeout_handle.abort();
+            request_handle.abort();
 
             // TODO: unassign all pieces before terminating
         });
@@ -149,16 +163,20 @@ impl Coordinator {
         match command {
             CoordinatorCommand::Choked => {
                 self.is_choked = true;
+            }
+            CoordinatorCommand::Unchoked => {
+                self.is_choked = false;
+
                 // trigger piece download if conditions allow it
                 self.send_next_piece(requester_tx).await?;
             }
-            CoordinatorCommand::Unchoked => self.is_choked = false,
             CoordinatorCommand::AddPiece { piece } => {
                 self.queue.push(piece);
                 // trigger piece download if conditions allow it
                 self.send_next_piece(requester_tx).await?;
             }
             CoordinatorCommand::ReleasePiece { piece_index } => {
+                debug!(piece_index= ?piece_index, "Release piece");
                 self.release_piece(piece_index).await?
             }
             CoordinatorCommand::ReleasePieces => self.release_all_pieces().await?,
@@ -187,6 +205,8 @@ impl Coordinator {
                     // Check if we've reached max strikes
                     if self.is_strikeout() {
                         self.release_all_pieces().await?;
+                        // close peer session
+                        self.event_tx.send(PeerSessionEvent::Shutdown).await?;
                     }
                 }
             }
@@ -199,7 +219,11 @@ impl Coordinator {
         &mut self,
         requester_tx: &mpsc::Sender<Piece>,
     ) -> Result<(), CoordinatorError> {
-        if !self.is_choked && !self.queue.is_empty() && !self.request_in_progress {
+        if !self.is_choked
+            && !self.queue.is_empty()
+            && self.in_progress.len() <= 20
+            && !self.request_in_progress
+        {
             let piece = self.queue.first().ok_or(CoordinatorError::EmptyQueue)?;
 
             requester_tx.send(piece.clone()).await?;
@@ -219,7 +243,7 @@ impl Coordinator {
         let piece = self
             .active_pieces
             .get_mut(&(payload.index as usize))
-            .ok_or(CoordinatorError::PieceNotFound)?;
+            .ok_or(CoordinatorError::PieceNotFound(payload.index))?;
 
         debug!(piece_index= ?payload.index, block_offset= ?payload.begin, "Downloading piece");
         // Insert the received block in the piece bytes
@@ -235,7 +259,7 @@ impl Coordinator {
 
             // Validate the piece hash
             if is_valid_piece(piece.hash(), &assembled_blocks) {
-                debug!(piece_index= ?payload.index, "Piece hash verified. Sending to disk");
+                debug!(piece_index= ?payload.index, "Piece hash verified");
                 self.event_tx
                     .send(PeerSessionEvent::PieceAssembled {
                         piece_index: piece.index(),
@@ -391,7 +415,7 @@ pub enum CoordinatorError {
     Message(MessageError),
     Protocol(ProtocolError),
     EmptyPayload,
-    PieceNotFound,
+    PieceNotFound(u32),
     EmptyQueue,
     CorruptedPiece(u32),
     CommandTxError(mpsc::error::SendError<CoordinatorCommand>),
@@ -403,7 +427,9 @@ impl Display for CoordinatorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CoordinatorError::EmptyPayload => write!(f, "Received message with empty payload"),
-            CoordinatorError::PieceNotFound => write!(f, "Piece not found in map"),
+            CoordinatorError::PieceNotFound(piece_index) => {
+                write!(f, "Piece with index {} not found in map", piece_index)
+            }
             CoordinatorError::EmptyQueue => write!(f, "Empty queue"),
             CoordinatorError::CorruptedPiece(piece_index) => {
                 write!(f, "Invalid hash found for piece with index {}", piece_index)
