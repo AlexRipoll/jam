@@ -18,7 +18,7 @@ pub async fn run(
     stream: TcpStream,
     event_tx: mpsc::Sender<PeerSessionEvent>,
 ) -> (mpsc::Sender<Message>, JoinHandle<()>, JoinHandle<()>) {
-    let (out_tx, mut out_rx) = mpsc::channel::<Message>(100);
+    let (out_tx, mut out_rx) = mpsc::channel::<Message>(256);
     let cmd_tx_clone = event_tx.clone();
 
     let (mut read_half, mut write_half) = tokio::io::split(stream);
@@ -35,15 +35,16 @@ pub async fn run(
                         error!("Failed to forward peer message: {}", e);
                     }
                 }
-                Err(e) => match e {
-                    IoError::IncompleteMessage => {
-                        if let Err(e) = cmd_tx_clone.send(PeerSessionEvent::ConnectionClosed).await
-                        {
-                            error!("Failed to notify connection closure: {}", e);
-                        }
+                Err(IoError::IncompleteMessage) => {
+                    if let Err(e) = cmd_tx_clone.send(PeerSessionEvent::ConnectionClosed).await {
+                        error!("Failed to notify ConnectionClosed: {e}");
                     }
-                    _ => error!("Error reading peer message: {}", e),
-                },
+                    break;
+                }
+                Err(e) => {
+                    error!("Unexpected error reading peer message: {e}");
+                    break;
+                }
             }
         }
     });
