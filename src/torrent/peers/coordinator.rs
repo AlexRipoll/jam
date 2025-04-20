@@ -18,6 +18,8 @@ use crate::torrent::peers::{
 
 use super::message::Message;
 
+const CHAN_BUFF_MARGIN_COEF: f64 = 0.9;
+
 const MAX_STRIKES: u8 = 3;
 
 // Timeout checker intervals
@@ -38,6 +40,10 @@ pub struct Coordinator {
     // vector containing the pieces that are being downloaded but stil not completed
     in_progress: Vec<Piece>,
 
+    // maximum amount of pieces that can be in progress, it is calculated based on the channel
+    // buffer size and the blocks per piece
+    max_in_progress: usize,
+
     // timestamps of the las time a block os a piece
     in_progress_timestamps: HashMap<u32, Instant>,
 
@@ -47,6 +53,13 @@ pub struct Coordinator {
     // number of times a in_progress piece has been removed from the download in progress pieces vector (in_progress) because the timeout has been reached
     strikes: u8,
 
+    // coordinator event sender
+    cmd_tx: mpsc::Sender<CoordinatorCommand>,
+
+    // coordinator event receiver
+    cmd_rx: mpsc::Receiver<CoordinatorCommand>,
+
+    // session event sender
     event_tx: mpsc::Sender<PeerSessionEvent>,
 
     // Keep track of whether a piece request is in progress
@@ -67,7 +80,19 @@ pub enum CoordinatorCommand {
 }
 
 impl Coordinator {
-    pub fn new(timeout_threshold: u64, event_tx: mpsc::Sender<PeerSessionEvent>) -> Self {
+    pub fn new(
+        piece_size: usize,
+        block_size: usize,
+        buffer_size: usize,
+        timeout_threshold: u64,
+        event_tx: mpsc::Sender<PeerSessionEvent>,
+    ) -> Self {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<CoordinatorCommand>(buffer_size);
+
+        let blocks_per_piece = (piece_size + block_size - 1) / block_size;
+        let max_in_progress = ((buffer_size as f64 * CHAN_BUFF_MARGIN_COEF).floor() as usize)
+            .saturating_div(blocks_per_piece);
+
         let timeout_threshold = if timeout_threshold == 0 {
             5
         } else {
@@ -79,25 +104,28 @@ impl Coordinator {
             active_pieces: HashMap::new(),
             queue: vec![],
             in_progress: vec![],
+            max_in_progress,
             in_progress_timestamps: HashMap::new(),
             timeout_threshold,
             strikes: 0,
+            cmd_tx,
+            cmd_rx,
             event_tx,
             request_in_progress: false,
         }
     }
 
     pub fn run(mut self) -> (mpsc::Sender<CoordinatorCommand>, JoinHandle<()>) {
-        let (cmd_tx, mut cmd_rx) = mpsc::channel::<CoordinatorCommand>(100);
         let (requester_tx, mut requester_rx) = mpsc::channel::<Piece>(1);
 
         let event_tx_clone = self.event_tx.clone();
-        let cmd_tx_clone = cmd_tx.clone();
+        let cmd_tx_clone = self.cmd_tx.clone();
+        let req_cmd_tx = cmd_tx_clone.clone();
 
         // Spawn a separate task for handling dispatch operations
         let request_handle = tokio::spawn(async move {
             while let Some(piece) = requester_rx.recv().await {
-                if let Err(e) = Self::request(&piece, &cmd_tx_clone, &event_tx_clone).await {
+                if let Err(e) = Self::request(&piece, &req_cmd_tx, &event_tx_clone).await {
                     error!("Error requesting piece with index {}: {}", piece.index(), e);
                 }
             }
@@ -112,7 +140,7 @@ impl Coordinator {
         //  create a shutdown channel
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
 
-        let timeout_cmd_tx = cmd_tx.clone();
+        let timeout_cmd_tx = cmd_tx_clone.clone();
         let timeout_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(interval));
 
@@ -135,7 +163,7 @@ impl Coordinator {
 
         // Main actor task
         let actor_handle = tokio::spawn(async move {
-            while let Some(cmd) = cmd_rx.recv().await {
+            while let Some(cmd) = self.cmd_rx.recv().await {
                 if let Err(e) = self.handle_command(cmd, &requester_tx_clone).await {
                     error!("Error handling coordinator command: {}", e);
                 }
@@ -152,7 +180,7 @@ impl Coordinator {
             // TODO: unassign all pieces before terminating
         });
 
-        (cmd_tx, actor_handle)
+        (cmd_tx_clone, actor_handle)
     }
 
     async fn handle_command(
@@ -221,7 +249,7 @@ impl Coordinator {
     ) -> Result<(), CoordinatorError> {
         if !self.is_choked
             && !self.queue.is_empty()
-            && self.in_progress.len() <= 20
+            && self.in_progress.len() < self.max_in_progress
             && !self.request_in_progress
         {
             let piece = self.queue.first().ok_or(CoordinatorError::EmptyQueue)?;
@@ -500,7 +528,7 @@ mod test {
     #[test]
     fn test_new_coordinator() {
         let (tx, _) = mpsc::channel::<PeerSessionEvent>(100);
-        let coordinator = Coordinator::new(10, tx);
+        let coordinator = Coordinator::new(65536, 16384, 20, 10, tx);
 
         assert!(coordinator.is_choked);
         assert!(coordinator.active_pieces.is_empty());
@@ -515,7 +543,7 @@ mod test {
     #[tokio::test]
     async fn test_new_coordinator_with_zero_timeout() {
         let (tx, _) = mpsc::channel::<PeerSessionEvent>(100);
-        let coordinator = Coordinator::new(0, tx);
+        let coordinator = Coordinator::new(65536, 16384, 20, 0, tx);
 
         // Should use default of 5 seconds when 0 is provided
         assert_eq!(coordinator.timeout_threshold, 5);
@@ -524,7 +552,7 @@ mod test {
     #[tokio::test]
     async fn test_handle_choked_command() {
         let (event_tx, _) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(10, event_tx);
+        let mut coordinator = Coordinator::new(65536, 16384, 20, 10, event_tx);
         let (requester_tx, _) = mpsc::channel::<Piece>(1);
 
         coordinator.is_choked = false; // Start unchoked
@@ -541,7 +569,7 @@ mod test {
     #[tokio::test]
     async fn test_handle_unchoked_command() {
         let (event_tx, _) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(10, event_tx);
+        let mut coordinator = Coordinator::new(65536, 16384, 20, 10, event_tx);
         let (requester_tx, _) = mpsc::channel::<Piece>(1);
 
         // Start choked
@@ -559,7 +587,7 @@ mod test {
     #[tokio::test]
     async fn test_add_piece_to_queue() {
         let (event_tx, _) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(10, event_tx);
+        let mut coordinator = Coordinator::new(65536, 16384, 20, 10, event_tx);
         let (requester_tx, mut requester_rx) = mpsc::channel::<Piece>(1);
 
         // assert that the queue is initially empty
@@ -611,7 +639,7 @@ mod test {
     #[tokio::test]
     async fn test_request_dispatched() {
         let (event_tx, _) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(10, event_tx);
+        let mut coordinator = Coordinator::new(65536, 16384, 20, 10, event_tx);
         let (requester_tx, _) = mpsc::channel::<Piece>(1);
 
         // Create a test piece
@@ -654,7 +682,7 @@ mod test {
     #[tokio::test]
     async fn test_process_piece_message() {
         let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(10, event_tx);
+        let mut coordinator = Coordinator::new(65536, 16384, 20, 10, event_tx);
         let (requester_tx, _) = mpsc::channel::<Piece>(1);
 
         // Create a piece payload
@@ -716,7 +744,7 @@ mod test {
     #[tokio::test]
     async fn test_process_piece_message_corrupted_piece() {
         let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(10, event_tx);
+        let mut coordinator = Coordinator::new(65536, 16384, 20, 10, event_tx);
         let (requester_tx, _) = mpsc::channel::<Piece>(1);
 
         // Create a piece payload
@@ -769,7 +797,7 @@ mod test {
     #[tokio::test]
     async fn test_release_piece() {
         let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(10, event_tx);
+        let mut coordinator = Coordinator::new(65536, 16384, 20, 10, event_tx);
 
         // Add a piece to in_progress
         let piece = Piece::new(1, 16384, [1u8; 20]);
@@ -796,7 +824,7 @@ mod test {
     #[tokio::test]
     async fn test_release_pieces() {
         let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(10, event_tx);
+        let mut coordinator = Coordinator::new(65536, 16384, 20, 10, event_tx);
 
         // Add multiple pieces to in_progress
         let piece1 = Piece::new(1, 16384, [1u8; 20]);
@@ -830,7 +858,7 @@ mod test {
 
     async fn test_timeout_pieces() {
         let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(1, event_tx); // 1 second timeout
+        let mut coordinator = Coordinator::new(65536, 16384, 20, 1, event_tx); // 1 second timeout
         let (requester_tx, _) = mpsc::channel::<Piece>(1);
 
         // Add a piece to in_progress with an old timestamp
@@ -881,7 +909,7 @@ mod test {
     #[tokio::test]
     async fn test_max_strikes_release_all() {
         let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(1, event_tx); // 1 second timeout
+        let mut coordinator = Coordinator::new(65536, 16384, 20, 1, event_tx); // 1 second timeout
         let (requester_tx, _) = mpsc::channel::<Piece>(1);
 
         // Set strikes to max-1
@@ -952,7 +980,7 @@ mod test {
 
     async fn test_send_next_piece() {
         let (event_tx, _) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(10, event_tx);
+        let mut coordinator = Coordinator::new(65536, 16384, 20, 10, event_tx);
         let (requester_tx, mut requester_rx) = mpsc::channel::<Piece>(1);
 
         // Create a test piece
@@ -982,7 +1010,7 @@ mod test {
     #[tokio::test]
     async fn test_run_lifecycle() {
         let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
-        let coordinator = Coordinator::new(10, event_tx);
+        let coordinator = Coordinator::new(65536, 16384, 20, 10, event_tx);
 
         // Start the coordinator
         let (cmd_tx, handle) = coordinator.run();
@@ -1025,7 +1053,7 @@ mod test {
     #[tokio::test]
     async fn test_corrupted_piece() {
         let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(10, event_tx);
+        let mut coordinator = Coordinator::new(65536, 16384, 20, 10, event_tx);
 
         // Create a test piece and add it to active pieces
         let piece = Piece::new(1, 16384, [1u8; 20]);

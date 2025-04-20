@@ -19,6 +19,8 @@ pub struct PeerSession {
     peer_id: [u8; 20],
     info_hash: [u8; 20],
     peer_addr: String,
+    piece_size: usize,
+    block_size: usize,
     timeout_threshold: u64,
     peer_bitfield_received: bool,
     connection_state: ConnectionState,
@@ -67,15 +69,19 @@ impl PeerSession {
         peer_id: [u8; 20],
         info_hash: [u8; 20],
         peer_addr: String,
+        piece_size: usize,
+        block_size: usize,
         timeout_threshold: u64,
         orchestrator_event_tx: mpsc::Sender<Event>,
     ) -> Self {
-        let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
+        let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(256);
         PeerSession {
             id,
             peer_id,
             info_hash,
             peer_addr,
+            piece_size,
+            block_size,
             timeout_threshold,
             peer_bitfield_received: false,
             connection_state: ConnectionState::default(),
@@ -116,7 +122,13 @@ impl PeerSession {
         let (io_out_tx, io_in_handle, io_out_handle) = io::run(stream, event_tx.clone()).await;
 
         // Initialize and run the coordinator
-        let coordinator = Coordinator::new(self.timeout_threshold, event_tx.clone());
+        let coordinator = Coordinator::new(
+            self.piece_size,
+            self.block_size,
+            256,
+            self.timeout_threshold,
+            event_tx.clone(),
+        );
         let (coordinator_tx, coordinator_handle) = coordinator.run();
 
         let event_tx_clone = self.orchestrator_event_tx.clone();
@@ -581,6 +593,8 @@ mod test {
             [1u8; 20],
             [2u8; 20],
             "127.0.0.1:12345".to_string(),
+            65536,
+            16384,
             60, // timeout threshold in seconds
             orchestrator_tx,
         );
@@ -597,6 +611,8 @@ mod test {
             [1u8; 20],
             [2u8; 20],
             "127.0.0.1:12345".to_string(),
+            65536,
+            16384,
             60,
             orchestrator_tx,
         );

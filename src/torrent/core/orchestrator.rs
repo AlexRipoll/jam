@@ -51,6 +51,7 @@ pub struct Orchestrator {
     download_path: PathBuf,
     file_size: u64,
     pieces_size: u64,
+    block_size: u64,
     timeout_threshold: u64,
     torrent_tx: mpsc::Sender<TorrentCommand>,
 }
@@ -74,6 +75,7 @@ impl Orchestrator {
         download_path: PathBuf,
         file_size: u64,
         pieces_size: u64,
+        block_size: u64,
         timeout_threshold: u64,
         torrent_tx: mpsc::Sender<TorrentCommand>,
     ) -> Self {
@@ -96,6 +98,7 @@ impl Orchestrator {
             download_path,
             file_size,
             pieces_size,
+            block_size,
             timeout_threshold,
             torrent_tx,
         }
@@ -160,6 +163,8 @@ impl Orchestrator {
                             self.peer_id,
                             self.info_hash,
                             peer_addr.clone(),
+                            self.pieces_size as usize,
+                            self.block_size as usize,
                             self.timeout_threshold,
                             self.event_tx.clone(),
                         );
