@@ -215,7 +215,9 @@ impl Synchronizer {
     ) -> Result<(), SynchronizerError> {
         match command {
             SynchronizerCommand::RequestDispatch => {
-                if !self.dispatch_in_progress && !self.pending_pieces.is_empty() {
+                if !self.dispatch_in_progress
+                    && (self.pending_pieces.len() > self.assigned_pieces.len())
+                {
                     self.dispatch_in_progress = true;
 
                     // Prepare data for the dispatch task
@@ -245,8 +247,8 @@ impl Synchronizer {
             SynchronizerCommand::DispatchCompleted => {
                 self.dispatch_in_progress = false;
 
-                // If there are still pending pieces, request another dispatch
-                if !self.pending_pieces.is_empty() {
+                // If pending pieces list length is greater that assigned pieces length it means there are still to be dispatched (still not assigned)
+                if self.pending_pieces.len() > self.assigned_pieces.len() {
                     actor_cmd_tx
                         .send(SynchronizerCommand::RequestDispatch)
                         .await?;
