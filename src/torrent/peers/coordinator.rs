@@ -18,7 +18,7 @@ use crate::torrent::peers::{
 
 use super::message::Message;
 
-const CHAN_BUFF_MARGIN_COEF: f64 = 0.9;
+const CHAN_BUFF_MARGIN_COEF: f64 = 0.7;
 
 const MAX_STRIKES: u8 = 3;
 
@@ -28,6 +28,10 @@ const MAX_CHECK_INTERVAL: u64 = 10;
 
 #[derive(Debug)]
 pub struct Coordinator {
+    // the session id
+    id: String,
+
+    // flag to check if the peer has choked us
     is_choked: bool,
 
     // FIX: check if necessary field
@@ -81,6 +85,7 @@ pub enum CoordinatorCommand {
 
 impl Coordinator {
     pub fn new(
+        id: String,
         piece_size: usize,
         block_size: usize,
         buffer_size: usize,
@@ -100,6 +105,7 @@ impl Coordinator {
         };
 
         Self {
+            id,
             is_choked: true,
             active_pieces: HashMap::new(),
             queue: vec![],
@@ -122,10 +128,13 @@ impl Coordinator {
         let cmd_tx_clone = self.cmd_tx.clone();
         let req_cmd_tx = cmd_tx_clone.clone();
 
+        let id = self.id.clone();
         // Spawn a separate task for handling dispatch operations
         let request_handle = tokio::spawn(async move {
             while let Some(piece) = requester_rx.recv().await {
-                if let Err(e) = Self::request(&piece, &req_cmd_tx, &event_tx_clone).await {
+                if let Err(e) =
+                    Self::request(id.clone(), &piece, &req_cmd_tx, &event_tx_clone).await
+                {
                     error!("Error requesting piece with index {}: {}", piece.index(), e);
                 }
             }
@@ -204,7 +213,7 @@ impl Coordinator {
                 self.send_next_piece(requester_tx).await?;
             }
             CoordinatorCommand::ReleasePiece { piece_index } => {
-                debug!(piece_index= ?piece_index, "Release piece");
+                debug!(session_id=?self.id, piece_index= ?piece_index, "Release piece");
                 self.release_piece(piece_index).await?
             }
             CoordinatorCommand::ReleasePieces => self.release_all_pieces().await?,
@@ -273,7 +282,7 @@ impl Coordinator {
             .get_mut(&(payload.index as usize))
             .ok_or(CoordinatorError::PieceNotFound(payload.index))?;
 
-        debug!(piece_index= ?payload.index, block_offset= ?payload.begin, "Downloading piece");
+        debug!(session_id=?self.id, piece_index= ?payload.index, block_offset= ?payload.begin, "Downloading piece");
         // Insert the received block in the piece bytes
         piece.add_block(payload.begin, payload.block.clone())?;
         // update last block insertion
@@ -283,11 +292,11 @@ impl Coordinator {
         // Check if the piece has all the blocks and is not already been processed and stored in disk
         if piece.is_ready() && !piece.is_finalized() {
             let assembled_blocks = piece.assemble()?;
-            debug!(piece_index= ?payload.index, "Piece download completed. Verifying hash...");
+            debug!(session_id=?self.id, piece_index= ?payload.index, "Piece download completed. Verifying hash...");
 
             // Validate the piece hash
             if is_valid_piece(piece.hash(), &assembled_blocks) {
-                debug!(piece_index= ?payload.index, "Piece hash verified");
+                debug!(session_id=?self.id, piece_index= ?payload.index, "Piece hash verified");
                 self.event_tx
                     .send(PeerSessionEvent::PieceAssembled {
                         piece_index: piece.index(),
@@ -298,7 +307,7 @@ impl Coordinator {
                 // remove the finalized piece from the in_progress list
                 self.in_progress.retain(|p| p.index() != piece.index());
             } else {
-                debug!(piece_index= ?payload.index, "Piece hash verification failed");
+                debug!(session_id=?self.id, piece_index= ?payload.index, "Piece hash verification failed");
                 self.event_tx
                     .send(PeerSessionEvent::PieceCorrupted {
                         piece_index: piece.index(),
@@ -320,17 +329,19 @@ impl Coordinator {
     }
 
     pub async fn request(
+        id: String,
         piece: &Piece,
         cmd_tx: &mpsc::Sender<CoordinatorCommand>,
         event_tx: &mpsc::Sender<PeerSessionEvent>,
     ) -> Result<(), CoordinatorError> {
-        Self::request_from_offset(&piece, 0, cmd_tx, event_tx).await?;
+        Self::request_from_offset(id, &piece, 0, cmd_tx, event_tx).await?;
 
         Ok(())
     }
 
     /// Core logic to request blocks from a piece starting at a given offset
     async fn request_from_offset(
+        id: String,
         piece: &Piece,
         start_offset: u32,
         cmd_tx: &mpsc::Sender<CoordinatorCommand>,
@@ -339,7 +350,7 @@ impl Coordinator {
         let total_blocks = (piece.size() + 16384 - 1) / 16384;
 
         debug!(
-            piece = ?piece.index(), total_blocks= ?total_blocks, start_offset= ?start_offset, "Requesting blocks for piece"
+           session_id=?id,  piece = ?piece.index(), total_blocks= ?total_blocks, start_offset= ?start_offset, "Requesting blocks for piece"
         );
         for block_index in ((start_offset / 16384) as usize)..total_blocks {
             let block_offset = block_index as u32 * 16384;
@@ -347,7 +358,7 @@ impl Coordinator {
 
             let payload = TransferPayload::new(piece.index(), block_offset, block_size).serialize();
             debug!(
-                piece_index = ?piece.index(),block_offset= ?block_offset, block_size= ?block_size, "Sending block request"
+             session_id=?id,    piece_index = ?piece.index(),block_offset= ?block_offset, block_size= ?block_size, "Sending block request"
             );
             event_tx
                 .send(PeerSessionEvent::PeerMessageOut {
@@ -528,7 +539,14 @@ mod test {
     #[test]
     fn test_new_coordinator() {
         let (tx, _) = mpsc::channel::<PeerSessionEvent>(100);
-        let coordinator = Coordinator::new(65536, 16384, 20, 10, tx);
+        let coordinator = Coordinator::new(
+            "75cf1577-8c52-4065-b967-1e74dd2fd928".to_string(),
+            65536,
+            16384,
+            20,
+            10,
+            tx,
+        );
 
         assert!(coordinator.is_choked);
         assert!(coordinator.active_pieces.is_empty());
@@ -543,7 +561,14 @@ mod test {
     #[tokio::test]
     async fn test_new_coordinator_with_zero_timeout() {
         let (tx, _) = mpsc::channel::<PeerSessionEvent>(100);
-        let coordinator = Coordinator::new(65536, 16384, 20, 0, tx);
+        let coordinator = Coordinator::new(
+            "75cf1577-8c52-4065-b967-1e74dd2fd928".to_string(),
+            65536,
+            16384,
+            20,
+            0,
+            tx,
+        );
 
         // Should use default of 5 seconds when 0 is provided
         assert_eq!(coordinator.timeout_threshold, 5);
@@ -552,7 +577,14 @@ mod test {
     #[tokio::test]
     async fn test_handle_choked_command() {
         let (event_tx, _) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(65536, 16384, 20, 10, event_tx);
+        let mut coordinator = Coordinator::new(
+            "75cf1577-8c52-4065-b967-1e74dd2fd928".to_string(),
+            65536,
+            16384,
+            20,
+            10,
+            event_tx,
+        );
         let (requester_tx, _) = mpsc::channel::<Piece>(1);
 
         coordinator.is_choked = false; // Start unchoked
@@ -569,7 +601,14 @@ mod test {
     #[tokio::test]
     async fn test_handle_unchoked_command() {
         let (event_tx, _) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(65536, 16384, 20, 10, event_tx);
+        let mut coordinator = Coordinator::new(
+            "75cf1577-8c52-4065-b967-1e74dd2fd928".to_string(),
+            65536,
+            16384,
+            20,
+            10,
+            event_tx,
+        );
         let (requester_tx, _) = mpsc::channel::<Piece>(1);
 
         // Start choked
@@ -587,7 +626,14 @@ mod test {
     #[tokio::test]
     async fn test_add_piece_to_queue() {
         let (event_tx, _) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(65536, 16384, 20, 10, event_tx);
+        let mut coordinator = Coordinator::new(
+            "75cf1577-8c52-4065-b967-1e74dd2fd928".to_string(),
+            65536,
+            16384,
+            20,
+            10,
+            event_tx,
+        );
         let (requester_tx, mut requester_rx) = mpsc::channel::<Piece>(1);
 
         // assert that the queue is initially empty
@@ -639,7 +685,14 @@ mod test {
     #[tokio::test]
     async fn test_request_dispatched() {
         let (event_tx, _) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(65536, 16384, 20, 10, event_tx);
+        let mut coordinator = Coordinator::new(
+            "75cf1577-8c52-4065-b967-1e74dd2fd928".to_string(),
+            65536,
+            16384,
+            20,
+            10,
+            event_tx,
+        );
         let (requester_tx, _) = mpsc::channel::<Piece>(1);
 
         // Create a test piece
@@ -682,7 +735,14 @@ mod test {
     #[tokio::test]
     async fn test_process_piece_message() {
         let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(65536, 16384, 20, 10, event_tx);
+        let mut coordinator = Coordinator::new(
+            "75cf1577-8c52-4065-b967-1e74dd2fd928".to_string(),
+            65536,
+            16384,
+            20,
+            10,
+            event_tx,
+        );
         let (requester_tx, _) = mpsc::channel::<Piece>(1);
 
         // Create a piece payload
@@ -744,7 +804,14 @@ mod test {
     #[tokio::test]
     async fn test_process_piece_message_corrupted_piece() {
         let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(65536, 16384, 20, 10, event_tx);
+        let mut coordinator = Coordinator::new(
+            "75cf1577-8c52-4065-b967-1e74dd2fd928".to_string(),
+            65536,
+            16384,
+            20,
+            10,
+            event_tx,
+        );
         let (requester_tx, _) = mpsc::channel::<Piece>(1);
 
         // Create a piece payload
@@ -797,7 +864,14 @@ mod test {
     #[tokio::test]
     async fn test_release_piece() {
         let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(65536, 16384, 20, 10, event_tx);
+        let mut coordinator = Coordinator::new(
+            "75cf1577-8c52-4065-b967-1e74dd2fd928".to_string(),
+            65536,
+            16384,
+            20,
+            10,
+            event_tx,
+        );
 
         // Add a piece to in_progress
         let piece = Piece::new(1, 16384, [1u8; 20]);
@@ -824,7 +898,14 @@ mod test {
     #[tokio::test]
     async fn test_release_pieces() {
         let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(65536, 16384, 20, 10, event_tx);
+        let mut coordinator = Coordinator::new(
+            "75cf1577-8c52-4065-b967-1e74dd2fd928".to_string(),
+            65536,
+            16384,
+            20,
+            10,
+            event_tx,
+        );
 
         // Add multiple pieces to in_progress
         let piece1 = Piece::new(1, 16384, [1u8; 20]);
@@ -858,7 +939,14 @@ mod test {
 
     async fn test_timeout_pieces() {
         let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(65536, 16384, 20, 1, event_tx); // 1 second timeout
+        let mut coordinator = Coordinator::new(
+            "75cf1577-8c52-4065-b967-1e74dd2fd928".to_string(),
+            65536,
+            16384,
+            20,
+            1,
+            event_tx,
+        ); // 1 second timeout
         let (requester_tx, _) = mpsc::channel::<Piece>(1);
 
         // Add a piece to in_progress with an old timestamp
@@ -909,7 +997,14 @@ mod test {
     #[tokio::test]
     async fn test_max_strikes_release_all() {
         let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(65536, 16384, 20, 1, event_tx); // 1 second timeout
+        let mut coordinator = Coordinator::new(
+            "75cf1577-8c52-4065-b967-1e74dd2fd928".to_string(),
+            65536,
+            16384,
+            20,
+            1,
+            event_tx,
+        ); // 1 second timeout
         let (requester_tx, _) = mpsc::channel::<Piece>(1);
 
         // Set strikes to max-1
@@ -980,7 +1075,14 @@ mod test {
 
     async fn test_send_next_piece() {
         let (event_tx, _) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(65536, 16384, 20, 10, event_tx);
+        let mut coordinator = Coordinator::new(
+            "75cf1577-8c52-4065-b967-1e74dd2fd928".to_string(),
+            65536,
+            16384,
+            20,
+            10,
+            event_tx,
+        );
         let (requester_tx, mut requester_rx) = mpsc::channel::<Piece>(1);
 
         // Create a test piece
@@ -1010,7 +1112,14 @@ mod test {
     #[tokio::test]
     async fn test_run_lifecycle() {
         let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
-        let coordinator = Coordinator::new(65536, 16384, 20, 10, event_tx);
+        let coordinator = Coordinator::new(
+            "75cf1577-8c52-4065-b967-1e74dd2fd928".to_string(),
+            65536,
+            16384,
+            20,
+            10,
+            event_tx,
+        );
 
         // Start the coordinator
         let (cmd_tx, handle) = coordinator.run();
@@ -1053,7 +1162,14 @@ mod test {
     #[tokio::test]
     async fn test_corrupted_piece() {
         let (event_tx, mut event_rx) = mpsc::channel::<PeerSessionEvent>(100);
-        let mut coordinator = Coordinator::new(65536, 16384, 20, 10, event_tx);
+        let mut coordinator = Coordinator::new(
+            "75cf1577-8c52-4065-b967-1e74dd2fd928".to_string(),
+            65536,
+            16384,
+            20,
+            10,
+            event_tx,
+        );
 
         // Create a test piece and add it to active pieces
         let piece = Piece::new(1, 16384, [1u8; 20]);
