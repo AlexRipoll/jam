@@ -123,6 +123,7 @@ impl PeerSession {
 
         // Initialize and run the coordinator
         let coordinator = Coordinator::new(
+            id,
             self.piece_size,
             self.block_size,
             256,
