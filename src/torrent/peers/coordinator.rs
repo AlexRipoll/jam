@@ -203,14 +203,9 @@ impl Coordinator {
             }
             CoordinatorCommand::Unchoked => {
                 self.is_choked = false;
-
-                // trigger piece download if conditions allow it
-                self.send_next_piece(requester_tx).await?;
             }
             CoordinatorCommand::AddPiece { piece } => {
                 self.queue.push(piece);
-                // trigger piece download if conditions allow it
-                self.send_next_piece(requester_tx).await?;
             }
             CoordinatorCommand::ReleasePiece { piece_index } => {
                 debug!(session_id=?self.id, piece_index= ?piece_index, "Release piece");
@@ -229,8 +224,6 @@ impl Coordinator {
                 // remove the piece from the download queue
                 self.queue.retain(|p| p.index() != piece.index());
                 self.request_in_progress = false;
-
-                self.send_next_piece(requester_tx).await?;
             }
             CoordinatorCommand::DownloadPiece { payload } => {
                 self.process_piece_message(payload).await?
@@ -248,6 +241,9 @@ impl Coordinator {
                 }
             }
         }
+
+        // trigger piece download if conditions allow it
+        self.send_next_piece(requester_tx).await?;
 
         Ok(())
     }
