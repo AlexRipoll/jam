@@ -18,7 +18,7 @@ use crate::torrent::peers::{
 
 use super::message::Message;
 
-const CHAN_BUFF_MARGIN_COEF: f64 = 0.7;
+const CHAN_BUFF_MARGIN_COEF: f64 = 0.9;
 
 const MAX_STRIKES: u8 = 3;
 
