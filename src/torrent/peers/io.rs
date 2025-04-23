@@ -7,7 +7,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use tracing::error;
+use tracing::{debug, error};
 
 use super::{
     message::{Message, MessageError},
@@ -18,7 +18,7 @@ pub async fn run(
     stream: TcpStream,
     event_tx: mpsc::Sender<PeerSessionEvent>,
 ) -> (mpsc::Sender<Message>, JoinHandle<()>, JoinHandle<()>) {
-    let (out_tx, mut out_rx) = mpsc::channel::<Message>(256);
+    let (out_tx, mut out_rx) = mpsc::channel::<Message>(128);
     let cmd_tx_clone = event_tx.clone();
 
     let (mut read_half, mut write_half) = tokio::io::split(stream);

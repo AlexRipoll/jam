@@ -83,7 +83,7 @@ impl DiskWriter {
     }
 
     pub fn run(mut self) -> (mpsc::Sender<DiskWriterCommand>, JoinHandle<()>) {
-        let (command_tx, mut command_rx) = mpsc::channel(100);
+        let (command_tx, mut command_rx) = mpsc::channel(128);
 
         let handle = tokio::spawn(async move {
             // Create the file once at startup

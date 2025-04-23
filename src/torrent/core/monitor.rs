@@ -4,7 +4,7 @@ use std::{
 };
 
 use tokio::{sync::mpsc, task::JoinHandle, time::Instant};
-use tracing::debug;
+use tracing::{debug, field::debug};
 use uuid::Uuid;
 
 use crate::torrent::{events::Event, peer::Peer};
@@ -86,7 +86,7 @@ impl Monitor {
     }
 
     pub fn run(self) -> (mpsc::Sender<MonitorCommand>, JoinHandle<()>) {
-        let (cmd_tx, mut cmd_rx) = mpsc::channel::<MonitorCommand>(100);
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<MonitorCommand>(128);
 
         // Create the actor task
         let handle = tokio::spawn(async move {

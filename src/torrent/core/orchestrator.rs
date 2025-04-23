@@ -79,7 +79,7 @@ impl Orchestrator {
         timeout_threshold: u64,
         torrent_tx: mpsc::Sender<TorrentCommand>,
     ) -> Self {
-        let (event_tx, event_rx) = mpsc::channel(100);
+        let (event_tx, event_rx) = mpsc::channel(512);
 
         Self {
             peer_id,

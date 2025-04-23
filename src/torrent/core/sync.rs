@@ -119,7 +119,7 @@ impl Synchronizer {
     }
 
     pub fn run(mut self) -> (mpsc::Sender<SynchronizerCommand>, JoinHandle<()>) {
-        let (cmd_tx, mut cmd_rx) = mpsc::channel::<SynchronizerCommand>(100);
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<SynchronizerCommand>(128);
         let (dispatch_tx, mut dispatch_rx) = mpsc::channel::<DispatchData>(1);
 
         let event_tx_clone = self.event_tx.clone();
