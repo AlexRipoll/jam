@@ -17,10 +17,6 @@ pub struct Synchronizer {
     // Bitfield of the downloaded pieces
     pub bitfield: Bitfield,
 
-    // FIX: check if necessary
-    // Tracking active peer sessions
-    active_sessions: HashSet<String>,
-
     // Peers' bitfield from all peer connections
     peers_bitfield: HashMap<String, Bitfield>,
 
@@ -111,7 +107,6 @@ impl Synchronizer {
         Self {
             pieces,
             bitfield: Bitfield::new(total_pieces),
-            active_sessions: HashSet::new(),
             peers_bitfield: HashMap::new(),
             pieces_rarity: vec![0u8; total_pieces],
             pending_pieces: Vec::new(),
@@ -670,7 +665,6 @@ impl Synchronizer {
     }
 
     fn close_session(&mut self, session_id: &str) {
-        self.active_sessions.remove(session_id);
         self.peers_bitfield.remove(session_id);
         if let Some(pieces_indexes) = self.workers_pending_pieces.remove(session_id) {
             self.unassign_pieces(session_id, pieces_indexes);
@@ -774,7 +768,6 @@ mod tests {
         assert_eq!(sync.pieces.len(), 10);
         assert_eq!(sync.queue_capacity, 5);
         assert_eq!(sync.bitfield.total_pieces, 10);
-        assert!(sync.active_sessions.is_empty());
         assert!(sync.peers_bitfield.is_empty());
         assert_eq!(sync.pieces_rarity.len(), 10);
         assert!(sync.pending_pieces.is_empty());
@@ -918,7 +911,6 @@ mod tests {
             Bitfield::from(&create_bitfield(total_pieces, &[0, 1, 2, 9]), total_pieces);
         sync.peers_bitfield
             .insert("peer1".to_string(), peer_bitfield);
-        sync.active_sessions.insert("peer1".to_string());
 
         // Assign some pieces to the peer
         let mut peer_pieces = Vec::new();
@@ -935,7 +927,6 @@ mod tests {
         sync.close_session("peer1");
 
         // Verify the session is removed
-        assert!(!sync.active_sessions.contains("peer1"));
         assert!(!sync.peers_bitfield.contains_key("peer1"));
         assert!(!sync.workers_pending_pieces.contains_key("peer1"));
 
