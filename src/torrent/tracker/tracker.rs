@@ -29,7 +29,7 @@ pub struct Announce {
     pub left: u64,
     pub compact: u8,
     pub no_peer_id: u8,
-    pub event: Option<Event>,
+    pub event: Event,
     pub ip: Option<IpAddr>,
     pub num_want: Option<i32>,
     pub key: Option<u32>,
@@ -57,6 +57,33 @@ struct FileStatus {
     complete: Option<u32>,
     downloaded: Option<u32>,
     incomplete: Option<u32>,
+}
+
+impl Announce {
+    // TODO: improve with builder pattern
+    pub fn new(
+        info_hash: [u8; 20],
+        peer_id: [u8; 20],
+        port: u16,
+        left: u64,
+        num_want: i32,
+    ) -> Announce {
+        Announce {
+            info_hash,
+            peer_id,
+            port,
+            uploaded: 0,
+            downloaded: 0,
+            left,
+            compact: 1,
+            no_peer_id: 0,
+            event: Event::Started,
+            ip: None,
+            num_want: Some(num_want),
+            key: None,
+            tracker_id: None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -90,9 +117,9 @@ pub trait TrackerProtocol {
 }
 
 impl Tracker {
-    pub fn new(annouce_url: String) -> Tracker {
+    pub fn new(annouce_url: &str) -> Tracker {
         Tracker {
-            announce: annouce_url,
+            announce: annouce_url.to_string(),
             seeders: 0,
             leechers: 0,
             http: HttpTracker::new(),
@@ -100,7 +127,7 @@ impl Tracker {
         }
     }
 
-    async fn request_announce(
+    pub async fn request_announce(
         &mut self,
         announce: &str,
         announce_data: &Announce,

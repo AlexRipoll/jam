@@ -75,11 +75,7 @@ impl UdpTracker {
         write_to_buffer(&mut buf, 56, req.downloaded);
         write_to_buffer(&mut buf, 64, req.left);
         write_to_buffer(&mut buf, 72, req.uploaded);
-        write_to_buffer(
-            &mut buf,
-            80,
-            req.event.unwrap_or(super::tracker::Event::None) as u32,
-        );
+        write_to_buffer(&mut buf, 80, req.event as u32);
         let ip_addr = req
             .ip
             .unwrap_or(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)))
@@ -137,7 +133,7 @@ impl TrackerProtocol for UdpTracker {
         announce_data: &Announce,
     ) -> Result<Self::Response, TrackerError> {
         // Bind the socket to any available ip address
-        let socket = UdpSocket::bind("0.0.0.0:0")
+        let socket = UdpSocket::bind(format!("0.0.0.0:{}", announce_data.port))
             .await
             .map_err(|e| TrackerError::UdpBindingError(e))?;
 
