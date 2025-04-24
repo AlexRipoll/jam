@@ -7,10 +7,9 @@ use std::{
 use config::Config;
 use torrent::{
     metainfo::Metainfo,
-    torrent::{generate_peer_id, Metadata, Torrent},
-    tracker,
+    torrent::{generate_peer_id, Torrent},
 };
-use tracing::{debug, error, info, trace, warn, Level};
+use tracing::{debug, info, trace, warn, Level};
 use tracing_appender::rolling;
 use tracing_subscriber::{
     fmt::{self, format::FmtSpan},
@@ -19,7 +18,7 @@ use tracing_subscriber::{
 };
 
 pub mod config;
-pub mod torrent;
+mod torrent;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -89,50 +88,13 @@ async fn main() -> io::Result<()> {
     let peer_id = generate_peer_id();
     debug!(peer_id = ?String::from_utf8_lossy(&peer_id), "Generated session peer ID");
 
-    // trace!("Building tracker URL...");
-    // let url = metainfo
-    //     .build_tracker_url(info_hash, peer_id, 6889)
-    //     .map_err(|e| {
-    //         warn!("Failed to build tracker URL: {}", e);
-    //         io::Error::new(io::ErrorKind::Other, e)
-    //     })?;
-    // debug!(tracker_url = ?url, "Tracker URL built");
-    //
-    // debug!("Querying tracker...");
-    // let response = tracker::get(&url).await.map_err(|e| {
-    //     warn!("Failed to query tracker: {}", e);
-    //     io::Error::new(io::ErrorKind::Other, format!("Tracker query failed: {e}"))
-    // })?;
+    let config = Config::load().unwrap();
 
-    // debug!("Decoding peer list...");
-    // let peers = response.decode_peers().map_err(|e| {
-    //     warn!("Failed to decode peer list: {}", e);
-    //     io::Error::new(
-    //         io::ErrorKind::InvalidData,
-    //         format!("Failed to decode peers: {e}"),
-    //     )
-    // })?;
-    // debug!(peer_count = peers.len(), "Successfully decoded peer list");
-    //
-    // trace!("Creating piece map...");
-    // let pieces = metainfo.parse_pieces().unwrap();
-    //
-    // trace!("Loading config...");
-    // let config = Config::load().unwrap();
-    //
-    // let torrent = Torrent::new(&buffer);
-    //
-    // info!("Initializing client...");
-    // let client = Client::new(config, torrent, peers, peer_id);
-    //
-    // info!("Starting download...");
-    // if let Err(e) = client.run().await {
-    //     error!("Error during client run: {}", e);
-    //     return Err(e);
-    // }
-    //
-    // info!("Download completed successfully");
-    //
+    let mut torrent = Torrent::new(peer_id, &buffer, config);
+    torrent.run().await;
+
+    info!("Download completed successfully");
+
     let duration = start.elapsed();
     println!("Time elapsed: {:.2?}", duration);
 
