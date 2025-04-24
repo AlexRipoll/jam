@@ -7,12 +7,13 @@ use tracing::{debug, error, warn};
 use crate::torrent::{
     core::disk::DiskWriterCommand,
     events::Event,
+    peer::Peer,
     peers::session::{PeerSession, PeerSessionEvent},
     torrent::TorrentCommand,
 };
 
 use super::{
-    disk::DiskWriter,
+    disk::{DiskWriter, DiskWriterStats},
     monitor::{Monitor, MonitorCommand},
     sync::{Synchronizer, SynchronizerCommand},
 };
@@ -70,6 +71,70 @@ struct PeerSessionData {
     tx: mpsc::Sender<PeerSessionEvent>,
     /// Handle to the peer session task
     _handle: JoinHandle<()>,
+}
+
+/// Event categories for better organization
+pub enum PeerManagementEvent {
+    /// Add new peers to the swarm
+    AddPeers { peers: Vec<Peer> },
+    /// Spawn a new peer session
+    SpawnPeerSession {
+        session_id: String,
+        peer_addr: String,
+    },
+    /// Disconnect a peer session
+    DisconnectPeerSession { session_id: String },
+    /// Peer session closed notification
+    PeerSessionClosed { session_id: String },
+    /// Peer session timed out
+    PeerSessionTimeout { session_id: String },
+}
+
+/// Events related to piece management
+pub enum PieceEvent {
+    /// Received bitfield from peer
+    PeerBitfield {
+        session_id: String,
+        bitfield: Vec<u8>,
+    },
+    /// Received have message from peer
+    PeerHave {
+        session_id: String,
+        piece_index: u32,
+    },
+    /// Notify peer of our interest
+    NotifyInterest { session_id: String },
+    /// A piece has been fully assembled
+    PieceAssembled { piece_index: u32, data: Vec<u8> },
+    /// A piece has been verified and completed
+    PieceCompleted { piece_index: u32 },
+    /// A piece was corrupted
+    PieceCorrupted {
+        session_id: String,
+        piece_index: u32,
+    },
+    /// Unassign a piece from a peer
+    PieceUnassign {
+        session_id: String,
+        piece_index: u32,
+    },
+    /// Unassign multiple pieces from a peer
+    PieceUnassignMany {
+        session_id: String,
+        pieces_index: Vec<u32>,
+    },
+    /// Dispatch a piece to a peer for download
+    PieceDispatch { session_id: String, piece: Piece },
+}
+
+/// Events related to overall torrent status
+pub enum StatusEvent {
+    /// Download has completed
+    DownloadCompleted,
+    /// Request for disk statistics
+    DiskStats {
+        response_channel: mpsc::Sender<DiskWriterStats>,
+    },
 }
 
 impl Orchestrator {
@@ -132,232 +197,599 @@ impl Orchestrator {
             let _disk_handle = disk_handle;
 
             while let Some(event) = self.event_rx.recv().await {
-                // Handle events from peer sessions
+                // Categorize and handle events
                 match event {
+                    // Peer Management Events
                     Event::AddPeers { peers } => {
-                        let _ = monitor_tx.send(MonitorCommand::AddPeers(peers)).await;
+                        self.handle_peer_management_event(
+                            PeerManagementEvent::AddPeers { peers },
+                            &monitor_tx,
+                            &sync_tx,
+                        )
+                        .await;
                     }
                     Event::SpawnPeerSession {
                         session_id,
                         peer_addr,
                     } => {
-                        let session = PeerSession::new(
-                            session_id.clone(),
-                            self.peer_id,
-                            self.info_hash,
-                            peer_addr.clone(),
-                            self.config.pieces_size as usize,
-                            self.config.block_size as usize,
-                            self.config.timeout_threshold,
-                            self.event_tx.clone(),
-                        );
-
-                        match session.run().await {
-                            Ok((session_tx, session_handle)) => {
-                                self.peer_sessions.insert(
-                                    session_id.clone(),
-                                    PeerSessionData {
-                                        tx: session_tx,
-                                        _handle: session_handle,
-                                    },
-                                );
-
-                                // Notify the monitor that this session is established
-                                let _ = monitor_tx
-                                    .send(MonitorCommand::PeerSessionEstablished(
-                                        session_id.clone(),
-                                    ))
-                                    .await;
-
-                                debug!(
-                                    session_id = %session_id,
-                                    ip = %peer_addr,
-                                    "Peer session established"
-                                );
-                            }
-                            Err(e) => {
-                                warn!(
-                                    "Could not establish connection with peer at {peer_addr}: {e}"
-                                );
-                                // notify monitor to remove peer session
-                                let _ = monitor_tx
-                                    .send(MonitorCommand::RemovePeerSession(session_id.clone()))
-                                    .await;
-                            }
-                        }
+                        self.handle_peer_management_event(
+                            PeerManagementEvent::SpawnPeerSession {
+                                session_id,
+                                peer_addr,
+                            },
+                            &monitor_tx,
+                            &sync_tx,
+                        )
+                        .await;
                     }
-                    // Event sent by the synchronizer
                     Event::DisconnectPeerSession { session_id } => {
-                        if self.peer_sessions.remove(&session_id).is_none() {
-                            error!("Peer session with ID {session_id} not found");
-                        }
-
-                        // notify monitor to remove peer session
-                        let _ = monitor_tx
-                            .send(MonitorCommand::RemovePeerSession(session_id.clone()))
-                            .await;
-
-                        // Also notify synchronizer to remove the peer session
-                        let _ = sync_tx
-                            .send(SynchronizerCommand::ClosePeerSession(session_id))
-                            .await;
+                        self.handle_peer_management_event(
+                            PeerManagementEvent::DisconnectPeerSession { session_id },
+                            &monitor_tx,
+                            &sync_tx,
+                        )
+                        .await;
                     }
-                    // Event sent by the peer session
                     Event::PeerSessionClosed { session_id } => {
-                        if let Some(peer_session_data) = self.peer_sessions.get(&session_id) {
-                            // send shutdown signal to peer session
-                            let _ = peer_session_data.tx.send(PeerSessionEvent::Shutdown).await;
-                        } else {
-                            error!("Peer session with ID {} not found", session_id.clone());
-                        }
-
-                        // notify monitor to remove peer session
-                        let _ = monitor_tx
-                            .send(MonitorCommand::RemovePeerSession(session_id.clone()))
-                            .await;
-
-                        // Also notify synchronizer to clean up any assigned pieces
-                        let _ = sync_tx
-                            .send(SynchronizerCommand::ClosePeerSession(session_id.clone()))
-                            .await;
+                        self.handle_peer_management_event(
+                            PeerManagementEvent::PeerSessionClosed { session_id },
+                            &monitor_tx,
+                            &sync_tx,
+                        )
+                        .await;
                     }
+                    Event::PeerSessionTimeout { session_id } => {
+                        self.handle_peer_management_event(
+                            PeerManagementEvent::PeerSessionTimeout { session_id },
+                            &monitor_tx,
+                            &sync_tx,
+                        )
+                        .await;
+                    }
+
+                    // Piece Management Events
                     Event::PeerBitfield {
                         session_id,
                         bitfield,
                     } => {
-                        // Forward bitfield events to synchronizer
-                        let _ = sync_tx
-                            .send(SynchronizerCommand::ProcessBitfield {
+                        self.handle_piece_event(
+                            PieceEvent::PeerBitfield {
                                 session_id,
                                 bitfield,
-                            })
-                            .await;
+                            },
+                            &sync_tx,
+                            &monitor_tx,
+                            &disk_tx,
+                        )
+                        .await;
                     }
                     Event::PeerHave {
                         session_id,
                         piece_index,
                     } => {
-                        let _ = sync_tx
-                            .send(SynchronizerCommand::ProcessHave {
+                        self.handle_piece_event(
+                            PieceEvent::PeerHave {
                                 session_id,
                                 piece_index,
-                            })
-                            .await;
+                            },
+                            &sync_tx,
+                            &monitor_tx,
+                            &disk_tx,
+                        )
+                        .await;
                     }
                     Event::NotifyInterest { session_id } => {
-                        if let Some(peer_session_data) = self.peer_sessions.get(&session_id) {
-                            // dispatch piece to peer session
-                            let _ = peer_session_data
-                                .tx
-                                .send(PeerSessionEvent::NotifyInterest)
-                                .await;
-                        } else {
-                            error!(
-                                "Failed to notify interest: peer session with ID {} not found",
-                                session_id
-                            );
-
-                            // notify monitor to remove peer session
-                            let _ = monitor_tx
-                                .send(MonitorCommand::RemovePeerSession(session_id.clone()))
-                                .await;
-
-                            // Also notify synchronizer to clean up any assigned pieces
-                            let _ = sync_tx
-                                .send(SynchronizerCommand::ClosePeerSession(session_id.clone()))
-                                .await;
-                        }
+                        self.handle_piece_event(
+                            PieceEvent::NotifyInterest { session_id },
+                            &sync_tx,
+                            &monitor_tx,
+                            &disk_tx,
+                        )
+                        .await;
                     }
                     Event::PieceAssembled { piece_index, data } => {
-                        let _ = disk_tx
-                            .send(DiskWriterCommand::WritePiece { piece_index, data })
-                            .await;
+                        self.handle_piece_event(
+                            PieceEvent::PieceAssembled { piece_index, data },
+                            &sync_tx,
+                            &monitor_tx,
+                            &disk_tx,
+                        )
+                        .await;
                     }
                     Event::PieceCompleted { piece_index } => {
-                        let _ = sync_tx
-                            .send(SynchronizerCommand::MarkPieceComplete(piece_index))
-                            .await;
+                        self.handle_piece_event(
+                            PieceEvent::PieceCompleted { piece_index },
+                            &sync_tx,
+                            &monitor_tx,
+                            &disk_tx,
+                        )
+                        .await;
                     }
                     Event::PieceCorrupted {
                         session_id,
                         piece_index,
                     } => {
-                        let _ = sync_tx
-                            .send(SynchronizerCommand::CorruptedPiece {
+                        self.handle_piece_event(
+                            PieceEvent::PieceCorrupted {
                                 session_id,
                                 piece_index,
-                            })
-                            .await;
+                            },
+                            &sync_tx,
+                            &monitor_tx,
+                            &disk_tx,
+                        )
+                        .await;
                     }
                     Event::PieceUnassign {
                         session_id,
                         piece_index,
                     } => {
-                        let _ = sync_tx
-                            .send(SynchronizerCommand::UnassignPiece {
+                        self.handle_piece_event(
+                            PieceEvent::PieceUnassign {
                                 session_id,
                                 piece_index,
-                            })
-                            .await;
+                            },
+                            &sync_tx,
+                            &monitor_tx,
+                            &disk_tx,
+                        )
+                        .await;
                     }
                     Event::PieceUnassignMany {
                         session_id,
                         pieces_index,
                     } => {
-                        let _ = sync_tx
-                            .send(SynchronizerCommand::UnassignPieces {
+                        self.handle_piece_event(
+                            PieceEvent::PieceUnassignMany {
                                 session_id,
                                 pieces_index,
-                            })
-                            .await;
+                            },
+                            &sync_tx,
+                            &monitor_tx,
+                            &disk_tx,
+                        )
+                        .await;
                     }
                     Event::PieceDispatch { session_id, piece } => {
-                        if let Some(peer_session_data) = self.peer_sessions.get(&session_id) {
-                            // dispatch piece to peer session
-                            let _ = peer_session_data
-                                .tx
-                                .send(PeerSessionEvent::AssignPiece { piece })
-                                .await;
-                        } else {
-                            error!(
-                                "Failed to dispatch piece: peer session with ID {} not found",
-                                session_id
-                            );
-
-                            // notify monitor to remove peer session
-                            let _ = monitor_tx
-                                .send(MonitorCommand::RemovePeerSession(session_id.clone()))
-                                .await;
-
-                            // Also notify synchronizer to clean up any assigned pieces
-                            let _ = sync_tx
-                                .send(SynchronizerCommand::ClosePeerSession(session_id.clone()))
-                                .await;
-                        }
+                        self.handle_piece_event(
+                            PieceEvent::PieceDispatch { session_id, piece },
+                            &sync_tx,
+                            &monitor_tx,
+                            &disk_tx,
+                        )
+                        .await;
                     }
+
+                    // Status Events
                     Event::DownloadCompleted => {
-                        let _ = self
-                            .torrent_tx
-                            .send(TorrentCommand::DownloadCompleted)
+                        self.handle_status_event(StatusEvent::DownloadCompleted, &disk_tx)
                             .await;
-                    }
-                    Event::PeerSessionTimeout { session_id } => {
-                        // TODO: remove peer channels and send shutdown event
                     }
                     Event::DiskStats { response_channel } => {
-                        // Forward the request to the DiskWriter component
-                        let _ = disk_tx
-                            .send(DiskWriterCommand::QueryStats(response_channel))
-                            .await;
+                        self.handle_status_event(
+                            StatusEvent::DiskStats { response_channel },
+                            &disk_tx,
+                        )
+                        .await;
                     }
                 }
             }
 
-            // The main loop has exited, clean up
             debug!("Orchestrator event loop terminated, shutting down");
         });
 
         (event_tx, orchestrator_handle)
+    }
+
+    /// Handle events related to peer management
+    async fn handle_peer_management_event(
+        &mut self,
+        event: PeerManagementEvent,
+        monitor_tx: &mpsc::Sender<MonitorCommand>,
+        sync_tx: &mpsc::Sender<SynchronizerCommand>,
+    ) {
+        match event {
+            PeerManagementEvent::AddPeers { peers } => {
+                debug!(peer_count = peers.len(), "Adding new peers to monitor");
+                if let Err(e) = monitor_tx.send(MonitorCommand::AddPeers(peers)).await {
+                    error!(error = %e, "Failed to send AddPeers command to monitor");
+                }
+            }
+            PeerManagementEvent::SpawnPeerSession {
+                session_id,
+                peer_addr,
+            } => {
+                debug!(
+                    session_id = %session_id,
+                    peer_addr = %peer_addr,
+                    "Spawning new peer session"
+                );
+
+                let session = PeerSession::new(
+                    session_id.clone(),
+                    self.peer_id,
+                    self.info_hash,
+                    peer_addr.clone(),
+                    self.config.pieces_size as usize,
+                    self.config.block_size as usize,
+                    self.config.timeout_threshold,
+                    self.event_tx.clone(),
+                );
+
+                match session.run().await {
+                    Ok((session_tx, session_handle)) => {
+                        self.peer_sessions.insert(
+                            session_id.clone(),
+                            PeerSessionData {
+                                tx: session_tx,
+                                _handle: session_handle,
+                            },
+                        );
+
+                        // Notify the monitor that this session is established
+                        if let Err(e) = monitor_tx
+                            .send(MonitorCommand::PeerSessionEstablished(session_id.clone()))
+                            .await
+                        {
+                            error!(
+                                session_id = %session_id,
+                                error = %e,
+                                "Failed to notify monitor of established peer session"
+                            );
+                        }
+
+                        debug!(
+                            session_id = %session_id,
+                            peer_addr = %peer_addr,
+                            "Peer session established successfully"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            session_id = %session_id,
+                            peer_addr = %peer_addr,
+                            error = %e,
+                            "Could not establish connection with peer"
+                        );
+
+                        // notify monitor to remove peer session
+                        if let Err(e) = monitor_tx
+                            .send(MonitorCommand::RemovePeerSession(session_id.clone()))
+                            .await
+                        {
+                            error!(
+                                session_id = %session_id,
+                                error = %e,
+                                "Failed to notify monitor to remove peer session"
+                            );
+                        }
+                    }
+                }
+            }
+            PeerManagementEvent::DisconnectPeerSession { session_id } => {
+                debug!(session_id = %session_id, "Disconnecting peer session");
+                self.handle_peer_session_cleanup(session_id, monitor_tx, sync_tx)
+                    .await;
+            }
+            PeerManagementEvent::PeerSessionClosed { session_id } => {
+                debug!(session_id = %session_id, "Peer session closed");
+
+                // Send shutdown signal to peer session if it still exists
+                if let Some(peer_session_data) = self.peer_sessions.get(&session_id) {
+                    if let Err(e) = peer_session_data.tx.send(PeerSessionEvent::Shutdown).await {
+                        debug!(
+                            session_id = %session_id,
+                            error = %e,
+                            "Failed to send shutdown signal to peer session"
+                        );
+                    }
+                }
+
+                self.handle_peer_session_cleanup(session_id, monitor_tx, sync_tx)
+                    .await;
+            }
+            PeerManagementEvent::PeerSessionTimeout { session_id } => {
+                debug!(session_id = %session_id, "Peer session timed out");
+                self.handle_peer_session_cleanup(session_id, monitor_tx, sync_tx)
+                    .await;
+            }
+        }
+    }
+
+    /// Handle events related to piece management
+    async fn handle_piece_event(
+        &mut self,
+        event: PieceEvent,
+        sync_tx: &mpsc::Sender<SynchronizerCommand>,
+        monitor_tx: &mpsc::Sender<MonitorCommand>,
+        disk_tx: &mpsc::Sender<DiskWriterCommand>,
+    ) {
+        match event {
+            PieceEvent::PeerBitfield {
+                session_id,
+                bitfield,
+            } => {
+                debug!(
+                    session_id = %session_id,
+                    bitfield_bytes = bitfield.len(),
+                    "Processing peer bitfield"
+                );
+
+                if let Err(e) = sync_tx
+                    .send(SynchronizerCommand::ProcessBitfield {
+                        session_id: session_id.clone(),
+                        bitfield,
+                    })
+                    .await
+                {
+                    error!(
+                        session_id = %session_id,
+                        error = %e,
+                        "Failed to send bitfield to synchronizer"
+                    );
+                }
+            }
+            PieceEvent::PeerHave {
+                session_id,
+                piece_index,
+            } => {
+                debug!(
+                    session_id = %session_id,
+                    piece_index = piece_index,
+                    "Processing peer have message"
+                );
+
+                if let Err(e) = sync_tx
+                    .send(SynchronizerCommand::ProcessHave {
+                        session_id: session_id.clone(),
+                        piece_index,
+                    })
+                    .await
+                {
+                    error!(
+                        session_id = %session_id,
+                        piece_index = piece_index,
+                        error = %e,
+                        "Failed to process have message"
+                    );
+                }
+            }
+            PieceEvent::NotifyInterest { session_id } => {
+                debug!(session_id = %session_id, "Notifying interest to peer");
+
+                if let Some(peer_session_data) = self.peer_sessions.get(&session_id) {
+                    // dispatch piece to peer session
+                    if let Err(e) = peer_session_data
+                        .tx
+                        .send(PeerSessionEvent::NotifyInterest)
+                        .await
+                    {
+                        error!(
+                            session_id = %session_id,
+                            error = %e,
+                            "Failed to send interest notification to peer session"
+                        );
+                    }
+                } else {
+                    error!(
+                        session_id = %session_id,
+                        "Failed to notify interest: peer session not found"
+                    );
+                    self.handle_peer_session_cleanup(session_id, monitor_tx, sync_tx)
+                        .await;
+                }
+            }
+            PieceEvent::PieceAssembled { piece_index, data } => {
+                debug!(
+                    piece_index = piece_index,
+                    data_size = data.len(),
+                    "Piece assembled, sending to disk writer"
+                );
+
+                if let Err(e) = disk_tx
+                    .send(DiskWriterCommand::WritePiece { piece_index, data })
+                    .await
+                {
+                    error!(
+                        piece_index = piece_index,
+                        error = %e,
+                        "Failed to send assembled piece to disk writer"
+                    );
+                }
+            }
+            PieceEvent::PieceCompleted { piece_index } => {
+                debug!(piece_index = piece_index, "Piece completed successfully");
+
+                if let Err(e) = sync_tx
+                    .send(SynchronizerCommand::MarkPieceComplete(piece_index))
+                    .await
+                {
+                    error!(
+                        piece_index = piece_index,
+                        error = %e,
+                        "Failed to mark piece as complete in synchronizer"
+                    );
+                }
+            }
+            PieceEvent::PieceCorrupted {
+                session_id,
+                piece_index,
+            } => {
+                warn!(
+                    session_id = %session_id.clone(),
+                    piece_index = piece_index,
+                    "Corrupted piece detected"
+                );
+
+                if let Err(e) = sync_tx
+                    .send(SynchronizerCommand::CorruptedPiece {
+                        session_id: session_id.clone(),
+                        piece_index,
+                    })
+                    .await
+                {
+                    error!(
+                        session_id = %session_id,
+                        piece_index = piece_index,
+                        error = %e,
+                        "Failed to notify synchronizer of corrupted piece"
+                    );
+                }
+            }
+            PieceEvent::PieceUnassign {
+                session_id,
+                piece_index,
+            } => {
+                debug!(
+                    session_id = %session_id,
+                    piece_index = piece_index,
+                    "Unassigning piece from peer session"
+                );
+
+                if let Err(e) = sync_tx
+                    .send(SynchronizerCommand::UnassignPiece {
+                        session_id: session_id.clone(),
+                        piece_index,
+                    })
+                    .await
+                {
+                    error!(
+                        session_id = %session_id,
+                        piece_index = piece_index,
+                        error = %e,
+                        "Failed to unassign piece from peer session"
+                    );
+                }
+            }
+            PieceEvent::PieceUnassignMany {
+                session_id,
+                pieces_index,
+            } => {
+                debug!(
+                    session_id = %session_id,
+                    piece_count = pieces_index.len(),
+                    "Unassigning multiple pieces from peer session"
+                );
+
+                if let Err(e) = sync_tx
+                    .send(SynchronizerCommand::UnassignPieces {
+                        session_id: session_id.clone(),
+                        pieces_index,
+                    })
+                    .await
+                {
+                    error!(
+                        session_id = %session_id,
+                        error = %e,
+                        "Failed to unassign multiple pieces from peer session"
+                    );
+                }
+            }
+            PieceEvent::PieceDispatch { session_id, piece } => {
+                if let Some(peer_session_data) = self.peer_sessions.get(&session_id) {
+                    if let Err(e) = peer_session_data
+                        .tx
+                        .send(PeerSessionEvent::AssignPiece {
+                            piece: piece.clone(),
+                        })
+                        .await
+                    {
+                        error!(
+                            session_id = %session_id,
+                            error = %e,
+                            "Failed to dispatch piece to peer session"
+                        );
+                    }
+                    debug!(
+                        session_id = %session_id,
+                        piece_index = piece.index(),
+                        "Piece dispatched to peer session"
+                    );
+                } else {
+                    error!(
+                        session_id = %session_id,
+                        "Failed to dispatch piece: peer session not found"
+                    );
+                    self.handle_peer_session_cleanup(session_id, monitor_tx, sync_tx)
+                        .await;
+                }
+            }
+        }
+    }
+
+    /// Handle status-related events
+    async fn handle_status_event(
+        &self,
+        event: StatusEvent,
+        disk_tx: &mpsc::Sender<DiskWriterCommand>,
+    ) {
+        match event {
+            StatusEvent::DownloadCompleted => {
+                debug!("Download completed, notifying torrent");
+                if let Err(e) = self
+                    .torrent_tx
+                    .send(TorrentCommand::DownloadCompleted)
+                    .await
+                {
+                    error!(error = %e, "Failed to notify torrent of download completion");
+                }
+            }
+            StatusEvent::DiskStats { response_channel } => {
+                debug!("Querying disk statistics");
+                if let Err(e) = disk_tx
+                    .send(DiskWriterCommand::QueryStats(response_channel))
+                    .await
+                {
+                    error!(error = %e, "Failed to query disk statistics");
+                }
+            }
+        }
+    }
+
+    /// Extract common peer session cleanup logic to avoid repetition
+    async fn handle_peer_session_cleanup(
+        &mut self,
+        session_id: String,
+        monitor_tx: &mpsc::Sender<MonitorCommand>,
+        sync_tx: &mpsc::Sender<SynchronizerCommand>,
+    ) {
+        // Remove from peer sessions map
+        if let Some(peer_session_data) = self.peer_sessions.remove(&session_id) {
+            // Send shutdown signal
+            if let Err(e) = peer_session_data.tx.send(PeerSessionEvent::Shutdown).await {
+                error!(
+                    session_id = %session_id,
+                    error = %e,
+                    "Failed to send shutdown signal to peer session"
+                );
+            }
+        }
+
+        // Notify monitor
+        if let Err(e) = monitor_tx
+            .send(MonitorCommand::RemovePeerSession(session_id.clone()))
+            .await
+        {
+            error!(
+                session_id = %session_id,
+                error = %e,
+                "Failed to notify monitor of peer session removal"
+            );
+        }
+
+        // Notify synchronizer
+        if let Err(e) = sync_tx
+            .send(SynchronizerCommand::ClosePeerSession(session_id.clone()))
+            .await
+        {
+            error!(
+                session_id = %session_id,
+                error = %e,
+                "Failed to notify synchronizer of peer session closure"
+            );
+        }
+
+        debug!(session_id = %session_id, "Peer session cleanup completed");
     }
 
     // // Method to check download progress
