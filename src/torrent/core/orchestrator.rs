@@ -407,36 +407,3 @@ impl Orchestrator {
     //     false
     // }
 }
-
-#[derive(Debug)]
-pub enum OrchestratorError {
-    WorkerNotFound(String),
-    PieceNotFound(u32),
-    WorkerChannelNotFound(String),
-    ChannelTxError(mpsc::error::SendError<Event>),
-}
-
-impl Display for OrchestratorError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            OrchestratorError::WorkerNotFound(worker_id) => {
-                write!(f, "Worker {} not found", worker_id)
-            }
-            OrchestratorError::PieceNotFound(piece_index) => {
-                write!(f, "Piece with index {} not found", piece_index)
-            }
-            OrchestratorError::WorkerChannelNotFound(worker_id) => {
-                write!(f, "Channel for worker {} not found", worker_id)
-            }
-            OrchestratorError::ChannelTxError(err) => {
-                write!(f, "Failed to send event: {}", err)
-            }
-        }
-    }
-}
-
-impl From<mpsc::error::SendError<Event>> for OrchestratorError {
-    fn from(err: mpsc::error::SendError<Event>) -> Self {
-        OrchestratorError::ChannelTxError(err)
-    }
-}
