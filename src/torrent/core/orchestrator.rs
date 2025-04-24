@@ -1,8 +1,4 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    fmt::Display,
-    path::PathBuf,
-};
+use std::{collections::HashMap, path::PathBuf};
 
 use protocol::piece::Piece;
 use tokio::{sync::mpsc, task::JoinHandle};
@@ -11,7 +7,6 @@ use tracing::{debug, error, warn};
 use crate::torrent::{
     core::disk::DiskWriterCommand,
     events::Event,
-    peer::Peer,
     peers::session::{PeerSession, PeerSessionEvent},
     torrent::TorrentCommand,
 };
@@ -28,25 +23,15 @@ pub struct Orchestrator {
     peer_id: [u8; 20],
     info_hash: [u8; 20],
 
-    // FIX: remove unnecessary
-    // Channels
     event_tx: mpsc::Sender<Event>,
     event_rx: mpsc::Receiver<Event>,
 
     peer_sessions: HashMap<String, PeerSessionData>,
 
-    // FIX: remove unnecessary
-    // Internal components
-    synchronizer: Option<Synchronizer>,
-    synchronizer_tx: Option<mpsc::Sender<SynchronizerCommand>>,
-    monitor: Option<Monitor>,
-    monitor_tx: Option<mpsc::Sender<MonitorCommand>>,
-
     // Configuration
     max_connections: usize,
     queue_capacity: usize,
     pieces: HashMap<u32, Piece>,
-    peers: VecDeque<Peer>, // FIX: remove unnecessary
     // File information needed for DiskWriter
     download_path: PathBuf,
     file_size: u64,
@@ -71,7 +56,6 @@ impl Orchestrator {
         max_connections: usize,
         queue_capacity: usize,
         pieces: HashMap<u32, Piece>,
-        peers: VecDeque<Peer>,
         download_path: PathBuf,
         file_size: u64,
         pieces_size: u64,
@@ -86,15 +70,10 @@ impl Orchestrator {
             info_hash,
             event_tx,
             event_rx,
-            synchronizer: None,
-            synchronizer_tx: None,
             peer_sessions: HashMap::new(),
-            monitor: None,
-            monitor_tx: None,
             max_connections,
             queue_capacity,
             pieces,
-            peers,
             download_path,
             file_size,
             pieces_size,
@@ -117,15 +96,8 @@ impl Orchestrator {
         // Start the synchronizer
         let (sync_tx, sync_handle) = synchronizer.run();
 
-        // Store the sender for later use
-        self.synchronizer_tx = Some(sync_tx.clone());
-
         // Initialize the monitor
-        let monitor = Monitor::new(
-            self.max_connections,
-            self.peers.clone(),
-            self.event_tx.clone(),
-        );
+        let monitor = Monitor::new(self.max_connections, self.event_tx.clone());
 
         // Start the monitor
         let (monitor_tx, monitor_handle) = monitor.run();

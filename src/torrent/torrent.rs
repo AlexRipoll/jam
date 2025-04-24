@@ -94,7 +94,6 @@ impl Torrent {
             self.config.network.queue_capacity as usize,
             self.metadata.pieces.clone(),
             // VecDeque::from_iter(self.peers.clone()),
-            VecDeque::new(),
             absolute_download_path, // should be passed by config
             self.metadata.total_length,
             self.metadata.piece_length,

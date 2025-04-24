@@ -4,7 +4,7 @@ use std::{
 };
 
 use tokio::{sync::mpsc, task::JoinHandle, time::Instant};
-use tracing::{debug, field::debug};
+use tracing::debug;
 use uuid::Uuid;
 
 use crate::torrent::{events::Event, peer::Peer};
@@ -54,16 +54,12 @@ pub struct Monitor {
 }
 
 impl Monitor {
-    pub fn new(
-        max_connections: usize,
-        peer_queue: VecDeque<Peer>,
-        event_tx: mpsc::Sender<Event>,
-    ) -> Self {
+    pub fn new(max_connections: usize, event_tx: mpsc::Sender<Event>) -> Self {
         Self {
             max_connections,
             active_sessions: HashSet::new(),
             pending_sessions: HashMap::new(),
-            peer_queue,
+            peer_queue: VecDeque::new(),
             failed_peers: HashMap::new(),
             event_tx,
             connection_timeout: Duration::from_secs(15),
@@ -291,15 +287,11 @@ impl Monitor {
 
 #[cfg(test)]
 mod test {
-    use std::{collections::VecDeque, net::Ipv4Addr, sync::Arc, time::Duration};
+    use std::{net::Ipv4Addr, time::Duration};
 
     use tokio::{sync::mpsc, time::Instant};
 
-    use crate::torrent::{
-        core::monitor::{Monitor, MonitorCommand},
-        events::Event,
-        peer::Peer,
-    };
+    use crate::torrent::{core::monitor::Monitor, events::Event, peer::Peer};
 
     // Helper function to create a test peer with a specific IP and port
     fn create_test_peer(ip_octets: [u8; 4], port: u16) -> Peer {
@@ -318,9 +310,8 @@ mod test {
     // Helper function to create a Monitor instance for testing
     fn create_test_monitor() -> (Monitor, mpsc::Sender<Event>) {
         let (event_tx, _) = mpsc::channel(100);
-        let peer_queue = VecDeque::new();
 
-        let monitor = Monitor::new(5, peer_queue, event_tx.clone()).with_config(
+        let monitor = Monitor::new(5, event_tx.clone()).with_config(
             Duration::from_millis(50),  // Short timeout for testing
             Duration::from_millis(100), // Short backoff for testing
             Duration::from_millis(50),  // Short check interval for testing
@@ -332,10 +323,9 @@ mod test {
     #[test]
     fn test_new_and_with_config() {
         let (event_tx, _) = mpsc::channel(100);
-        let peer_queue = VecDeque::new();
 
         // Test default constructor
-        let monitor = Monitor::new(10, peer_queue.clone(), event_tx.clone());
+        let monitor = Monitor::new(10, event_tx.clone());
         assert_eq!(monitor.max_connections, 10);
         assert!(monitor.active_sessions.is_empty());
         assert!(monitor.pending_sessions.is_empty());
@@ -346,7 +336,7 @@ mod test {
         assert_eq!(monitor.check_interval, Duration::from_secs(5));
 
         // Test with_config method
-        let custom_monitor = Monitor::new(10, peer_queue, event_tx).with_config(
+        let custom_monitor = Monitor::new(10, event_tx).with_config(
             Duration::from_secs(30),
             Duration::from_secs(120),
             Duration::from_secs(10),
