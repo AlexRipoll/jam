@@ -12,7 +12,7 @@ use tracing::debug;
 use crate::config::Config;
 
 use super::{
-    core::orchestrator::Orchestrator,
+    core::orchestrator::{Orchestrator, OrchestratorConfig},
     metainfo::Metainfo,
     peer::Peer,
     tracker::tracker::{Announce, Tracker},
@@ -87,18 +87,23 @@ impl Torrent {
         let absolute_download_path =
             Path::new(&self.config.disk.download_path).join(&self.metadata.name);
 
+        let orchestrator_config = OrchestratorConfig {
+            max_connections: self.config.network.max_peer_connections as usize,
+            queue_capacity: self.config.network.queue_capacity as usize,
+            download_path: absolute_download_path,
+            file_size: self.metadata.total_length,
+            pieces_size: self.metadata.piece_length,
+            block_size: self.config.network.block_size,
+            timeout_threshold: self.config.network.timeout_threshold,
+        };
+
         let orchestrator = Orchestrator::new(
             self.peer_id.clone(),
             self.metadata.info_hash,
-            self.config.network.max_peer_connections as usize,
-            self.config.network.queue_capacity as usize,
             self.metadata.pieces.clone(),
             // VecDeque::from_iter(self.peers.clone()),
-            absolute_download_path, // should be passed by config
-            self.metadata.total_length,
-            self.metadata.piece_length,
-            self.config.network.block_size,
-            self.config.network.timeout_threshold, // should be passed by config
+            // should be passed by config
+            orchestrator_config,
             cmd_tx.clone(),
         );
 

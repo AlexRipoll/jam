@@ -17,35 +17,58 @@ use super::{
     sync::{Synchronizer, SynchronizerCommand},
 };
 
-// Main Orchestrator that coordinates the Synchronizer and Monitor
+/// Main component in charge to communicate with all the other components.
+///
+/// The Orchestrator is responsible for:
+/// - Communicate with Peer sessions
+/// - Communicate with the monitor
+/// - Communicate with the synchronizer
+/// - Communicate with the disk writter
 #[derive(Debug)]
 pub struct Orchestrator {
+    /// Peer ID for the local client
     peer_id: [u8; 20],
+    /// Info hash of the torrent
     info_hash: [u8; 20],
-
+    /// Channel for sending events to the orchestrator
     event_tx: mpsc::Sender<Event>,
+    /// Channel for receiving events in the orchestrator
     event_rx: mpsc::Receiver<Event>,
-
+    /// Map of active peer sessions
     peer_sessions: HashMap<String, PeerSessionData>,
-
-    // Configuration
-    max_connections: usize,
-    queue_capacity: usize,
+    /// Piece information
     pieces: HashMap<u32, Piece>,
-    // File information needed for DiskWriter
-    download_path: PathBuf,
-    file_size: u64,
-    pieces_size: u64,
-    block_size: u64,
-    timeout_threshold: u64,
+    /// Configuration for the orchestrator
+    config: OrchestratorConfig,
+    /// Channel to communicate with the parent torrent
     torrent_tx: mpsc::Sender<TorrentCommand>,
 }
 
-// Define a structure to group session-related data
+/// Configuration parameters for the Orchestrator
+#[derive(Debug, Clone)]
+pub struct OrchestratorConfig {
+    /// Maximum number of concurrent peer connections
+    pub max_connections: usize,
+    /// Capacity of the download queue
+    pub queue_capacity: usize,
+    /// Path where downloaded files will be stored
+    pub download_path: PathBuf,
+    /// Total size of the file being downloaded
+    pub file_size: u64,
+    /// Size of each piece
+    pub pieces_size: u64,
+    /// Size of each block within a piece
+    pub block_size: u64,
+    /// Threshold for timing out unresponsive peers (in seconds)
+    pub timeout_threshold: u64,
+}
+
+/// Data associated with an active peer session
 #[derive(Debug)]
 struct PeerSessionData {
+    /// Channel to send events to the peer session
     tx: mpsc::Sender<PeerSessionEvent>,
-    // Using underscore prefix to indicate this field is kept only to maintain the lifetime
+    /// Handle to the peer session task
     _handle: JoinHandle<()>,
 }
 
@@ -53,14 +76,8 @@ impl Orchestrator {
     pub fn new(
         peer_id: [u8; 20],
         info_hash: [u8; 20],
-        max_connections: usize,
-        queue_capacity: usize,
         pieces: HashMap<u32, Piece>,
-        download_path: PathBuf,
-        file_size: u64,
-        pieces_size: u64,
-        block_size: u64,
-        timeout_threshold: u64,
+        config: OrchestratorConfig,
         torrent_tx: mpsc::Sender<TorrentCommand>,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel(512);
@@ -71,14 +88,8 @@ impl Orchestrator {
             event_tx,
             event_rx,
             peer_sessions: HashMap::new(),
-            max_connections,
-            queue_capacity,
             pieces,
-            download_path,
-            file_size,
-            pieces_size,
-            block_size,
-            timeout_threshold,
+            config,
             torrent_tx,
         }
     }
@@ -89,7 +100,7 @@ impl Orchestrator {
         // Initialize the synchronizer
         let synchronizer = Synchronizer::new(
             self.pieces.clone(),
-            self.queue_capacity,
+            self.config.queue_capacity,
             self.event_tx.clone(),
         );
 
@@ -97,16 +108,16 @@ impl Orchestrator {
         let (sync_tx, sync_handle) = synchronizer.run();
 
         // Initialize the monitor
-        let monitor = Monitor::new(self.max_connections, self.event_tx.clone());
+        let monitor = Monitor::new(self.config.max_connections, self.event_tx.clone());
 
         // Start the monitor
         let (monitor_tx, monitor_handle) = monitor.run();
 
         // Initialize the disk writer
         let disk_writer = DiskWriter::new(
-            self.download_path.clone(),
-            self.file_size,
-            self.pieces_size,
+            self.config.download_path.clone(),
+            self.config.file_size,
+            self.config.pieces_size,
             self.pieces.clone(),
             self.event_tx.clone(),
         );
@@ -135,9 +146,9 @@ impl Orchestrator {
                             self.peer_id,
                             self.info_hash,
                             peer_addr.clone(),
-                            self.pieces_size as usize,
-                            self.block_size as usize,
-                            self.timeout_threshold,
+                            self.config.pieces_size as usize,
+                            self.config.block_size as usize,
+                            self.config.timeout_threshold,
                             self.event_tx.clone(),
                         );
 
