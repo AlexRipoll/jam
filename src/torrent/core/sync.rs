@@ -124,6 +124,17 @@ pub struct DispatchData {
 }
 
 impl Synchronizer {
+    /// Creates a new Synchronizer with the specified pieces and configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `pieces` - Metadata about each piece in the torrent
+    /// * `max_peer_queue_size` - Maximum number of pieces that can be assigned to a peer
+    /// * `event_tx` - Channel for sending events to the torrent manager
+    ///
+    /// # Returns
+    ///
+    /// A new Synchronizer instance
     pub fn new(
         pieces: HashMap<u32, Piece>,
         max_peer_queue_size: usize,
@@ -140,11 +151,22 @@ impl Synchronizer {
             assigned_pieces: HashSet::new(),
             peer_assignments: HashMap::new(),
             max_peer_queue_size,
-            event_tx,
             dispatch_in_progress: false,
+            event_tx,
         }
     }
 
+    /// Starts the synchronizer actor and returns a command sender and task handle.
+    ///
+    /// This method spawns two Tokio tasks:
+    /// - The main actor task that processes commands
+    /// - A dispatch task that handles piece assignment to peers
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing:
+    /// - A sender for sending commands to the synchronizer
+    /// - A JoinHandle for the main actor task
     pub fn run(mut self) -> (mpsc::Sender<SynchronizerCommand>, JoinHandle<()>) {
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<SynchronizerCommand>(128);
         let (dispatch_tx, mut dispatch_rx) = mpsc::channel::<DispatchData>(1);
@@ -178,13 +200,24 @@ impl Synchronizer {
         (cmd_tx, actor_handle)
     }
 
+    /// Handles the dispatch of pieces to peers in a separate task.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - The dispatch data containing the current state
+    /// * `dispatch_cmd_tx` - A sender for sending commands back to the synchronizer
+    /// * `event_tx` - A sender for sending events to the torrent manager
+    ///
+    /// # Returns
+    ///
+    /// A Result indicating success or failure
     async fn handle_dispatch(
         data: DispatchData,
         dispatch_cmd_tx: &mpsc::Sender<SynchronizerCommand>,
         event_tx: &mpsc::Sender<Event>,
     ) -> Result<(), SynchronizerError> {
         // Create workers queue locally
-        let workers_queue = Self::assign_pieces_to_workers(
+        let workers_queue = Self::assign_pieces_to_peer_session(
             &data.peers_bitfield,
             &data.peer_assignments,
             &data.pending_pieces,
@@ -234,6 +267,20 @@ impl Synchronizer {
         Ok(())
     }
 
+    /// Handles a command received by the synchronizer actor.
+    ///
+    /// This method processes various commands to manage the download state,
+    /// peer connections, and piece assignments.
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The command to process
+    /// * `dispatch_tx` - A sender for sending dispatch data to the dispatch task
+    /// * `actor_cmd_tx` - A sender for sending commands back to this actor
+    ///
+    /// # Returns
+    ///
+    /// A Result indicating success or failure
     async fn handle_command(
         &mut self,
         command: SynchronizerCommand,
@@ -414,8 +461,22 @@ impl Synchronizer {
         Ok(())
     }
 
-    // Function that runs in a separate task, doesn't access synchronizer state directly
-    fn assign_pieces_to_workers(
+    /// Function that runs in a separate task to assign pieces to peer session.
+    ///
+    /// This method implements the rarest-first piece selection strategy and
+    /// distributes pieces fairly among available peers.
+    ///
+    /// # Arguments
+    ///
+    /// * `peers_bitfield` - Map of peer IDs to their available pieces
+    /// * `peer_assignments` - Map of peer IDs to pieces they're currently downloading
+    /// * `pending_pieces` - List of pieces pending download
+    /// * `assigned_pieces` - Set of pieces already assigned for download
+    ///
+    /// # Returns
+    ///
+    /// A map of peer IDs to queues of piece indexes to download
+    fn assign_pieces_to_peer_session(
         peers_bitfield: &HashMap<String, Bitfield>,
         peer_assignments: &HashMap<String, Vec<u32>>,
         pending_pieces: &Vec<u32>,
@@ -473,6 +534,10 @@ impl Synchronizer {
         assignments
     }
 
+    /// Processes a bitfield received from a peer.
+    ///
+    /// Updates internal state with the peer's available pieces and
+    /// recalculates piece rarity.
     fn process_bitfield(&mut self, peer_id: &str, peer_bitfield: Bitfield) {
         let missing_pieces_bitfield = self.build_interested_pieces_bitfield(&peer_bitfield);
         self.peers_bitfield
@@ -494,8 +559,8 @@ impl Synchronizer {
     ///   that the peer possesses.
     ///
     /// # Returns
-    /// A `Bitfield` where each bit is set if the corresponding piece is available
-    /// in the peer's bitfield but not in the current state's bitfield.
+    ///
+    /// A bitfield where each bit represents a piece available from the peer but not yet downloaded
     fn build_interested_pieces_bitfield(&self, peer_bitfield: &Bitfield) -> Bitfield {
         let mut missing = Vec::new();
 
@@ -506,6 +571,7 @@ impl Synchronizer {
         Bitfield::from(&missing, self.bitfield.total_pieces)
     }
 
+    /// Returns the count of downloaded pieces.
     fn downloaded_pieces_count(&self) -> u32 {
         self.bitfield
             .bytes
@@ -528,6 +594,10 @@ impl Synchronizer {
         None
     }
 
+    /// Unassigns a piece from a peer.
+    ///
+    /// Removes the piece from the peer's assignment list and from the
+    /// global assigned pieces set.
     fn unassign_piece(&mut self, session_id: &str, piece_index: u32) {
         self.assigned_pieces.remove(&piece_index);
         if let Some(pending_pieces) = self.peer_assignments.get_mut(session_id) {
@@ -537,12 +607,14 @@ impl Synchronizer {
         }
     }
 
+    /// Unassigns multiple pieces from a peer.
     fn unassign_pieces(&mut self, session_id: &str, pieces_index: Vec<u32>) {
         for piece_index in pieces_index {
             self.unassign_piece(session_id, piece_index);
         }
     }
 
+    /// Removes a pending piece from the list of pieces to download.
     fn remove_pending_piece(&mut self, piece_index: u32) {
         for (pos, &piece_idx) in self.pending_pieces.iter().enumerate() {
             if piece_idx == piece_index {
@@ -552,6 +624,7 @@ impl Synchronizer {
         }
     }
 
+    /// Removes a piece from all peer assignment lists.
     fn remove_worker_pending_piece(&mut self, piece_index: u32) {
         for (_, values) in self.peer_assignments.iter_mut() {
             if let Some(pos) = values.iter().position(|&x| x == piece_index) {
@@ -561,7 +634,10 @@ impl Synchronizer {
         }
     }
 
-    // Mark a piece as downloaded, remove from missing and assigned sets
+    /// Marks a piece as successfully downloaded and verified.
+    ///
+    /// Updates the bitfield, removes the piece from pending and assigned lists,
+    /// and updates rarity information.
     fn mark_piece_complete(&mut self, piece_index: u32) {
         self.bitfield.set_piece(piece_index as usize);
         self.remove_pending_piece(piece_index);
@@ -571,6 +647,7 @@ impl Synchronizer {
         self.pieces_rarity[piece_index as usize] = 0;
     }
 
+    /// Increases the rarity count for pieces available in the given bitfield.
     fn increase_pieces_rarity(&mut self, peer_bitfield: &Bitfield) {
         for byte_index in 0..peer_bitfield.bytes.len() {
             for bit_index in 0..8 {
@@ -583,6 +660,7 @@ impl Synchronizer {
         }
     }
 
+    /// Decreases the rarity count for pieces available in the given bitfield.
     fn decrease_pieces_rarity(&mut self, peer_bitfield: &Bitfield) {
         for byte_index in 0..peer_bitfield.bytes.len() {
             for bit_index in 0..8 {
@@ -1040,7 +1118,7 @@ mod tests {
         peer_assignments.insert("worker1".to_string(), vec![4, 5]);
 
         // Call the function
-        let assignments = Synchronizer::assign_pieces_to_workers(
+        let assignments = Synchronizer::assign_pieces_to_peer_session(
             &peers_bitfield,
             &peer_assignments,
             &pending_pieces,
