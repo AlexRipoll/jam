@@ -11,96 +11,122 @@ use tracing::{debug, error, info};
 
 use crate::torrent::events::Event;
 
+/// The Synchronizer coordinates piece downloads across multiple peer connections,
+/// managing piece assignment, tracking download progress, and handling the overall
+/// download state for a torrent.
+///
+/// It implements a rarest-first piece selection strategy to optimize download efficiency
+/// and ensure pieces are distributed fairly among available peers.
 #[derive(Debug)]
 pub struct Synchronizer {
+    /// Metadata about each piece in the torrent
     pub pieces: HashMap<u32, Piece>,
 
-    // Bitfield of the downloaded pieces
+    /// Bitfield of the pieces that have been successfully downloaded
     pub bitfield: Bitfield,
 
-    // Peers' bitfield from all peer connections
+    /// Map of peer IDs to their corresponding bitfields (the pieces they have)
     peers_bitfield: HashMap<String, Bitfield>,
 
-    // Containing the amount of occurrences of a piece index
+    /// Tracks the rarity of each piece (how many peers have it)
     pieces_rarity: Vec<u8>,
 
-    // Sorted set of piece indexes pending to be downloaded from the current
+    /// Sorted list of piece indexes pending download, prioritized by rarity
     pending_pieces: Vec<u32>,
 
-    // peer connections (rarest first)
-    assigned_pieces: HashSet<u32>, // Indexes of the pieces being downloaded
+    /// Set of piece indexes assigned to a peer for being downloaded
+    assigned_pieces: HashSet<u32>,
 
-    // Indexes of the pieces being downloaded by each worker
-    workers_pending_pieces: HashMap<String, Vec<u32>>,
+    /// Map of peer IDs to the pieces they're currently downloading
+    peer_assignments: HashMap<String, Vec<u32>>,
 
-    // Workers' queue max capacity
-    queue_capacity: usize,
+    /// Maximum number of pieces a peer can download simultaneously
+    max_peer_queue_size: usize,
 
-    // Channels for communication
+    /// Channel for sending events to the torrent manager
     event_tx: mpsc::Sender<Event>,
 
-    // Keep track of whether dispatching is in progress
+    /// Flag indicating whether a dispatch operation is currently in progress
     dispatch_in_progress: bool,
 }
 
-// Enum defining all possible commands our actor can receive
+/// Commands that can be sent to the Synchronizer actor
 #[derive(Debug)]
 pub enum SynchronizerCommand {
     // Dispatch related commands
+    /// Request that pieces be assigned to peers for downloading
     RequestDispatch,
+    /// Notification that a piece has been assigned to a peer
     PieceDispatched {
         session_id: String,
         piece_index: u32,
     },
+    /// Notification that the dispatch process has completed
     DispatchCompleted,
 
     // Peer management commands
+    /// Process a bitfield received from a peer
     ProcessBitfield {
         session_id: String,
         bitfield: Vec<u8>,
     },
+    /// Process a "have" message from a peer indicating they have a specific piece
     ProcessHave {
         session_id: String,
         piece_index: u32,
     },
+    /// Handle a corrupted piece received from a peer
     CorruptedPiece {
         session_id: String,
         piece_index: u32,
     },
+    /// Close a peer connection and clean up associated state
     ClosePeerSession(String),
 
     // Piece management commands
+    /// Mark a piece as successfully downloaded and verified
     MarkPieceComplete(u32),
+    /// Unassign a piece from a peer
     UnassignPiece {
         session_id: String,
         piece_index: u32,
     },
+    /// Unassign multiple pieces from a peer
     UnassignPieces {
         session_id: String,
         pieces_index: Vec<u32>,
     },
 
     // Query commands (with response channels)
+    /// Query the current download progress percentage
     QueryProgress(mpsc::Sender<u32>),
+    /// Query whether the download is complete
     QueryIsCompleted(mpsc::Sender<bool>),
+    /// Query whether there are active workers downloading pieces
     QueryHasActiveWorkers(mpsc::Sender<bool>),
 }
 
-// Data structure to pass data to the dispatch task
+/// Data structure to pass to the dispatch task
 #[derive(Debug, Clone)]
 pub struct DispatchData {
+    /// Metadata about each piece in the torrent
     pieces: HashMap<u32, Piece>,
+    /// Map of peer IDs to their corresponding bitfields
     peers_bitfield: HashMap<String, Bitfield>,
-    workers_pending_pieces: HashMap<String, Vec<u32>>,
+    /// Map of peer IDs to the pieces they're currently downloading
+    peer_assignments: HashMap<String, Vec<u32>>,
+    /// Sorted list of piece indexes pending download
     pending_pieces: Vec<u32>,
+    /// Set of piece indexes assigned to a peer for being downloaded
     assigned_pieces: HashSet<u32>,
-    queue_capacity: usize,
+    /// Maximum number of pieces a peer can download simultaneously
+    max_peer_queue_size: usize,
 }
 
 impl Synchronizer {
     pub fn new(
         pieces: HashMap<u32, Piece>,
-        queue_capacity: usize,
+        max_peer_queue_size: usize,
         event_tx: mpsc::Sender<Event>,
     ) -> Self {
         let total_pieces = pieces.len();
@@ -112,8 +138,8 @@ impl Synchronizer {
             pieces_rarity: vec![0u8; total_pieces],
             pending_pieces: Vec::new(),
             assigned_pieces: HashSet::new(),
-            workers_pending_pieces: HashMap::new(),
-            queue_capacity,
+            peer_assignments: HashMap::new(),
+            max_peer_queue_size,
             event_tx,
             dispatch_in_progress: false,
         }
@@ -160,7 +186,7 @@ impl Synchronizer {
         // Create workers queue locally
         let workers_queue = Self::assign_pieces_to_workers(
             &data.peers_bitfield,
-            &data.workers_pending_pieces,
+            &data.peer_assignments,
             &data.pending_pieces,
             &data.assigned_pieces,
         );
@@ -168,12 +194,12 @@ impl Synchronizer {
         // Process each worker's queue
         for (worker_id, mut queue) in workers_queue {
             let worker_pending = data
-                .workers_pending_pieces
+                .peer_assignments
                 .get(&worker_id)
                 .map(|v| v.len())
                 .unwrap_or(0);
 
-            let available_slots = data.queue_capacity.saturating_sub(worker_pending);
+            let available_slots = data.max_peer_queue_size.saturating_sub(worker_pending);
             let pieces_to_dispatch = queue.drain(..queue.len().min(available_slots));
 
             for piece_index in pieces_to_dispatch {
@@ -225,10 +251,10 @@ impl Synchronizer {
                     let data = DispatchData {
                         pieces: self.pieces.clone(),
                         peers_bitfield: self.peers_bitfield.clone(),
-                        workers_pending_pieces: self.workers_pending_pieces.clone(),
+                        peer_assignments: self.peer_assignments.clone(),
                         pending_pieces: self.pending_pieces.clone(),
                         assigned_pieces: self.assigned_pieces.clone(),
-                        queue_capacity: self.queue_capacity,
+                        max_peer_queue_size: self.max_peer_queue_size,
                     };
 
                     dispatch_tx.send(data).await?;
@@ -239,7 +265,7 @@ impl Synchronizer {
                 piece_index,
             } => {
                 // Update internal state
-                self.workers_pending_pieces
+                self.peer_assignments
                     .entry(session_id)
                     .or_insert_with(Vec::new)
                     .push(piece_index);
@@ -330,7 +356,7 @@ impl Synchronizer {
                 );
                 self.mark_piece_complete(piece_index);
                 // check if any of the peer session has completed all the work
-                for (session_id, pending_pieces) in self.workers_pending_pieces.clone().iter() {
+                for (session_id, pending_pieces) in self.peer_assignments.clone().iter() {
                     // TODO: check also if has_assignable_pieces
                     if pending_pieces.is_empty() {
                         self.event_tx
@@ -391,7 +417,7 @@ impl Synchronizer {
     // Function that runs in a separate task, doesn't access synchronizer state directly
     fn assign_pieces_to_workers(
         peers_bitfield: &HashMap<String, Bitfield>,
-        workers_pending_pieces: &HashMap<String, Vec<u32>>,
+        peer_assignments: &HashMap<String, Vec<u32>>,
         pending_pieces: &Vec<u32>,
         assigned_pieces: &HashSet<u32>,
     ) -> HashMap<String, VecDeque<u32>> {
@@ -420,9 +446,8 @@ impl Synchronizer {
             pending_set.difference(assigned_pieces).cloned().collect();
 
         // Sort workers by how many pending pieces they already have (fewer first)
-        worker_pieces.sort_by_key(|(worker_id, _)| {
-            workers_pending_pieces.get(worker_id).map_or(0, |v| v.len())
-        });
+        worker_pieces
+            .sort_by_key(|(worker_id, _)| peer_assignments.get(worker_id).map_or(0, |v| v.len()));
 
         // Distribute pieces across workers in a fair way
         while !remaining_pieces.is_empty() && !worker_pieces.is_empty() {
@@ -452,7 +477,7 @@ impl Synchronizer {
         let missing_pieces_bitfield = self.build_interested_pieces_bitfield(&peer_bitfield);
         self.peers_bitfield
             .insert(peer_id.to_string(), peer_bitfield);
-        self.workers_pending_pieces
+        self.peer_assignments
             .entry(peer_id.to_string())
             .or_insert(Vec::new());
 
@@ -505,7 +530,7 @@ impl Synchronizer {
 
     fn unassign_piece(&mut self, session_id: &str, piece_index: u32) {
         self.assigned_pieces.remove(&piece_index);
-        if let Some(pending_pieces) = self.workers_pending_pieces.get_mut(session_id) {
+        if let Some(pending_pieces) = self.peer_assignments.get_mut(session_id) {
             if let Some(pos) = pending_pieces.iter().position(|&p| p == piece_index) {
                 pending_pieces.remove(pos);
             }
@@ -528,7 +553,7 @@ impl Synchronizer {
     }
 
     fn remove_worker_pending_piece(&mut self, piece_index: u32) {
-        for (_, values) in self.workers_pending_pieces.iter_mut() {
+        for (_, values) in self.peer_assignments.iter_mut() {
             if let Some(pos) = values.iter().position(|&x| x == piece_index) {
                 values.remove(pos);
                 break;
@@ -651,7 +676,7 @@ impl Synchronizer {
 
     // checks if any of the workers has any piece stil in progress
     fn has_active_worker(&self) -> bool {
-        self.workers_pending_pieces
+        self.peer_assignments
             .iter()
             .any(|(_, pending_pieces)| !pending_pieces.is_empty())
     }
@@ -669,7 +694,7 @@ impl Synchronizer {
 
     fn close_session(&mut self, session_id: &str) {
         self.peers_bitfield.remove(session_id);
-        if let Some(pieces_indexes) = self.workers_pending_pieces.remove(session_id) {
+        if let Some(pieces_indexes) = self.peer_assignments.remove(session_id) {
             self.unassign_pieces(session_id, pieces_indexes);
         }
     }
@@ -677,8 +702,11 @@ impl Synchronizer {
 
 #[derive(Debug)]
 pub enum SynchronizerError {
+    /// Error sending dispatch data
     DispatcherDataTxError(mpsc::error::SendError<DispatchData>),
+    /// Error processing a command
     CommandTxError(mpsc::error::SendError<SynchronizerCommand>),
+    /// Error sending an orchestrator event
     EventTxError(mpsc::error::SendError<Event>),
     QueryTxError(String),
 }
@@ -780,13 +808,13 @@ mod tests {
         let sync = Synchronizer::new(pieces, 5, event_tx);
 
         assert_eq!(sync.pieces.len(), 10);
-        assert_eq!(sync.queue_capacity, 5);
+        assert_eq!(sync.max_peer_queue_size, 5);
         assert_eq!(sync.bitfield.total_pieces, 10);
         assert!(sync.peers_bitfield.is_empty());
         assert_eq!(sync.pieces_rarity.len(), 10);
         assert!(sync.pending_pieces.is_empty());
         assert!(sync.assigned_pieces.is_empty());
-        assert!(sync.workers_pending_pieces.is_empty());
+        assert!(sync.peer_assignments.is_empty());
         assert!(!sync.dispatch_in_progress);
     }
 
@@ -804,7 +832,7 @@ mod tests {
         sync.process_bitfield("peer1", Bitfield::from(&peer_bitfield, total_pieces));
 
         // Verify worker was added
-        assert!(sync.workers_pending_pieces.contains_key("peer1"));
+        assert!(sync.peer_assignments.contains_key("peer1"));
         assert!(sync.peers_bitfield.contains_key("peer1"));
 
         // Verify the rarity of pieces
@@ -854,7 +882,7 @@ mod tests {
         sync.assigned_pieces.insert(3);
 
         // Mark worker as having piece 1 pending
-        sync.workers_pending_pieces
+        sync.peer_assignments
             .entry("peer1".to_string())
             .or_default()
             .push(1);
@@ -875,7 +903,7 @@ mod tests {
         assert_eq!(sync.pieces_rarity[1], 0);
 
         // Verify piece is removed from worker's pending list
-        assert!(!sync.workers_pending_pieces["peer1"].contains(&1));
+        assert!(!sync.peer_assignments["peer1"].contains(&1));
 
         // Verify piece is removed from pending pieces
         assert!(!sync.pending_pieces.contains(&1));
@@ -930,7 +958,7 @@ mod tests {
         let mut peer_pieces = Vec::new();
         peer_pieces.push(1);
         peer_pieces.push(2);
-        sync.workers_pending_pieces
+        sync.peer_assignments
             .insert("peer1".to_string(), peer_pieces);
 
         // Mark these pieces as assigned
@@ -942,7 +970,7 @@ mod tests {
 
         // Verify the session is removed
         assert!(!sync.peers_bitfield.contains_key("peer1"));
-        assert!(!sync.workers_pending_pieces.contains_key("peer1"));
+        assert!(!sync.peer_assignments.contains_key("peer1"));
 
         // Verify the pieces are unassigned
         assert!(!sync.assigned_pieces.contains(&1));
@@ -985,7 +1013,7 @@ mod tests {
     fn test_assign_pieces_to_workers() {
         let total_pieces = 11;
         let mut peers_bitfield = HashMap::new();
-        let mut workers_pending_pieces = HashMap::new();
+        let mut peer_assignments = HashMap::new();
         let pending_pieces = vec![0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11];
         let assigned_pieces = HashSet::from([2]); // Set piece 2 as already assigned
 
@@ -993,7 +1021,7 @@ mod tests {
         let worker1_bitfield =
             Bitfield::from(&create_bitfield(total_pieces, &[0, 1, 2, 7]), total_pieces);
         peers_bitfield.insert("worker1".to_string(), worker1_bitfield);
-        workers_pending_pieces.insert("worker1".to_string(), vec![]);
+        peer_assignments.insert("worker1".to_string(), vec![]);
 
         // Worker2 has pieces 1, 2, 3, 9, 11
         let worker2_bitfield = Bitfield::from(
@@ -1001,7 +1029,7 @@ mod tests {
             total_pieces,
         );
         peers_bitfield.insert("worker2".to_string(), worker2_bitfield);
-        workers_pending_pieces.insert("worker2".to_string(), vec![6]); // Already has one piece assigned
+        peer_assignments.insert("worker2".to_string(), vec![6]); // Already has one piece assigned
 
         // Worker3 has pieces 0, 3, 5, 7, 10
         let worker3_bitfield = Bitfield::from(
@@ -1009,12 +1037,12 @@ mod tests {
             total_pieces,
         );
         peers_bitfield.insert("worker3".to_string(), worker3_bitfield);
-        workers_pending_pieces.insert("worker1".to_string(), vec![4, 5]);
+        peer_assignments.insert("worker1".to_string(), vec![4, 5]);
 
         // Call the function
         let assignments = Synchronizer::assign_pieces_to_workers(
             &peers_bitfield,
-            &workers_pending_pieces,
+            &peer_assignments,
             &pending_pieces,
             &assigned_pieces,
         );
@@ -1175,15 +1203,15 @@ mod tests {
         sync.assigned_pieces.insert(5);
 
         // Assign the pieces to the peer sessions
-        sync.workers_pending_pieces
+        sync.peer_assignments
             .entry("peer1".to_string())
             .or_insert_with(Vec::new)
             .push(1);
-        sync.workers_pending_pieces
+        sync.peer_assignments
             .entry("peer1".to_string())
             .or_insert_with(Vec::new)
             .push(3);
-        sync.workers_pending_pieces
+        sync.peer_assignments
             .entry("peer2".to_string())
             .or_insert_with(Vec::new)
             .push(5);
@@ -1199,18 +1227,10 @@ mod tests {
         assert!(sync.assigned_pieces.contains(&5));
 
         // Verify piece 3 is not assigned to peer1
-        assert!(!sync
-            .workers_pending_pieces
-            .get("peer1")
-            .unwrap()
-            .contains(&3));
+        assert!(!sync.peer_assignments.get("peer1").unwrap().contains(&3));
 
         // Verify piece 1 remain assigned
-        assert!(sync
-            .workers_pending_pieces
-            .get("peer1")
-            .unwrap()
-            .contains(&1));
+        assert!(sync.peer_assignments.get("peer1").unwrap().contains(&1));
 
         // Unassign a piece that's not assigned
         sync.unassign_piece("peer1", 2);
@@ -1347,25 +1367,25 @@ mod tests {
         let mut sync = Synchronizer::new(pieces, 5, event_tx);
 
         // Set up worker pending pieces
-        sync.workers_pending_pieces
+        sync.peer_assignments
             .insert("worker1".to_string(), vec![1, 3, 5]);
-        sync.workers_pending_pieces
+        sync.peer_assignments
             .insert("worker2".to_string(), vec![2, 4, 6]);
 
         // Remove piece 3 from worker1
         sync.remove_worker_pending_piece(3);
 
         // Verify piece is removed from worker1
-        assert_eq!(sync.workers_pending_pieces["worker1"], vec![1, 5]);
+        assert_eq!(sync.peer_assignments["worker1"], vec![1, 5]);
 
         // Verify worker2 is unaffected
-        assert_eq!(sync.workers_pending_pieces["worker2"], vec![2, 4, 6]);
+        assert_eq!(sync.peer_assignments["worker2"], vec![2, 4, 6]);
 
         // Remove piece 6 from worker2
         sync.remove_worker_pending_piece(6);
 
         // Verify piece is removed from worker2
-        assert_eq!(sync.workers_pending_pieces["worker2"], vec![2, 4]);
+        assert_eq!(sync.peer_assignments["worker2"], vec![2, 4]);
     }
 
     #[test]
