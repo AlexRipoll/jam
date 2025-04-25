@@ -50,6 +50,15 @@ pub struct Synchronizer {
     dispatch_in_progress: bool,
 }
 
+/// Represents the rarity information of a piece
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PieceRarity {
+    /// Number of peers that have this piece
+    count: u8,
+    /// Index of the piece
+    index: u32,
+}
+
 /// Commands that can be sent to the Synchronizer actor
 #[derive(Debug)]
 pub enum SynchronizerCommand {
@@ -289,159 +298,52 @@ impl Synchronizer {
     ) -> Result<(), SynchronizerError> {
         match command {
             SynchronizerCommand::RequestDispatch => {
-                if !self.dispatch_in_progress
-                    && (self.pending_pieces.len() > self.assigned_pieces.len())
-                {
-                    self.dispatch_in_progress = true;
-
-                    // Prepare data for the dispatch task
-                    let data = DispatchData {
-                        pieces: self.pieces.clone(),
-                        peers_bitfield: self.peers_bitfield.clone(),
-                        peer_assignments: self.peer_assignments.clone(),
-                        pending_pieces: self.pending_pieces.clone(),
-                        assigned_pieces: self.assigned_pieces.clone(),
-                        max_peer_queue_size: self.max_peer_queue_size,
-                    };
-
-                    dispatch_tx.send(data).await?;
-                }
+                self.handle_request_dispatch(dispatch_tx).await?;
             }
             SynchronizerCommand::PieceDispatched {
                 session_id,
                 piece_index,
             } => {
-                // Update internal state
-                self.peer_assignments
-                    .entry(session_id)
-                    .or_insert_with(Vec::new)
-                    .push(piece_index);
-                self.assigned_pieces.insert(piece_index);
+                self.handle_piece_dispatched(session_id, piece_index);
             }
             SynchronizerCommand::DispatchCompleted => {
-                self.dispatch_in_progress = false;
-
-                // If pending pieces list length is greater that assigned pieces length it means there are still to be dispatched (still not assigned)
-                if self.pending_pieces.len() > self.assigned_pieces.len() {
-                    actor_cmd_tx
-                        .send(SynchronizerCommand::RequestDispatch)
-                        .await?;
-                }
+                self.handle_dispatch_completed(actor_cmd_tx).await?;
             }
             SynchronizerCommand::ProcessBitfield {
                 session_id,
                 bitfield,
             } => {
-                debug!(
-                    session_id = %session_id,
-                    bitfield = ?bitfield,
-                    "Peer bitfield received"
-                );
-                let total_pieces = self.bitfield.total_pieces;
-                let bitfield = Bitfield::from(&bitfield, total_pieces);
-
-                if self.has_missing_pieces(&bitfield) {
-                    self.event_tx
-                        .send(Event::NotifyInterest {
-                            session_id: session_id.clone(),
-                        })
-                        .await?;
-                    self.process_bitfield(&session_id, bitfield);
-
-                    // After processing a new bitfield, we might have new pieces to dispatch
-                    if !self.pending_pieces.is_empty() && !self.dispatch_in_progress {
-                        actor_cmd_tx
-                            .send(SynchronizerCommand::RequestDispatch)
-                            .await?;
-                    }
-                } else {
-                    self.event_tx
-                        .send(Event::DisconnectPeerSession {
-                            session_id: session_id.clone(),
-                        })
-                        .await?;
-                }
+                self.handle_process_bitfield(session_id, bitfield, actor_cmd_tx)
+                    .await?;
             }
             SynchronizerCommand::ProcessHave {
                 session_id,
                 piece_index,
             } => {
-                debug!(
-                    session_id = %session_id,
-                    piece_index = %piece_index,
-                    "'Have' message received"
-                );
-                if let Some(bitfield) = self.peers_bitfield.get_mut(&session_id) {
-                    bitfield.set_piece(piece_index as usize);
-                }
-                // TODO: check if it is a missing piece and it is not in the remaining
-                // pieces list, if so add it
+                self.handle_process_have(session_id, piece_index);
             }
             SynchronizerCommand::CorruptedPiece {
                 session_id,
                 piece_index,
             } => {
-                debug!(
-                    session_id = %session_id,
-                    piece_index = %piece_index,
-                    "Corrupted piece"
-                );
-                self.unassign_piece(&session_id, piece_index);
-                // TODO: blacklist worker for this piece index
+                self.handle_corrupted_piece(session_id, piece_index);
             }
             SynchronizerCommand::ClosePeerSession(session_id) => {
-                debug!(
-                    session_id = %session_id,
-                    "Closing peer session"
-                );
-                self.close_session(&session_id);
+                self.remove_session(&session_id);
             }
             SynchronizerCommand::MarkPieceComplete(piece_index) => {
-                debug!(
-                    piece_index = %piece_index,
-                    "Piece completed"
-                );
-                self.mark_piece_complete(piece_index);
-                // check if any of the peer session has completed all the work
-                for (session_id, pending_pieces) in self.peer_assignments.clone().iter() {
-                    // TODO: check also if has_assignable_pieces
-                    if pending_pieces.is_empty() {
-                        self.event_tx
-                            .send(Event::DisconnectPeerSession {
-                                session_id: session_id.clone(),
-                            })
-                            .await?;
-                        self.close_session(&session_id);
-                    }
-                }
-
-                info!("Download progress: {}%", self.download_progress_percent());
-
-                if self.is_completed() {
-                    info!("Download completed");
-                    self.event_tx.send(Event::DownloadCompleted).await?;
-                }
+                self.handle_mark_piece_complete(piece_index).await?;
             }
             SynchronizerCommand::UnassignPiece {
                 session_id,
                 piece_index,
             } => {
-                debug!(
-                    session_id = %session_id,
-                    piece_index = %piece_index,
-                    "Unassign piece"
-                );
                 self.unassign_piece(&session_id, piece_index);
             }
             SynchronizerCommand::UnassignPieces {
                 session_id,
                 pieces_index,
             } => {
-                debug!(
-                    session_id = %session_id,
-                    pieces_index = ?pieces_index,
-                    "Unassign pieces"
-                );
                 self.unassign_pieces(&session_id, pieces_index);
             }
             SynchronizerCommand::QueryProgress(response_tx) => {
@@ -453,9 +355,194 @@ impl Synchronizer {
                 response_tx.send(completed).await?;
             }
             SynchronizerCommand::QueryHasActiveWorkers(response_tx) => {
-                let has_active = self.has_active_worker();
+                let has_active = self.has_active_sessions();
                 response_tx.send(has_active).await?;
             }
+        }
+
+        Ok(())
+    }
+
+    /// Handles a request to dispatch pieces to peers.
+    ///
+    /// Initiates the dispatch process if there are pieces to be assigned
+    /// and no dispatch is currently in progress.
+    async fn handle_request_dispatch(
+        &mut self,
+        dispatch_tx: &mpsc::Sender<DispatchData>,
+    ) -> Result<(), SynchronizerError> {
+        if !self.dispatch_in_progress && (self.pending_pieces.len() > self.assigned_pieces.len()) {
+            self.dispatch_in_progress = true;
+
+            // Prepare data for the dispatch task
+            let data = DispatchData {
+                pieces: self.pieces.clone(),
+                peers_bitfield: self.peers_bitfield.clone(),
+                peer_assignments: self.peer_assignments.clone(),
+                pending_pieces: self.pending_pieces.clone(),
+                assigned_pieces: self.assigned_pieces.clone(),
+                max_peer_queue_size: self.max_peer_queue_size,
+            };
+
+            dispatch_tx.send(data).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Updates internal state after a piece has been dispatched to a peer.
+    fn handle_piece_dispatched(&mut self, session_id: String, piece_index: u32) {
+        // Update internal state
+        self.peer_assignments
+            .entry(session_id)
+            .or_insert_with(Vec::new)
+            .push(piece_index);
+        self.assigned_pieces.insert(piece_index);
+    }
+
+    /// Handles the completion of a dispatch operation.
+    ///
+    /// Resets the dispatch_in_progress flag and potentially
+    /// initiates another dispatch if there are more pieces to assign.
+    async fn handle_dispatch_completed(
+        &mut self,
+        actor_cmd_tx: &mpsc::Sender<SynchronizerCommand>,
+    ) -> Result<(), SynchronizerError> {
+        self.dispatch_in_progress = false;
+
+        // If pending pieces list length is greater than assigned pieces length,
+        // it means there are still pieces to be dispatched
+        if self.pending_pieces.len() > self.assigned_pieces.len() {
+            actor_cmd_tx
+                .send(SynchronizerCommand::RequestDispatch)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Processes a bitfield received from a peer.
+    ///
+    /// Updates internal state with the peer's available pieces and
+    /// potentially initiates a dispatch operation.
+    async fn handle_process_bitfield(
+        &mut self,
+        session_id: String,
+        bitfield: Vec<u8>,
+        actor_cmd_tx: &mpsc::Sender<SynchronizerCommand>,
+    ) -> Result<(), SynchronizerError> {
+        debug!(
+            session_id = %session_id,
+            bitfield = ?bitfield,
+            "Peer bitfield received"
+        );
+        let total_pieces = self.bitfield.total_pieces;
+        let bitfield = Bitfield::from(&bitfield, total_pieces);
+
+        if self.has_missing_pieces(&bitfield) {
+            self.event_tx
+                .send(Event::NotifyInterest {
+                    session_id: session_id.clone(),
+                })
+                .await?;
+            self.process_bitfield(&session_id, bitfield);
+
+            // After processing a new bitfield, we might have new pieces to dispatch
+            if !self.pending_pieces.is_empty() && !self.dispatch_in_progress {
+                actor_cmd_tx
+                    .send(SynchronizerCommand::RequestDispatch)
+                    .await?;
+            }
+        } else {
+            self.event_tx
+                .send(Event::DisconnectPeerSession {
+                    session_id: session_id.clone(),
+                })
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Processes a "have" message from a peer indicating they have a specific piece.
+    fn handle_process_have(&mut self, session_id: String, piece_index: u32) {
+        debug!(
+            session_id = %session_id,
+            piece_index = %piece_index,
+            "'Have' message received"
+        );
+        if let Some(bitfield) = self.peers_bitfield.get_mut(&session_id) {
+            bitfield.set_piece(piece_index as usize);
+        }
+        // Update rarity information for this piece
+        if (piece_index as usize) < self.pieces_rarity.len() {
+            self.pieces_rarity[piece_index as usize] =
+                self.pieces_rarity[piece_index as usize].saturating_add(1);
+        }
+
+        // If this is a piece we're missing and it's not already in our pending list,
+        // add it and re-sort our pending pieces
+        if !self.bitfield.has_piece(piece_index as usize)
+            && !self.pending_pieces.contains(&piece_index)
+        {
+            self.pending_pieces.push(piece_index);
+            self.pending_pieces = self.sort_pieces();
+        }
+    }
+
+    /// Handles a corrupted piece received from a peer.
+    fn handle_corrupted_piece(&mut self, session_id: String, piece_index: u32) {
+        debug!(
+            session_id = %session_id,
+            piece_index = %piece_index,
+            "Corrupted piece"
+        );
+        self.unassign_piece(&session_id, piece_index);
+        // TODO: Consider blacklisting this peer for this piece
+    }
+
+    /// Marks a piece as successfully downloaded and verified.
+    ///
+    /// Updates internal state and potentially disconnects peers
+    /// that have completed their work.
+    async fn handle_mark_piece_complete(
+        &mut self,
+        piece_index: u32,
+    ) -> Result<(), SynchronizerError> {
+        debug!(
+            piece_index = %piece_index,
+            "Piece completed"
+        );
+        self.mark_piece_complete(piece_index);
+
+        // Check if any peer session has completed all their work
+        let peers_to_disconnect: Vec<String> = self
+            .peer_assignments
+            .iter()
+            .filter_map(|(session_id, pending_pieces)| {
+                if pending_pieces.is_empty() && !self.has_assignable_pieces_for_peer(session_id) {
+                    Some(session_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Disconnect peers with no more work
+        for session_id in peers_to_disconnect {
+            self.event_tx
+                .send(Event::DisconnectPeerSession {
+                    session_id: session_id.clone(),
+                })
+                .await?;
+            self.remove_session(&session_id);
+        }
+
+        info!("Download progress: {}%", self.download_progress_percent());
+
+        if self.is_completed() {
+            info!("Download completed");
+            self.event_tx.send(Event::DownloadCompleted).await?;
         }
 
         Ok(())
@@ -538,12 +625,12 @@ impl Synchronizer {
     ///
     /// Updates internal state with the peer's available pieces and
     /// recalculates piece rarity.
-    fn process_bitfield(&mut self, peer_id: &str, peer_bitfield: Bitfield) {
+    fn process_bitfield(&mut self, session_id: &str, peer_bitfield: Bitfield) {
         let missing_pieces_bitfield = self.build_interested_pieces_bitfield(&peer_bitfield);
         self.peers_bitfield
-            .insert(peer_id.to_string(), peer_bitfield);
+            .insert(session_id.to_string(), peer_bitfield);
         self.peer_assignments
-            .entry(peer_id.to_string())
+            .entry(session_id.to_string())
             .or_insert(Vec::new());
 
         self.increase_pieces_rarity(&missing_pieces_bitfield);
@@ -578,20 +665,6 @@ impl Synchronizer {
             .iter()
             .map(|byte| byte.count_ones())
             .sum::<u32>()
-    }
-
-    // Find the next assignable piece for the given peer bitfield and returns the piece index.
-    fn assign_piece(&mut self, peer_bitfield: &Bitfield) -> Option<u32> {
-        if let Some(pos) = self.pending_pieces.iter().position(|&piece_index| {
-            !self.assigned_pieces.contains(&piece_index)
-                && peer_bitfield.has_piece(piece_index as usize)
-        }) {
-            let piece_index = self.pending_pieces[pos];
-            self.assigned_pieces.insert(piece_index.clone());
-            return Some(piece_index);
-        }
-
-        None
     }
 
     /// Unassigns a piece from a peer.
@@ -673,31 +746,48 @@ impl Synchronizer {
         }
     }
 
+    /// Sorts pieces by rarity (rarest first).
+    ///
+    /// # Returns
+    ///
+    /// A sorted vector of piece indexes, prioritizing rarest pieces
     fn sort_pieces(&self) -> Vec<u32> {
-        // remove already downloaded or unavailable pieces
-        let mut indices: Vec<u32> = self
+        // Create a vector of pieces with their rarity information
+        let mut piece_rarities: Vec<PieceRarity> = self
             .pieces_rarity
             .iter()
             .enumerate()
             .filter(|&(_, &count)| count > 0)
-            .map(|(piece_index, _)| piece_index as u32)
+            .map(|(index, &count)| PieceRarity {
+                count,
+                index: index as u32,
+            })
             .collect();
 
-        // sort pieces by rarity (rarest first)
-        indices.sort_by(|&a, &b| {
-            let count_a = self.pieces_rarity[a as usize];
-            let count_b = self.pieces_rarity[b as usize];
-            count_a.cmp(&count_b).then_with(|| a.cmp(&b))
-        });
+        // Sort by rarity (ascending - rarest first) and then by piece index
+        piece_rarities.sort_by(|a, b| a.count.cmp(&b.count).then_with(|| a.index.cmp(&b.index)));
 
-        indices
+        // Extract just the piece indexes
+        piece_rarities
+            .into_iter()
+            .map(|rarity| rarity.index)
+            .collect()
     }
 
-    fn populate_queue(&mut self, sorted_pieces: Vec<u32>) {
-        self.pending_pieces.clear();
-        self.pending_pieces.extend(sorted_pieces);
+    /// Updates the queue of pending pieces based on rarity information.
+    fn update_pending_pieces(&mut self) {
+        self.pending_pieces = self.sort_pieces();
     }
 
+    /// Checks if the peer has pieces that we still need.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_bitfield` - The peer's bitfield of available pieces
+    ///
+    /// # Returns
+    ///
+    /// True if the peer has pieces we need, false otherwise
     fn has_missing_pieces(&self, peer_bitfield: &Bitfield) -> bool {
         for (byte_index, _) in peer_bitfield.bytes.iter().enumerate() {
             for bit_index in 0..8 {
@@ -714,8 +804,15 @@ impl Synchronizer {
         false
     }
 
-    // checks if the state bitfield already has downloaded all the availabe pieces of a given peer
-    // (state_bitfield & peer_bitfield == peer_bitfield)
+    /// Checks if we already have all pieces available from a peer.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_bitfield` - The peer's bitfield of available pieces
+    ///
+    /// # Returns
+    ///
+    /// True if we have all pieces from this peer, false otherwise
     fn has_downloaded_all_peer_pieces(&self, peer_bitfield: &Bitfield) -> bool {
         if peer_bitfield.bytes.is_empty() {
             return false;
@@ -725,23 +822,35 @@ impl Synchronizer {
             .bytes
             .iter()
             .zip(self.bitfield.bytes.iter())
-            .all(|(&x, &y)| (x & y) == x)
+            .all(|(&peer_byte, &self_byte)| (peer_byte & self_byte) == peer_byte)
     }
 
-    // checks if there is any missing (not in progress) piece to be downloaded from a given peer
-    fn has_assignable_pieces(&self, peer_bitfield: &Bitfield) -> bool {
-        // Iterate over the peer's bitfield to identify missing pieces
-        let missing_pieces: Vec<usize> = (0..peer_bitfield.total_pieces)
-            .filter(|&index| peer_bitfield.has_piece(index) && !self.bitfield.has_piece(index))
-            .collect();
-
-        // Check if any missing piece is already assigned to another task
-        missing_pieces
-            .into_iter()
-            .any(|piece_index| !self.assigned_pieces.contains(&(piece_index as u32)))
+    /// Checks if there are pieces we can assign to a peer.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_id` - The ID of the peer to check
+    ///
+    /// # Returns
+    ///
+    /// True if there are assignable pieces for this peer, false otherwise
+    fn has_assignable_pieces_for_peer(&self, session_id: &str) -> bool {
+        if let Some(peer_bitfield) = self.peers_bitfield.get(session_id) {
+            self.missing_unassigned_pieces(peer_bitfield).len() > 0
+        } else {
+            false
+        }
     }
 
-    // Iterate over the peer's bitfield to identify missing pieces that are not assigned
+    /// Identifies pieces that are missing and not assigned that a peer has.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_bitfield` - The peer's bitfield of available pieces
+    ///
+    /// # Returns
+    ///
+    /// A vector of piece indexes that can be assigned to this peer
     fn missing_unassigned_pieces(&self, peer_bitfield: &Bitfield) -> Vec<usize> {
         (0..peer_bitfield.total_pieces)
             .filter(|&piece_index| {
@@ -752,29 +861,56 @@ impl Synchronizer {
             .collect()
     }
 
-    // checks if any of the workers has any piece stil in progress
-    fn has_active_worker(&self) -> bool {
+    /// Checks if any peers have pieces still in progress.
+    ///
+    /// # Returns
+    ///
+    /// True if there are active downloads, false otherwise
+    fn has_active_sessions(&self) -> bool {
         self.peer_assignments
             .iter()
             .any(|(_, pending_pieces)| !pending_pieces.is_empty())
     }
 
-    // checks if all pieces have been downloaded
+    /// Checks if all pieces have been downloaded.
+    ///
+    /// # Returns
+    ///
+    /// True if the download is complete, false otherwise
     fn is_completed(&self) -> bool {
         self.bitfield.has_all_pieces()
     }
 
+    /// Calculates the download progress as a percentage.
+    ///
+    /// # Returns
+    ///
+    /// The percentage of pieces downloaded (0-100)
     fn download_progress_percent(&self) -> u32 {
         let downloaded_pieces = self.downloaded_pieces_count();
 
         downloaded_pieces * 100 / self.bitfield.total_pieces as u32
     }
 
-    fn close_session(&mut self, session_id: &str) {
-        self.peers_bitfield.remove(session_id);
+    /// Removes a peer and cleans up associated state.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_id` - The ID of the peer to remove
+    fn remove_session(&mut self, session_id: &str) {
+        // Get the peer's bitfield to update rarity counts
+        if let Some(peer_bitfield) = self.peers_bitfield.remove(session_id) {
+            // Decrease rarity counts for pieces this peer had
+            self.decrease_pieces_rarity(&peer_bitfield);
+        }
+
+        // Unassign any pieces this peer was downloading
         if let Some(pieces_indexes) = self.peer_assignments.remove(session_id) {
             self.unassign_pieces(session_id, pieces_indexes);
         }
+
+        // Re-sort pieces since rarity information changed
+        self.update_pending_pieces();
     }
 }
 
@@ -1044,7 +1180,7 @@ mod tests {
         sync.assigned_pieces.insert(2);
 
         // Close the session
-        sync.close_session("peer1");
+        sync.remove_session("peer1");
 
         // Verify the session is removed
         assert!(!sync.peers_bitfield.contains_key("peer1"));
@@ -1223,51 +1359,6 @@ mod tests {
     }
 
     #[test]
-    fn test_assign_piece() {
-        let total_pieces = 9;
-        let pieces = create_pieces_hashmap(total_pieces as u32, 16384);
-        let (event_tx, _) = mpsc::channel(100);
-
-        let mut sync = Synchronizer::new(pieces.clone(), 5, event_tx);
-
-        // Set up pending pieces
-        sync.pending_pieces = vec![1, 2, 4, 0, 3];
-
-        // Create peer bitfield with pieces 1, 3, 5, 7
-        let peer_bitfield =
-            Bitfield::from(&create_bitfield(total_pieces, &[1, 3, 5, 7]), total_pieces);
-
-        // Assign first piece
-        let piece = sync.assign_piece(&peer_bitfield);
-
-        // Should assign piece 1 (first matching piece in pending_pieces)
-        assert_eq!(piece, Some(1));
-
-        // Verify piece is now assigned
-        assert!(sync.assigned_pieces.contains(&1));
-
-        // Try to assign another piece
-        let piece = sync.assign_piece(&peer_bitfield);
-
-        // Should assign piece 3 (next matching piece)
-        assert_eq!(piece, Some(3));
-
-        // Piece 5 is in peer's bitfield but not in pending_pieces
-        // Piece 0, 2, 4 are in pending_pieces but not in peer's bitfield
-
-        // Mark all pieces as assigned
-        sync.assigned_pieces.insert(0);
-        sync.assigned_pieces.insert(2);
-        sync.assigned_pieces.insert(4);
-
-        // Try to assign when all pieces are assigned
-        let piece = sync.assign_piece(&peer_bitfield);
-
-        // Should not assign any piece
-        assert_eq!(piece, None);
-    }
-
-    #[test]
     fn test_unassign_piece() {
         let total_pieces = 8;
         let pieces = create_pieces_hashmap(total_pieces, 16384);
@@ -1412,29 +1503,6 @@ mod tests {
         // 0 count pieces should be excluded
         // For equal rarity, sort by index
         assert_eq!(sorted, vec![1, 4, 3, 7, 0, 6]);
-    }
-
-    #[test]
-    fn test_populate_queue() {
-        let pieces = create_pieces_hashmap(8, 16384);
-        let (event_tx, _) = mpsc::channel(100);
-
-        let mut sync = Synchronizer::new(pieces, 5, event_tx);
-
-        // Initial queue is empty
-        assert!(sync.pending_pieces.is_empty());
-
-        // Populate queue
-        sync.populate_queue(vec![3, 1, 4, 2]);
-
-        // Verify queue has been populated
-        assert_eq!(sync.pending_pieces, vec![3, 1, 4, 2]);
-
-        // Populate queue again (should clear previous entries)
-        sync.populate_queue(vec![5, 0]);
-
-        // Verify queue has been updated
-        assert_eq!(sync.pending_pieces, vec![5, 0]);
     }
 
     #[test]
