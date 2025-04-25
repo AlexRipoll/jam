@@ -364,6 +364,7 @@ impl Orchestrator {
                     Event::DownloadCompleted => {
                         self.handle_status_event(StatusEvent::DownloadCompleted, &disk_tx)
                             .await;
+                        break;
                     }
                     Event::DiskStats { response_channel } => {
                         self.handle_status_event(
