@@ -1,169 +1,245 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    fmt,
     time::Duration,
 };
 
 use tokio::{sync::mpsc, task::JoinHandle, time::Instant};
-use tracing::debug;
+use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use crate::torrent::{events::Event, peer::Peer};
 
+/// Commands that can be sent to the Monitor to control its behavior
 #[derive(Debug)]
 pub enum MonitorCommand {
-    CheckPeerSessions,                      // Trigger connection check cycle
-    RemovePeerSession(String),              // Remove a session from active tracking
-    AddPeers(Vec<Peer>),                    // Add  new peers to the queue
-    PeerSessionEstablished(String),         // Confirm a peer connection was established
-    GetStatus(mpsc::Sender<MonitorStatus>), // Request monitor status
-    Shutdown,                               // Signal to shutdown the monitor
+    /// Trigger a connection check cycle
+    CheckPeerSessions,
+    /// Remove a session from active tracking
+    RemovePeerSession(String),
+    /// Add new peers to the connection queue
+    AddPeers(Vec<Peer>),
+    /// Confirm a peer connection was established
+    PeerSessionEstablished(String),
+    /// Request current monitor status
+    GetStatus(mpsc::Sender<MonitorStatus>),
+    /// Signal to shutdown the monitor
+    Shutdown,
 }
 
+/// Status information about the current state of the Monitor
 #[derive(Debug, Clone)]
 pub struct MonitorStatus {
+    /// Number of currently active peer connections
     pub active_connections: usize,
+    /// Number of pending connection attempts
     pub pending_connections: usize,
+    /// Number of peers waiting in the connection queue
     pub queued_peers: usize,
+    /// Maximum number of connections allowed
     pub connection_capacity: usize,
 }
 
-#[derive(Debug)]
-pub struct Monitor {
-    // Maximum number of concurrent peer connections
-    max_connections: usize,
-
-    // Tracking active peer sessions
-    active_sessions: HashSet<String>,
-
-    // Tracking pending connections (requested but not confirmed)
-    pending_sessions: HashMap<String, Instant>,
-
-    // Queue of potential peers to connect to
-    peer_queue: VecDeque<Peer>,
-
-    // Peers that failed recent connection attempts with retry timeout
-    failed_peers: HashMap<String, (Peer, Instant)>,
-
-    // Channels for communication
-    event_tx: mpsc::Sender<Event>,
-
-    // Configuration
-    connection_timeout: Duration,
-    peer_backoff_time: Duration,
-    check_interval: Duration,
+#[derive(Debug, Clone)]
+pub struct MonitorConfig {
+    /// Maximum number of concurrent peer connections
+    pub max_connections: usize,
+    /// Time after which a connection attempt is considered failed
+    pub connection_timeout: Duration,
+    /// Time to wait before retrying a failed peer
+    pub peer_backoff_time: Duration,
+    /// How often to check for timeouts and new connections
+    pub check_interval: Duration,
 }
 
-impl Monitor {
-    pub fn new(max_connections: usize, event_tx: mpsc::Sender<Event>) -> Self {
+impl Default for MonitorConfig {
+    fn default() -> Self {
         Self {
-            max_connections,
-            active_sessions: HashSet::new(),
-            pending_sessions: HashMap::new(),
-            peer_queue: VecDeque::new(),
-            failed_peers: HashMap::new(),
-            event_tx,
+            max_connections: 50,
             connection_timeout: Duration::from_secs(15),
-            peer_backoff_time: Duration::from_secs(60), // 1 minutes backoff
+            peer_backoff_time: Duration::from_secs(60),
             check_interval: Duration::from_secs(5),
         }
     }
+}
 
-    pub fn with_config(
-        mut self,
-        connection_timeout: Duration,
-        peer_backoff_time: Duration,
-        check_interval: Duration,
-    ) -> Self {
-        self.connection_timeout = connection_timeout;
-        self.peer_backoff_time = peer_backoff_time;
-        self.check_interval = check_interval;
+/// The Monitor manages peer connections for a torrent client.
+///
+/// It maintains a queue of potential peers to connect to, tracks active connections,
+/// handles connection timeouts, and ensures the system stays within connection limits.
+#[derive(Debug)]
+pub struct Monitor {
+    /// Configuration parameters
+    config: MonitorConfig,
 
+    /// Tracking active peer sessions
+    active_sessions: HashSet<String>,
+
+    /// Tracking pending connections (requested but not confirmed)
+    pending_sessions: HashMap<String, Instant>,
+
+    /// Queue of potential peers to connect to
+    peer_queue: VecDeque<Peer>,
+
+    /// Peers that failed recent connection attempts with retry timeout
+    failed_peers: HashMap<String, (Peer, Instant)>,
+
+    /// Channel for sending events to the orchestrator
+    event_tx: mpsc::Sender<Event>,
+}
+
+impl Monitor {
+    /// Creates a new Monitor with default configuration
+    ///
+    /// # Arguments
+    ///
+    /// * `max_connections` - Maximum number of concurrent peer connections
+    /// * `event_tx` - Channel for sending events to the orchestrator
+    pub fn new(max_connections: usize, event_tx: mpsc::Sender<Event>) -> Self {
+        let config = MonitorConfig {
+            max_connections,
+            ..Default::default()
+        };
+
+        Self {
+            config,
+            active_sessions: HashSet::with_capacity(max_connections),
+            pending_sessions: HashMap::with_capacity(max_connections),
+            peer_queue: VecDeque::new(),
+            failed_peers: HashMap::new(),
+            event_tx,
+        }
+    }
+
+    /// Configures the monitor with custom settings
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Custom configuration parameters
+    pub fn with_config(mut self, config: MonitorConfig) -> Self {
+        self.config = config;
         self
     }
 
+    /// Starts the monitor actor and returns channels to communicate with it
+    ///
+    /// Returns a tuple containing:
+    /// - A channel for sending commands to the monitor
+    /// - A JoinHandle for the monitor task
     pub fn run(self) -> (mpsc::Sender<MonitorCommand>, JoinHandle<()>) {
-        let (cmd_tx, mut cmd_rx) = mpsc::channel::<MonitorCommand>(128);
+        let (cmd_tx, cmd_rx) = mpsc::channel::<MonitorCommand>(128);
 
         // Create the actor task
         let handle = tokio::spawn(async move {
             let mut monitor = self;
-            let mut interval = tokio::time::interval(monitor.check_interval);
-
-            // Initial run to establish connections
-            monitor.check_timeouts().await;
-            monitor.check_and_request_connections().await;
-
-            loop {
-                tokio::select! {
-                    // Handle incoming commands
-                    Some(cmd) = cmd_rx.recv() => {
-                        match cmd {
-                            MonitorCommand::CheckPeerSessions => {
-                                monitor.check_timeouts().await;
-                                monitor.check_and_request_connections().await;
-                            },
-                            MonitorCommand::RemovePeerSession(session_id) => {
-                                debug!(
-                                    session_id = %session_id,
-                                    "Removing peer session"
-                                );
-                                monitor.remove_session(&session_id);
-                                // After removing a session, check if we need to request new connections
-                                monitor.check_and_request_connections().await;
-                            },
-                            MonitorCommand::AddPeers(peers) => {
-                                debug!(
-                                    count = %peers.len(),
-                                    "Adding new peers to set"
-                                );
-                                peers.into_iter().for_each(|peer| monitor.add_peer(peer));
-                                // After adding the peers, check if we can establish new connections
-                                monitor.check_and_request_connections().await;
-                            },
-                            MonitorCommand::PeerSessionEstablished(session_id) => {
-                                monitor.confirm_peer_connection(&session_id);
-                            },
-                            MonitorCommand::GetStatus(response_tx) => {
-                                let status = MonitorStatus {
-                                    active_connections: monitor.active_sessions.len(),
-                                    pending_connections: monitor.pending_sessions.len(),
-                                    queued_peers: monitor.peer_queue.len(),
-                                    connection_capacity: monitor.max_connections,
-                                };
-                                let _ = response_tx.send(status).await;
-                            },
-                            MonitorCommand::Shutdown => {
-                                debug!(task = "Monitor", "Shutting down");
-                                break;
-                            }
-                        }
-                    },
-
-                    // Periodic connection check
-                    _ = interval.tick() => {
-                        // Check for timed out connection attempts
-                        monitor.check_timeouts().await;
-
-                        // Check if we should initiate new connections
-                        monitor.check_and_request_connections().await;
-
-                        // Check if any failed peers can be retried
-                        // monitor.recycle_failed_peers().await;
-                    }
-                }
-            }
+            monitor.run_actor(cmd_rx).await;
         });
 
         (cmd_tx, handle)
     }
 
-    // Check for pending connection timeouts
+    /// Main actor loop processing commands and periodic checks
+    async fn run_actor(&mut self, mut cmd_rx: mpsc::Receiver<MonitorCommand>) {
+        let mut interval = tokio::time::interval(self.config.check_interval);
+
+        // Initial run to establish connections
+        self.check_timeouts().await;
+        self.check_and_request_connections().await;
+
+        loop {
+            tokio::select! {
+                // Handle incoming commands
+                Some(cmd) = cmd_rx.recv() => {
+                    if !self.handle_command(cmd).await {
+                        break;
+                    }
+                },
+
+                // Periodic connection check
+                _ = interval.tick() => {
+                    self.perform_periodic_checks().await;
+                }
+            }
+        }
+
+        debug!(task = "Monitor", "Actor shutdown complete");
+    }
+
+    /// Processes a single command and returns whether the actor should continue running
+    async fn handle_command(&mut self, cmd: MonitorCommand) -> bool {
+        match cmd {
+            MonitorCommand::CheckPeerSessions => {
+                self.check_timeouts().await;
+                self.check_and_request_connections().await;
+                true
+            }
+            MonitorCommand::RemovePeerSession(session_id) => {
+                debug!(session_id = %session_id, "Removing peer session");
+                self.remove_session(&session_id);
+                // After removing a session, check if we need to request new connections
+                self.check_and_request_connections().await;
+                true
+            }
+            MonitorCommand::AddPeers(peers) => {
+                debug!(count = peers.len(), "Adding new peers to set");
+                self.add_peers(peers);
+                // After adding the peers, check if we can establish new connections
+                self.check_and_request_connections().await;
+                true
+            }
+            MonitorCommand::PeerSessionEstablished(session_id) => {
+                self.confirm_peer_connection(&session_id);
+                true
+            }
+            MonitorCommand::GetStatus(response_tx) => {
+                self.send_status(response_tx).await;
+                true
+            }
+            MonitorCommand::Shutdown => {
+                debug!(task = "Monitor", "Shutting down");
+                false
+            }
+        }
+    }
+
+    /// Perform periodic maintenance tasks
+    async fn perform_periodic_checks(&mut self) {
+        // Check for timed out connection attempts
+        self.check_timeouts().await;
+
+        // Check if we should initiate new connections
+        self.check_and_request_connections().await;
+
+        // Check if any failed peers can be retried
+        self.recycle_failed_peers().await;
+
+        // Periodically clean up and optimize collections if they've grown too large
+        self.optimize_collections();
+    }
+
+    /// Sends the current monitor status through the provided channel
+    async fn send_status(&self, response_tx: mpsc::Sender<MonitorStatus>) {
+        let status = MonitorStatus {
+            active_connections: self.active_sessions.len(),
+            pending_connections: self.pending_sessions.len(),
+            queued_peers: self.peer_queue.len(),
+            connection_capacity: self.config.max_connections,
+        };
+
+        if let Err(err) = response_tx.send(status).await {
+            warn!("Failed to send monitor status: {}", err);
+        }
+    }
+
+    /// Check for pending connection timeouts
     async fn check_timeouts(&mut self) {
         let now = Instant::now();
         let timed_out: Vec<String> = self
             .pending_sessions
             .iter()
-            .filter(|(_, &timestamp)| now.duration_since(timestamp) > self.connection_timeout)
+            .filter(|(_, &timestamp)| {
+                now.duration_since(timestamp) > self.config.connection_timeout
+            })
             .map(|(id, _)| id.clone())
             .collect();
 
@@ -171,24 +247,31 @@ impl Monitor {
             self.pending_sessions.remove(&session_id);
 
             // Notify the orchestrator about the timeout
-            let _ = self
+            match self
                 .event_tx
-                .send(Event::PeerSessionTimeout { session_id })
-                .await;
+                .send(Event::PeerSessionTimeout {
+                    session_id: session_id.clone(),
+                })
+                .await
+            {
+                Ok(_) => {
+                    debug!(session_id = %session_id, "Sent timeout notification");
+                }
+                Err(err) => {
+                    error!(session_id = %session_id, error = %err, "Failed to send timeout notification");
+                }
+            }
         }
     }
 
-    // Method to check and request new connections
+    /// Check if new connections can be established and request them if possible
     async fn check_and_request_connections(&mut self) {
-        let available_slots = self
-            .max_connections
-            .saturating_sub(self.active_sessions.len())
-            .saturating_sub(self.pending_sessions.len());
-
-        // If no slots available, don't bother continuing
-        if available_slots == 0 {
+        // If we're at capacity, don't continue
+        if self.is_at_capacity() {
             return;
         }
+
+        let available_slots = self.available_connection_slots();
 
         // Request connections up to the available slots
         for _ in 0..available_slots {
@@ -198,59 +281,84 @@ impl Monitor {
 
             // Try to get a new peer from the queue
             if let Some(peer) = self.peer_queue.pop_front() {
-                // Generate a unique session ID
-                let session_id = Uuid::new_v4().to_string();
+                if let Err(err) = self.request_peer_connection(peer.clone()).await {
+                    error!(error = %err, "Failed to request peer connection");
 
-                // Prepare to request a new peer session
-                let spawn_command = Event::SpawnPeerSession {
-                    session_id: session_id.clone(),
-                    peer_addr: peer.address(),
-                };
-
-                // Send request to orchestrator
-                match self.event_tx.send(spawn_command).await {
-                    Ok(_) => {
-                        // Track as pending connection
-                        self.pending_sessions.insert(session_id, Instant::now());
-                    }
-                    Err(_) => {
-                        // If sending fails, put the peer back and break
-                        self.peer_queue.push_front(peer);
-                        break;
-                    }
+                    // If we failed to request the connection, put the peer back in the queue
+                    self.peer_queue.push_front(peer);
+                    break;
                 }
-            } else {
-                // No more peers to connect to
-                break;
             }
         }
     }
 
-    // Confirm a peer connection was successful
-    fn confirm_peer_connection(&mut self, session_id: &str) {
-        if self.pending_sessions.remove(session_id).is_some() {
-            self.active_sessions.insert(session_id.to_owned());
+    /// Request a connection to a specific peer
+    async fn request_peer_connection(&mut self, peer: Peer) -> Result<(), MonitorError> {
+        // Generate a unique session ID
+        let session_id = Uuid::new_v4().to_string();
+        let peer_addr = peer.address().to_string();
+
+        // Prepare to request a new peer session
+        let spawn_command = Event::SpawnPeerSession {
+            session_id: session_id.clone(),
+            peer_addr: peer.address(),
+        };
+
+        // Send request to orchestrator
+        match self.event_tx.send(spawn_command).await {
+            Ok(_) => {
+                // Track as pending connection
+                self.pending_sessions.insert(session_id, Instant::now());
+                debug!(peer_addr = %peer_addr, "Requested new peer connection");
+                Ok(())
+            }
+            Err(err) => {
+                let error_msg = format!("Failed to send spawn command: {}", err);
+                Err(MonitorError::SendError(error_msg))
+            }
         }
     }
 
-    // Handle a failed connection attempt
-    fn handle_connection_failure(&mut self, session_id: String, peer: Peer) {
-        self.pending_sessions.remove(&session_id);
-
-        // Add to failed peers with timestamp
-        self.failed_peers
-            .insert(peer.address().to_string(), (peer, Instant::now()));
+    /// Confirm a peer connection was successful
+    fn confirm_peer_connection(&mut self, session_id: &str) {
+        if self.pending_sessions.remove(session_id).is_some() {
+            self.active_sessions.insert(session_id.to_owned());
+            debug!(session_id = %session_id, "Peer connection confirmed");
+        } else {
+            warn!(session_id = %session_id, "Attempted to confirm unknown session");
+        }
     }
 
-    // Check if any failed peers can be retried and move them back to queue
+    /// Handle a failed connection attempt
+    pub fn handle_connection_failure(&mut self, session_id: String, peer: Peer) {
+        self.pending_sessions.remove(&session_id);
+        let peer_addr = peer.address().to_string();
+
+        debug!(
+            session_id = %session_id,
+            peer_addr = %peer_addr,
+            "Handling connection failure"
+        );
+
+        // Add to failed peers with timestamp
+        self.failed_peers.insert(peer_addr, (peer, Instant::now()));
+    }
+
+    /// Check if any failed peers can be retried and move them back to queue
     async fn recycle_failed_peers(&mut self) {
         let now = Instant::now();
         let retryable: Vec<String> = self
             .failed_peers
             .iter()
-            .filter(|(_, (_, timestamp))| now.duration_since(*timestamp) > self.peer_backoff_time)
+            .filter(|(_, (_, timestamp))| {
+                now.duration_since(*timestamp) > self.config.peer_backoff_time
+            })
             .map(|(addr, _)| addr.clone())
             .collect();
+
+        if !retryable.is_empty() {
+            debug!(count = retryable.len(), "Recycling failed peers");
+        }
 
         for addr in retryable {
             if let Some((peer, _)) = self.failed_peers.remove(&addr) {
@@ -259,18 +367,46 @@ impl Monitor {
         }
     }
 
-    // Method to remove a session when it's closed
+    /// Remove a session when it's closed or disconnected
     fn remove_session(&mut self, session_id: &str) {
-        self.active_sessions.remove(session_id);
-        self.pending_sessions.remove(session_id);
+        let was_active = self.active_sessions.remove(session_id);
+        let was_pending = self.pending_sessions.remove(session_id).is_some();
+
+        if was_active || was_pending {
+            debug!(
+                session_id = %session_id,
+                was_active = was_active,
+                was_pending = was_pending,
+                "Session removed"
+            );
+        }
     }
 
-    // Method to add a new peer to the queue
-    fn add_peer(&mut self, peer: Peer) {
+    /// Add multiple peers to the connection queue
+    fn add_peers(&mut self, peers: Vec<Peer>) {
+        let mut added = 0;
+        let peers_len = peers.len();
+
+        for peer in peers {
+            if self.add_peer(peer) {
+                added += 1;
+            }
+        }
+
+        debug!(
+            added = added,
+            skipped = peers_len - added,
+            "Added peers to queue"
+        );
+    }
+
+    /// Add a new peer to the connection queue
+    /// Returns true if the peer was added, false if it was a duplicate or in failed list
+    fn add_peer(&mut self, peer: Peer) -> bool {
         // Don't add if it's already in the failed list
         let addr_str = peer.address().to_string();
-        if self.failed_peers.get(&addr_str).is_some() {
-            return;
+        if self.failed_peers.contains_key(&addr_str) {
+            return false;
         }
 
         // Don't add duplicates
@@ -281,9 +417,76 @@ impl Monitor {
 
         if !is_duplicate {
             self.peer_queue.push_back(peer);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if the monitor is at its connection capacity
+    pub fn is_at_capacity(&self) -> bool {
+        (self.active_sessions.len() + self.pending_sessions.len()) >= self.config.max_connections
+    }
+
+    /// Calculate how many more connections can be established
+    pub fn available_connection_slots(&self) -> usize {
+        self.config
+            .max_connections
+            .saturating_sub(self.active_sessions.len())
+            .saturating_sub(self.pending_sessions.len())
+    }
+
+    /// Periodically optimize collections if they've grown too large
+    fn optimize_collections(&mut self) {
+        // Only shrink if we're significantly over capacity
+        if self.active_sessions.capacity() > self.config.max_connections * 2 {
+            self.active_sessions
+                .shrink_to(self.config.max_connections * 3 / 2);
+        }
+
+        if self.pending_sessions.capacity() > self.config.max_connections * 2 {
+            self.pending_sessions
+                .shrink_to(self.config.max_connections * 3 / 2);
+        }
+
+        // If we have a very large queue, shrink it occasionally
+        if self.peer_queue.capacity() > 1000 && self.peer_queue.len() < 500 {
+            self.peer_queue.shrink_to(750);
+        }
+
+        // If we have a lot of failed peers, clean up old ones
+        if self.failed_peers.len() > 200 {
+            debug!(
+                count = self.failed_peers.len(),
+                "Cleaning up old failed peers"
+            );
+            let now = Instant::now();
+            self.failed_peers.retain(|_, (_, timestamp)| {
+                now.duration_since(*timestamp) <= self.config.peer_backoff_time * 2
+            });
         }
     }
 }
+
+/// Error types specific to the Monitor component
+#[derive(Debug)]
+pub enum MonitorError {
+    /// Failed to send an event to the event channel
+    SendError(String),
+    /// Failed to establish a peer connection
+    ConnectionError(String),
+}
+
+impl fmt::Display for MonitorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MonitorError::SendError(msg) => write!(f, "Failed to send event: {}", msg),
+            MonitorError::ConnectionError(msg) => write!(f, "Connection error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for MonitorError {}
 
 #[cfg(test)]
 mod test {
@@ -291,7 +494,11 @@ mod test {
 
     use tokio::{sync::mpsc, time::Instant};
 
-    use crate::torrent::{core::monitor::Monitor, events::Event, peer::Peer};
+    use crate::torrent::{
+        core::monitor::{Monitor, MonitorConfig},
+        events::Event,
+        peer::Peer,
+    };
 
     // Helper function to create a test peer with a specific IP and port
     fn create_test_peer(ip_octets: [u8; 4], port: u16) -> Peer {
@@ -311,11 +518,14 @@ mod test {
     fn create_test_monitor() -> (Monitor, mpsc::Sender<Event>) {
         let (event_tx, _) = mpsc::channel(100);
 
-        let monitor = Monitor::new(5, event_tx.clone()).with_config(
-            Duration::from_millis(50),  // Short timeout for testing
-            Duration::from_millis(100), // Short backoff for testing
-            Duration::from_millis(50),  // Short check interval for testing
-        );
+        let config = MonitorConfig {
+            max_connections: 5,
+            connection_timeout: Duration::from_millis(50), // Short timeout for testing
+            peer_backoff_time: Duration::from_millis(100), // Short backoff for testing
+            check_interval: Duration::from_millis(50),     // Short check interval for testing
+        };
+
+        let monitor = Monitor::new(5, event_tx.clone()).with_config(config);
 
         (monitor, event_tx)
     }
@@ -326,25 +536,37 @@ mod test {
 
         // Test default constructor
         let monitor = Monitor::new(10, event_tx.clone());
-        assert_eq!(monitor.max_connections, 10);
+        assert_eq!(monitor.config.max_connections, 10);
         assert!(monitor.active_sessions.is_empty());
         assert!(monitor.pending_sessions.is_empty());
         assert!(monitor.peer_queue.is_empty());
         assert!(monitor.failed_peers.is_empty());
-        assert_eq!(monitor.connection_timeout, Duration::from_secs(15));
-        assert_eq!(monitor.peer_backoff_time, Duration::from_secs(60));
-        assert_eq!(monitor.check_interval, Duration::from_secs(5));
+        assert_eq!(monitor.config.connection_timeout, Duration::from_secs(15));
+        assert_eq!(monitor.config.peer_backoff_time, Duration::from_secs(60));
+        assert_eq!(monitor.config.check_interval, Duration::from_secs(5));
 
         // Test with_config method
-        let custom_monitor = Monitor::new(10, event_tx).with_config(
-            Duration::from_secs(30),
-            Duration::from_secs(120),
-            Duration::from_secs(10),
-        );
+        let custom_config = MonitorConfig {
+            max_connections: 10,
+            connection_timeout: Duration::from_secs(30),
+            peer_backoff_time: Duration::from_secs(120),
+            check_interval: Duration::from_secs(10),
+        };
 
-        assert_eq!(custom_monitor.connection_timeout, Duration::from_secs(30));
-        assert_eq!(custom_monitor.peer_backoff_time, Duration::from_secs(120));
-        assert_eq!(custom_monitor.check_interval, Duration::from_secs(10));
+        let custom_monitor = Monitor::new(10, event_tx).with_config(custom_config);
+
+        assert_eq!(
+            custom_monitor.config.connection_timeout,
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            custom_monitor.config.peer_backoff_time,
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            custom_monitor.config.check_interval,
+            Duration::from_secs(10)
+        );
     }
 
     #[test]
@@ -510,7 +732,7 @@ mod test {
             .push_back(create_test_peer([192, 168, 1, 12], 8082));
 
         // Set max connections to 2
-        monitor.max_connections = 2;
+        monitor.config.max_connections = 2;
 
         // Request connections
         monitor.check_and_request_connections().await;
