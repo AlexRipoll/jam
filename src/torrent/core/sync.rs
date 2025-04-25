@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    error::Error,
     fmt::Display,
     time::Duration,
 };
@@ -728,6 +729,17 @@ impl From<mpsc::error::SendError<u32>> for SynchronizerError {
 impl From<mpsc::error::SendError<bool>> for SynchronizerError {
     fn from(err: mpsc::error::SendError<bool>) -> Self {
         SynchronizerError::QueryTxError(format!("{}", err))
+    }
+}
+
+impl std::error::Error for SynchronizerError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            SynchronizerError::DispatcherDataTxError(err) => Some(err),
+            SynchronizerError::CommandTxError(err) => Some(err),
+            SynchronizerError::EventTxError(err) => Some(err),
+            _ => None,
+        }
     }
 }
 
