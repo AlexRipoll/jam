@@ -8,7 +8,7 @@ use crate::torrent::events::Event;
 
 use super::{
     coordinator::{Coordinator, CoordinatorCommand},
-    handshake::{perform_handshake, Handshake, HandshakeError},
+    handshake::{exchange_handshake, Handshake, HandshakeError},
     io,
     message::{Message, MessageId},
     tcp::{connect, TcpError},
@@ -165,7 +165,7 @@ impl PeerSession {
         let handshake_metadata = Handshake::new(self.info_hash, self.peer_id);
         // Perform handshake
         // TODO: add timeout
-        if let Err(err) = perform_handshake(&mut stream, &handshake_metadata).await {
+        if let Err(err) = exchange_handshake(&mut stream, &handshake_metadata).await {
             return Err(PeerSessionError::Handshake(err));
         }
 

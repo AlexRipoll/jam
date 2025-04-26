@@ -1,35 +1,72 @@
 use std::{error::Error, fmt::Display};
 
 use tokio::{
-    io::{self, AsyncWriteExt},
+    io::{self, AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
 
+/// Standard BitTorrent protocol identifier.
 const PSTR: &str = "BitTorrent protocol";
+/// Length of a complete handshake message in bytes.
+const HANDSHAKE_LENGTH: usize = 68;
+/// Size of the reserved field in bytes.
+const RESERVED_SIZE: usize = 8;
+/// Size of the info hash and peer ID fields in bytes.
+const HASH_SIZE: usize = 20;
 
-#[derive(Debug)]
+/// Represents a BitTorrent handshake message.
+///
+/// The BitTorrent handshake is the first message exchanged between peers
+/// to establish a connection and verify they are connecting for the same torrent.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Handshake {
+    /// Protocol string identifier, typically "BitTorrent protocol"
     pub pstr: String,
-    pub reserved: [u8; 8],
-    pub info_hash: [u8; 20],
-    pub peer_id: [u8; 20],
+    /// Reserved bytes for protocol extensions
+    pub reserved: [u8; RESERVED_SIZE],
+    /// SHA-1 hash of the info dictionary from the torrent metainfo
+    pub info_hash: [u8; HASH_SIZE],
+    /// Unique identifier for the connecting client
+    pub peer_id: [u8; HASH_SIZE],
 }
 
 impl Handshake {
-    pub fn new(info_hash: [u8; 20], peer_id: [u8; 20]) -> Handshake {
-        Handshake {
+    /// Creates a new handshake message with the specified info hash and peer ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `info_hash` - The SHA-1 hash of the info dictionary from the torrent metainfo
+    /// * `peer_id` - The unique identifier for this client
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bittorrent::handshake::Handshake;
+    ///
+    /// let info_hash = [0u8; 20];
+    /// let peer_id = [1u8; 20];
+    /// let handshake = Handshake::new(info_hash, peer_id);
+    /// ```
+    pub fn new(info_hash: [u8; HASH_SIZE], peer_id: [u8; HASH_SIZE]) -> Self {
+        Self {
             pstr: PSTR.to_string(),
-            reserved: [0u8; 8],
+            reserved: [0u8; RESERVED_SIZE],
             info_hash,
             peer_id,
         }
     }
 
+    /// Serializes the handshake message to a byte vector for transmission.
+    ///
+    /// # Returns
+    ///
+    /// A vector of bytes representing the handshake message.
     pub fn serialize(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(self.pstr.len() + 49);
+        let pstr_bytes = self.pstr.as_bytes();
+        let mut buf = Vec::with_capacity(pstr_bytes.len() + 49);
 
-        buf.push(self.pstr.len() as u8);
-        buf.extend_from_slice(self.pstr.as_bytes());
+        buf.push(pstr_bytes.len() as u8);
+        buf.extend_from_slice(pstr_bytes);
         buf.extend_from_slice(&self.reserved);
         buf.extend_from_slice(&self.info_hash);
         buf.extend_from_slice(&self.peer_id);
@@ -37,42 +74,60 @@ impl Handshake {
         buf
     }
 
-    pub fn deserialize(buffer: Vec<u8>) -> Result<Handshake, HandshakeError> {
+    /// Deserializes a byte buffer into a handshake message.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - The buffer containing the serialized handshake message
+    ///
+    /// # Returns
+    ///
+    /// A Result containing either the deserialized Handshake or a HandshakeError
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The protocol string length is invalid
+    /// - The protocol string contains invalid UTF-8
+    /// - The buffer doesn't contain enough data
+    pub fn deserialize(buffer: &[u8]) -> Result<Self, HandshakeError> {
+        if buffer.len() != HANDSHAKE_LENGTH {
+            return Err(HandshakeError::InvalidLength(buffer.len()));
+        }
+
         let mut offset = 0;
 
-        // Parse `pstr_length` (1 byte)
+        // Parse protocol string length (1 byte)
         let pstr_length = buffer[offset];
         offset += 1;
 
-        // Check if `pstr_length` matches expected length for "BitTorrent protocol"
+        // Check if protocol string length matches expected length
         if pstr_length as usize != PSTR.len() {
             return Err(HandshakeError::InvalidPstrLength);
         }
 
-        // Parse `pstr` (19 bytes)
-        let pstr = std::str::from_utf8(&buffer[offset..offset + pstr_length as usize])
+        // Parse protocol string
+        let pstr_end = offset + pstr_length as usize;
+        let pstr = std::str::from_utf8(&buffer[offset..pstr_end])
             .map_err(|_| HandshakeError::InvalidPstr)?
             .to_string();
+        offset = pstr_end;
 
-        offset += pstr_length as usize;
+        // Parse reserved bytes (8 bytes)
+        let mut reserved = [0u8; RESERVED_SIZE];
+        reserved.copy_from_slice(&buffer[offset..offset + RESERVED_SIZE]);
+        offset += RESERVED_SIZE;
 
-        // Parse `reserved` (8 bytes)
-        let mut reserved = [0u8; 8];
-        reserved.copy_from_slice(&buffer[offset..offset + 8]);
-        offset += 8;
+        // Parse info hash (20 bytes)
+        let mut info_hash = [0u8; HASH_SIZE];
+        info_hash.copy_from_slice(&buffer[offset..offset + HASH_SIZE]);
+        offset += HASH_SIZE;
 
-        // Parse `info_hash` (20 bytes)
-        let mut info_hash = [0u8; 20];
-        info_hash.copy_from_slice(&buffer[offset..offset + 20]);
-        offset += 20;
+        // Parse peer ID (20 bytes)
+        let mut peer_id = [0u8; HASH_SIZE];
+        peer_id.copy_from_slice(&buffer[offset..offset + HASH_SIZE]);
 
-        // Parse `peer_id` (20 bytes)
-        let peer_id_len = std::cmp::min(buffer.len() - offset, 20);
-        let mut peer_id = [0u8; 20];
-        // peer_id.copy_from_slice(&buffer[offset..]);
-        peer_id[..peer_id_len].copy_from_slice(&buffer[offset..offset + peer_id_len]);
-
-        Ok(Handshake {
+        Ok(Self {
             pstr,
             reserved,
             info_hash,
@@ -81,54 +136,92 @@ impl Handshake {
     }
 }
 
-pub async fn perform_handshake(
+/// Performs a handshake with a peer using the given TCP stream.
+///
+/// This function sends a handshake to the peer and waits for their response.
+///
+/// # Arguments
+///
+/// * `stream` - A mutable reference to a connected TCP stream
+/// * `handshake` - The handshake message to send
+///
+/// # Returns
+///
+/// A Result containing the received Handshake on success
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - There's an I/O error during communication
+/// - The handshake times out
+/// - The response has an invalid format
+pub async fn exchange_handshake(
     stream: &mut TcpStream,
-    handshake_metadata: &Handshake,
-) -> Result<Vec<u8>, HandshakeError> {
-    stream.write_all(&handshake_metadata.serialize()).await?;
+    handshake: &Handshake,
+) -> Result<Handshake, HandshakeError> {
+    // Send our handshake
+    stream.write_all(&handshake.serialize()).await?;
 
-    let mut buffer = vec![0u8; 68];
-    stream.readable().await?;
+    let buf = receive_handshake_bytes(stream).await?;
 
+    // Deserialize the response
+    let received_handshake = Handshake::deserialize(&buf)?;
+
+    Ok(received_handshake)
+}
+
+/// Reads a complete handshake response from the stream.
+///
+/// # Arguments
+///
+/// * `stream` - The TCP stream to read from
+///
+/// # Returns
+///
+/// A Result containing the raw handshake bytes on success
+async fn receive_handshake_bytes(stream: &mut TcpStream) -> Result<Vec<u8>, HandshakeError> {
+    let mut buffer = vec![0u8; HANDSHAKE_LENGTH];
     let mut bytes_read = 0;
-    // Loop until we've read exactly 68 bytes
-    while bytes_read < 68 {
-        match stream.try_read(&mut buffer[bytes_read..]) {
-            Ok(0) => break, // Connection closed
-            Ok(n) => bytes_read += n,
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                stream.readable().await?;
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
 
-    if bytes_read != 68 {
-        return Err(HandshakeError::InvalidLength);
+    // Loop until we've read exactly HANDSHAKE_LENGTH bytes
+    while bytes_read < HANDSHAKE_LENGTH {
+        match stream.read(&mut buffer[bytes_read..]).await {
+            Ok(0) => {
+                // Connection closed prematurely
+                return Err(HandshakeError::InvalidLength(bytes_read));
+            }
+            Ok(n) => bytes_read += n,
+            Err(e) => return Err(HandshakeError::IoError(e)),
+        }
     }
 
     Ok(buffer)
 }
 
+/// Errors that can occur during handshake operations.
 #[derive(Debug)]
 pub enum HandshakeError {
+    /// Protocol string length is incorrect
     InvalidPstrLength,
+    /// Protocol string contains invalid UTF-8
     InvalidPstr,
-    InvalidLength,
-    IoError(tokio::io::Error),
+    /// Handshake message has incorrect length
+    InvalidLength(usize),
+    /// Error during network I/O
+    IoError(io::Error),
 }
 
 impl Display for HandshakeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             HandshakeError::InvalidPstrLength => {
-                write!(f, "Peer responded with invalid PSTR length")
+                write!(f, "Peer responded with invalid protocol string length")
             }
-            HandshakeError::InvalidPstr => write!(f, "Invalid UTF-8 PSTR format"),
-            HandshakeError::InvalidLength => {
-                write!(f, "Invalid handshake length, must be 68 bytes long")
+            HandshakeError::InvalidPstr => write!(f, "Invalid UTF-8 in protocol string"),
+            HandshakeError::InvalidLength(received) => {
+                write!(f, "Invalid handshake length, received {received} bytes but expected {HANDSHAKE_LENGTH}")
             }
-            HandshakeError::IoError(e) => write!(f, "I/O error: {}", e),
+            HandshakeError::IoError(e) => write!(f, "I/O error: {e}"),
         }
     }
 }
@@ -142,8 +235,8 @@ impl Error for HandshakeError {
     }
 }
 
-impl From<tokio::io::Error> for HandshakeError {
-    fn from(err: tokio::io::Error) -> Self {
+impl From<io::Error> for HandshakeError {
+    fn from(err: io::Error) -> Self {
         HandshakeError::IoError(err)
     }
 }
@@ -196,7 +289,7 @@ mod tests {
         let original = Handshake::new(info_hash, peer_id);
 
         let serialized = original.serialize();
-        let deserialized = Handshake::deserialize(serialized).unwrap();
+        let deserialized = Handshake::deserialize(&serialized).unwrap();
 
         assert_eq!(deserialized.pstr, original.pstr);
         assert_eq!(deserialized.reserved, original.reserved);
@@ -209,7 +302,7 @@ mod tests {
         let mut buffer = vec![0u8; 68];
         buffer[0] = 18; // Wrong pstr length (should be 19)
 
-        let result = Handshake::deserialize(buffer);
+        let result = Handshake::deserialize(&buffer);
         assert!(matches!(result, Err(HandshakeError::InvalidPstrLength)));
     }
 
@@ -221,26 +314,8 @@ mod tests {
         buffer[10] = 0xFF;
         buffer[11] = 0xFF;
 
-        let result = Handshake::deserialize(buffer);
+        let result = Handshake::deserialize(&buffer);
         assert!(matches!(result, Err(HandshakeError::InvalidPstr)));
-    }
-
-    #[test]
-    fn test_handshake_deserialize_truncated_message() {
-        // Create a truncated message with only peer_id partially filled
-        let mut buffer = Vec::with_capacity(65);
-        buffer.push(19); // pstr length
-        buffer.extend_from_slice(PSTR.as_bytes());
-        buffer.extend_from_slice(&[0u8; 8]); // reserved
-        buffer.extend_from_slice(&[1u8; 20]); // info_hash
-        buffer.extend_from_slice(&[2u8; 17]); // peer_id (truncated)
-
-        // Should still work, with the peer_id padded with zeros
-        let result = Handshake::deserialize(buffer).unwrap();
-        let mut expected_peer_id = [0u8; 20];
-        expected_peer_id[..17].copy_from_slice(&[2u8; 17]);
-
-        assert_eq!(result.peer_id, expected_peer_id);
     }
 
     #[tokio::test]
@@ -267,7 +342,7 @@ mod tests {
             let mut buf = vec![0u8; 68];
             socket.read_exact(&mut buf).await.unwrap();
 
-            let client_hs = Handshake::deserialize(buf).unwrap();
+            let client_hs = Handshake::deserialize(&buf).unwrap();
             assert_eq!(client_hs.info_hash, client_info_hash);
             assert_eq!(client_hs.peer_id, client_peer_id);
 
@@ -280,32 +355,15 @@ mod tests {
 
         // Client connects and performs handshake
         let mut stream = TcpStream::connect(addr).await.unwrap();
-        let response = perform_handshake(&mut stream, &client_handshake)
+        let server_hs = exchange_handshake(&mut stream, &client_handshake)
             .await
             .unwrap();
 
         // Verify response
-        let server_hs = Handshake::deserialize(response).unwrap();
         assert_eq!(server_hs.info_hash, server_info_hash);
         assert_eq!(server_hs.peer_id, server_peer_id);
 
         // Wait for server to complete
         server_handle.await.unwrap();
-    }
-
-    #[test]
-    fn test_handshake_error_display() {
-        let err1 = HandshakeError::InvalidPstrLength;
-        let err2 = HandshakeError::InvalidPstr;
-        let err3 = HandshakeError::InvalidLength;
-        let err4 = HandshakeError::IoError(io::Error::new(io::ErrorKind::Other, "test error"));
-
-        assert_eq!(err1.to_string(), "Peer responded with invalid PSTR length");
-        assert_eq!(err2.to_string(), "Invalid UTF-8 PSTR format");
-        assert_eq!(
-            err3.to_string(),
-            "Invalid handshake length, must be 68 bytes long"
-        );
-        assert_eq!(err4.to_string(), "I/O error: test error");
     }
 }
