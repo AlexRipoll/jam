@@ -4,7 +4,10 @@ use protocol::{error::ProtocolError, piece::Piece};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{debug, error, instrument, trace};
 
-use crate::torrent::events::Event;
+use crate::{
+    config,
+    torrent::{events::Event, peers::coordinator::CoordinatorConfig},
+};
 
 use super::{
     coordinator::{Coordinator, CoordinatorCommand},
@@ -174,6 +177,8 @@ impl PeerSession {
         // Run the IO handlers
         let (io_out_tx, io_in_handle, io_out_handle) = io::run(stream, event_tx.clone()).await;
 
+        // TODO: make coordinator config congigurable from main config
+        let coordinator_config = CoordinatorConfig::default();
         let id = self.id.clone();
         // Initialize and run the coordinator
         let coordinator = Coordinator::new(
@@ -181,8 +186,8 @@ impl PeerSession {
             self.piece_size,
             self.block_size,
             256, // TODO: inject from config
-            self.timeout_threshold,
             event_tx.clone(),
+            coordinator_config,
         );
         let (coordinator_tx, coordinator_handle) = coordinator.run();
 
