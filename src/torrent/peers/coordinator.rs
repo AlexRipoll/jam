@@ -422,7 +422,7 @@ impl Coordinator {
     ) -> Result<(), CoordinatorError> {
         // Ensure we have a payload
         let bytes = payload.ok_or(CoordinatorError::EmptyPayload)?;
-        let payload = PiecePayload::deserialize(&bytes)?;
+        let payload = PiecePayload::try_from(bytes.as_slice())?;
 
         // Find the piece in our active pieces map
         let piece = self
