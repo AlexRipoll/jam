@@ -6,7 +6,10 @@ use tracing::{debug, error, instrument, trace};
 
 use crate::{
     config,
-    torrent::{events::Event, peers::coordinator::CoordinatorConfig},
+    torrent::{
+        events::Event,
+        peers::{coordinator::CoordinatorConfig, tcp::ConnectionConfig},
+    },
 };
 
 use super::{
@@ -150,14 +153,14 @@ impl PeerSession {
     ) -> Result<(mpsc::Sender<PeerSessionEvent>, JoinHandle<()>), PeerSessionError> {
         debug!("Starting peer session");
 
+        let connection_config = ConnectionConfig {
+            timeout_ms: 3000,
+            max_retries: 1,
+            retry_delay_ms: 100,
+        };
+
         // Connect to peer with timeout
-        let mut stream = match connect(
-            &self.peer_addr,
-            1000, // TODO: inject values from config
-            1,    // TODO: inject values from config
-        )
-        .await
-        {
+        let mut stream = match connect(&self.peer_addr, connection_config).await {
             Ok(stream) => stream,
             Err(err) => {
                 return Err(PeerSessionError::Connection(err));
