@@ -227,8 +227,6 @@ impl Error for TrackerError {
 mod test {
     use std::net::Ipv4Addr;
 
-    use crate::torrent::tracker::tracker::TrackerError;
-
     use super::{Peer, TrackerResponse};
 
     // #[test]

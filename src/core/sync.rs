@@ -9,7 +9,7 @@ use protocol::{bitfield::Bitfield, piece::Piece};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{debug, error, info};
 
-use crate::torrent::events::Event;
+use crate::events::Event;
 
 /// The Synchronizer coordinates piece downloads across multiple peer connections,
 /// managing piece assignment, tracking download progress, and handling the overall

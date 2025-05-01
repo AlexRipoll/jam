@@ -17,8 +17,12 @@ use tracing_subscriber::{
     EnvFilter, Registry,
 };
 
-pub mod config;
+mod config;
+mod core;
+mod events;
+mod peer;
 mod torrent;
+mod tracker;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {

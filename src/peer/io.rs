@@ -262,7 +262,7 @@ impl From<io::Error> for IoError {
 
 #[cfg(test)]
 mod test {
-    use crate::torrent::peers::{
+    use crate::peer::{
         io::{read_message, IoError},
         message::{Message, MessageId},
     };

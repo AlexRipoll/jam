@@ -4,12 +4,11 @@ use protocol::piece::Piece;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{debug, error, warn};
 
-use crate::torrent::{
+use crate::{
     core::disk::DiskWriterCommand,
     events::Event,
-    peer::Peer,
-    peers::session::{PeerSession, PeerSessionEvent},
-    torrent::TorrentCommand,
+    peer::session::{PeerSession, PeerSessionEvent},
+    torrent::{peer::Peer, torrent::TorrentCommand},
 };
 
 use super::{

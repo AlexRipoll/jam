@@ -5,11 +5,8 @@ use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{debug, error, instrument, trace};
 
 use crate::{
-    config,
-    torrent::{
-        events::Event,
-        peers::{coordinator::CoordinatorConfig, tcp::ConnectionConfig},
-    },
+    events::Event,
+    peer::{coordinator::CoordinatorConfig, tcp::ConnectionConfig},
 };
 
 use super::{
@@ -745,9 +742,9 @@ mod test {
 
     use tokio::{sync::mpsc, time::timeout};
 
-    use crate::torrent::{
+    use crate::{
         events::Event,
-        peers::{
+        peer::{
             coordinator::CoordinatorCommand,
             message::{Message, MessageId},
             session::{ConnectionState, PeerSession, PeerSessionError},

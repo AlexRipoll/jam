@@ -9,14 +9,14 @@ use rand::{distributions::Alphanumeric, Rng};
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use crate::config::Config;
-
-use super::{
+use crate::{
+    config::Config,
     core::orchestrator::{Orchestrator, OrchestratorConfig},
-    metainfo::Metainfo,
-    peer::Peer,
+    events::Event,
     tracker::tracker::{Announce, Tracker},
 };
+
+use super::{metainfo::Metainfo, peer::Peer};
 
 #[derive(Debug)]
 pub struct Torrent {
@@ -114,7 +114,7 @@ impl Torrent {
         let (orchestrator_tx, orchestrator_handle) = orchestrator.run().await;
 
         let _ = orchestrator_tx
-            .send(super::events::Event::AddPeers { peers: new_peers })
+            .send(Event::AddPeers { peers: new_peers })
             .await;
 
         // -> send peers to orchestrator

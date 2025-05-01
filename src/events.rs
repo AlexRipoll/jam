@@ -1,7 +1,9 @@
 use protocol::piece::Piece;
 use tokio::sync::mpsc;
 
-use super::{core::disk::DiskWriterStats, peer::Peer};
+use super::core::disk::DiskWriterStats;
+
+use crate::torrent::peer::Peer;
 
 // Enum defining all possible commands the Orchestrator can handle
 #[derive(Debug)]

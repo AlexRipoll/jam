@@ -9,7 +9,7 @@ use protocol::piece::Piece;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{debug, error, warn};
 
-use crate::torrent::events::Event;
+use crate::events::Event;
 
 // Commands that the DiskWriter can process
 #[derive(Debug)]
@@ -263,7 +263,7 @@ mod test {
     use tempfile::tempdir;
     use tokio::sync::mpsc;
 
-    use crate::torrent::{
+    use crate::{
         core::disk::{DiskWriterCommand, DiskWriterError},
         events::Event,
     };

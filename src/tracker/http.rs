@@ -189,8 +189,8 @@ mod test {
 
     use std::net::Ipv4Addr;
 
-    use crate::torrent::{
-        peer::{Ip, Peer},
+    use crate::{
+        torrent::peer::{Ip, Peer},
         tracker::{
             http::{HttpTracker, TrackerResponse},
             tracker::{Announce, Event, TrackerError},

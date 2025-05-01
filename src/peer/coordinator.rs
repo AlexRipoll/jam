@@ -11,7 +11,7 @@ use sha1::{Digest, Sha1};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{debug, error, trace};
 
-use crate::torrent::peers::{
+use crate::peer::{
     message::{MessageError, MessageId, PiecePayload, TransferPayload},
     session::PeerSessionEvent,
 };
@@ -864,18 +864,15 @@ impl Error for CoordinatorError {
 
 #[cfg(test)]
 mod test {
-    use std::{
-        collections::HashMap,
-        time::{Duration, Instant},
-    };
+    use std::time::{Duration, Instant};
 
-    use protocol::{error::ProtocolError, piece::Piece};
+    use protocol::piece::Piece;
     use sha1::{Digest, Sha1};
-    use tokio::{sync::mpsc, task::JoinHandle};
+    use tokio::sync::mpsc;
 
-    use crate::torrent::peers::{
+    use crate::peer::{
         coordinator::{is_valid_piece, Coordinator, CoordinatorCommand, CoordinatorConfig},
-        message::{MessageError, MessageId, PiecePayload, TransferPayload},
+        message::PiecePayload,
         session::PeerSessionEvent,
     };
 

@@ -8,7 +8,7 @@ use tokio::{sync::mpsc, task::JoinHandle, time::Instant};
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
-use crate::torrent::{events::Event, peer::Peer};
+use crate::{events::Event, torrent::peer::Peer};
 
 /// Commands that can be sent to the Monitor to control its behavior
 #[derive(Debug)]
@@ -494,10 +494,10 @@ mod test {
 
     use tokio::{sync::mpsc, time::Instant};
 
-    use crate::torrent::{
+    use crate::{
         core::monitor::{Monitor, MonitorConfig},
         events::Event,
-        peer::Peer,
+        torrent::peer::Peer,
     };
 
     // Helper function to create a test peer with a specific IP and port
