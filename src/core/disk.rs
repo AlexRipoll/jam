@@ -11,49 +11,93 @@ use tracing::{debug, error, warn};
 
 use crate::events::Event;
 
-// Commands that the DiskWriter can process
+/// Commands that the DiskWriter can process
+///
+/// These commands represent the complete API for interacting with the DiskWriter actor.
 #[derive(Debug)]
 pub enum DiskWriterCommand {
-    // Write a piece to disk
+    /// Write a piece to disk at the appropriate offset
     WritePiece { piece_index: u32, data: Vec<u8> },
-
-    // Flush all pending writes to disk
+    /// Flush all pending writes to disk
     Flush,
-
-    // Query the current write statistics
+    /// Query the current write statistics - response will be sent on the provided channel
     QueryStats(mpsc::Sender<DiskWriterStats>),
-
-    // Shutdown the disk writer
+    /// Shutdown the disk writer gracefully
     Shutdown,
 }
 
-// Statistics about the disk writer operations
-#[derive(Debug, Clone)]
+/// Statistics about the disk writer operations
+///
+/// These stats can be queried using the `QueryStats` command.
+#[derive(Debug, Clone, Default)]
 pub struct DiskWriterStats {
+    /// Total number of bytes written to disk
     pub bytes_written: u64,
+
+    /// Number of pieces successfully written
     pub pieces_written: u32,
+
+    /// Number of write errors encountered
     pub write_errors: u32,
 }
 
-// Main DiskWriter actor that handles writing pieces to disk
+// // Commands that the DiskWriter can process
+// #[derive(Debug)]
+// pub enum DiskWriterCommand {
+//     // Write a piece to disk
+//     WritePiece { piece_index: u32, data: Vec<u8> },
+//
+//     // Flush all pending writes to disk
+//     Flush,
+//
+//     // Query the current write statistics
+//     QueryStats(mpsc::Sender<DiskWriterStats>),
+//
+//     // Shutdown the disk writer
+//     Shutdown,
+// }
+//
+// // Statistics about the disk writer operations
+// #[derive(Debug, Clone)]
+// pub struct DiskWriterStats {
+//     pub bytes_written: u64,
+//     pub pieces_written: u32,
+//     pub write_errors: u32,
+// }
+
+/// Main DiskWriter actor that handles writing pieces to disk
+///
+/// Provides an asynchronous API for writing file pieces to disk in a non-blocking way.
+/// The DiskWriter maintains its own state including statistics and manages direct file I/O.
 #[derive(Debug)]
 pub struct DiskWriter {
-    // File information
+    /// Path where the file will be written
     absolute_file_path: PathBuf,
+    /// Total size of the target file in bytes
     file_size: u64,
+    /// Size of each piece in bytes
     piece_size: u64,
-
-    // Piece metadata
+    /// Map of all pieces (index -> metadata)
     pieces: HashMap<u32, Piece>,
-
-    // Statistics
+    /// Statistics about disk operations
     stats: DiskWriterStats,
-
-    // Communication channels
+    /// Channel for sending events back to the orchestrator
     event_tx: mpsc::Sender<Event>,
 }
 
 impl DiskWriter {
+    /// Create a new DiskWriter with the given parameters
+    ///
+    /// This initializes a new DiskWriter but doesn't start its processing loop yet.
+    /// Call `run()` to start processing commands.
+    ///
+    /// # Arguments
+    ///
+    /// * `absolute_file_path` - The path where the file will be written
+    /// * `file_size` - Total size of the target file in bytes
+    /// * `piece_size` - Size of each piece in bytes
+    /// * `pieces` - Map of all pieces (index -> metadata)
+    /// * `event_tx` - Channel for sending events back to the orchestrator
     pub fn new(
         absolute_file_path: PathBuf,
         file_size: u64,
@@ -74,20 +118,26 @@ impl DiskWriter {
             piece_size,
             pieces,
             event_tx,
-            stats: DiskWriterStats {
-                bytes_written: 0,
-                pieces_written: 0,
-                write_errors: 0,
-            },
+            stats: DiskWriterStats::default(),
         }
     }
 
+    /// Start the DiskWriter processing loop
+    ///
+    /// This runs the DiskWriter in a separate Tokio task and returns a channel
+    /// that can be used to send commands to it, along with the task handle.
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing:
+    /// * `mpsc::Sender<DiskWriterCommand>` - Channel for sending commands to the DiskWriter
+    /// * `JoinHandle<()>` - Handle for the task running the DiskWriter
     pub fn run(mut self) -> (mpsc::Sender<DiskWriterCommand>, JoinHandle<()>) {
         let (command_tx, mut command_rx) = mpsc::channel(128);
 
         let handle = tokio::spawn(async move {
             // Create the file once at startup
-            let file = match self.open_file() {
+            let file = match self.create_and_open_file() {
                 Ok(file) => file,
                 Err(e) => {
                     error!("Failed to open download file: {}", e);
@@ -96,17 +146,16 @@ impl DiskWriter {
             };
 
             // Use a BufWriter for more efficient I/O
-            let mut writer = BufWriter::new(file);
+            let mut writer = BufWriter::with_capacity(1024 * 64, file);
 
             // Process commands until channel closes or shutdown received
             while let Some(command) = command_rx.recv().await {
                 match command {
-                    // FIX: send piece instead of piece_index so there is no need to have the pieces hashmap field
                     DiskWriterCommand::WritePiece { piece_index, data } => {
                         debug!(
                             piece_index = piece_index,
                             size = %data.len(),
-                            "Writing to disk"
+                            "Writing piece to disk"
                         );
                         if let Err(e) = self.write_piece(&mut writer, piece_index, data).await {
                             error!("Failed to write piece {}: {}", piece_index, e);
@@ -118,13 +167,12 @@ impl DiskWriter {
                                 .send(Event::PieceCompleted { piece_index })
                                 .await
                             {
-                                // TODO: add piece index to queue and retry notifying the
-                                // orchestrator
                                 error!("Failed to send PieceCompleted event: {}", e);
                             }
                         }
                     }
                     DiskWriterCommand::Flush => {
+                        debug!("Flushing writes to disk");
                         if let Err(e) = writer.flush() {
                             error!("Failed to flush data to disk: {}", e);
                         }
@@ -135,7 +183,11 @@ impl DiskWriter {
                         }
                     }
                     DiskWriterCommand::Shutdown => {
-                        debug!(task = "DiskWriter", "Shutting down");
+                        debug!(task = "DiskWriter", "Shutting down gracefully");
+                        // Final flush before exit
+                        if let Err(e) = writer.flush() {
+                            error!("Failed to perform final flush during shutdown: {}", e);
+                        }
                         break;
                     }
                 }
@@ -143,14 +195,17 @@ impl DiskWriter {
 
             // Always flush at the end, regardless of how we exited the loop
             if let Err(e) = writer.flush() {
-                error!("Failed to flush data to disk: {}", e);
+                error!("Failed to flush data to disk during shutdown: {}", e);
             }
         });
 
         (command_tx, handle)
     }
 
-    fn open_file(&self) -> Result<File, DiskWriterError> {
+    /// Creates and opens the target file, pre-allocating space if necessary
+    ///
+    /// The file is created with a ".part" extension until it's complete.
+    fn create_and_open_file(&self) -> Result<File, DiskWriterError> {
         // Pre-allocate the file to its full size for better performance
         let file = OpenOptions::new()
             .read(true)
@@ -168,6 +223,17 @@ impl DiskWriter {
         Ok(file)
     }
 
+    /// Writes a piece to the appropriate offset in the file
+    ///
+    /// # Arguments
+    ///
+    /// * `writer` - The BufWriter wrapping the file
+    /// * `piece_index` - Index of the piece to write
+    /// * `data` - The piece data to write
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an error if the write failed
     async fn write_piece(
         &mut self,
         writer: &mut BufWriter<File>,
@@ -175,12 +241,10 @@ impl DiskWriter {
         data: Vec<u8>,
     ) -> Result<(), DiskWriterError> {
         // Look up the piece metadata
-        let piece = match self.pieces.get(&piece_index) {
-            Some(piece) => piece,
-            None => {
-                return Err(DiskWriterError::PieceNotFound(piece_index));
-            }
-        };
+        let piece = self
+            .pieces
+            .get(&piece_index)
+            .ok_or_else(|| DiskWriterError::PieceNotFound(piece_index))?;
 
         // Calculate the offset
         let offset = piece.offset(self.file_size, self.piece_size);
@@ -218,11 +282,16 @@ impl DiskWriter {
     }
 }
 
-// Error type for DiskWriter operations
+/// Error type for DiskWriter operations
+///
+/// Represents all possible error conditions that can occur during disk operations.
 #[derive(Debug)]
 pub enum DiskWriterError {
+    /// An I/O error occurred
     IoError(io::Error),
+    /// Attempted to write a piece that wasn't found in the piece map
     PieceNotFound(u32),
+    /// An error occurred when sending messages on a channel
     ChannelError(String),
 }
 
@@ -250,25 +319,28 @@ impl std::fmt::Display for DiskWriterError {
     }
 }
 
+impl std::error::Error for DiskWriterError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            DiskWriterError::IoError(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
+    use super::*;
+    use protocol::piece::Piece;
     use std::{
         collections::HashMap,
+        error::Error,
         fs,
         io::{Read, Seek, SeekFrom, Write},
         path::Path,
     };
-
-    use protocol::piece::Piece;
     use tempfile::tempdir;
     use tokio::sync::mpsc;
-
-    use crate::{
-        core::disk::{DiskWriterCommand, DiskWriterError},
-        events::Event,
-    };
-
-    use super::DiskWriter;
 
     #[test]
     fn test_disk_writer_new() {
@@ -312,7 +384,9 @@ mod test {
         let disk_writer = DiskWriter::new(absolute_file_path.clone(), 2048, 1024, pieces, event_tx);
 
         // Test opening the file
-        let file = disk_writer.open_file().expect("Failed to open file");
+        let file = disk_writer
+            .create_and_open_file()
+            .expect("Failed to open file");
 
         // Verify file size
         assert_eq!(file.metadata().unwrap().len(), 2048);
@@ -339,7 +413,9 @@ mod test {
             DiskWriter::new(absolute_file_path.clone(), 2048, 1024, pieces, event_tx);
 
         // Open the file
-        let file = disk_writer.open_file().expect("Failed to open file");
+        let file = disk_writer
+            .create_and_open_file()
+            .expect("Failed to open file");
         let mut writer = std::io::BufWriter::new(file);
 
         // Create test data
@@ -388,7 +464,9 @@ mod test {
             DiskWriter::new(absolute_file_path.clone(), 1024, 1024, pieces, event_tx);
 
         // Open the file
-        let file = disk_writer.open_file().expect("Failed to open file");
+        let file = disk_writer
+            .create_and_open_file()
+            .expect("Failed to open file");
         let mut writer = std::io::BufWriter::new(file);
 
         // Create test data
@@ -431,7 +509,9 @@ mod test {
         );
 
         // Open the file
-        let file = disk_writer.open_file().expect("Failed to open file");
+        let file = disk_writer
+            .create_and_open_file()
+            .expect("Failed to open file");
         let mut writer = std::io::BufWriter::new(file);
 
         // Create test data that exceeds file size
@@ -599,5 +679,24 @@ mod test {
 
         // Wait for the disk writer to finish
         join_handle.await.expect("Failed to join handle");
+    }
+
+    #[test]
+    fn test_error_display_and_source() {
+        // Test IoError
+        let io_err = io::Error::new(io::ErrorKind::Other, "test error");
+        let disk_err = DiskWriterError::IoError(io_err);
+        assert!(disk_err.to_string().contains("I/O error"));
+        assert!(disk_err.source().is_some());
+
+        // Test PieceNotFound
+        let piece_err = DiskWriterError::PieceNotFound(42);
+        assert!(piece_err.to_string().contains("42"));
+        assert!(piece_err.source().is_none());
+
+        // Test ChannelError
+        let channel_err = DiskWriterError::ChannelError("test error".to_string());
+        assert!(channel_err.to_string().contains("Channel error"));
+        assert!(channel_err.source().is_none());
     }
 }
