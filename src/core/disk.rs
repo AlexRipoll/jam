@@ -41,30 +41,6 @@ pub struct DiskWriterStats {
     pub write_errors: u32,
 }
 
-// // Commands that the DiskWriter can process
-// #[derive(Debug)]
-// pub enum DiskWriterCommand {
-//     // Write a piece to disk
-//     WritePiece { piece_index: u32, data: Vec<u8> },
-//
-//     // Flush all pending writes to disk
-//     Flush,
-//
-//     // Query the current write statistics
-//     QueryStats(mpsc::Sender<DiskWriterStats>),
-//
-//     // Shutdown the disk writer
-//     Shutdown,
-// }
-//
-// // Statistics about the disk writer operations
-// #[derive(Debug, Clone)]
-// pub struct DiskWriterStats {
-//     pub bytes_written: u64,
-//     pub pieces_written: u32,
-//     pub write_errors: u32,
-// }
-
 /// Main DiskWriter actor that handles writing pieces to disk
 ///
 /// Provides an asynchronous API for writing file pieces to disk in a non-blocking way.
