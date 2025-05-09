@@ -332,6 +332,17 @@ impl TrackerResponse {
 
         Err(TrackerError::EmptyPeers)
     }
+
+    pub fn interval(&self) -> Result<u32, TrackerError> {
+        match &self {
+            TrackerResponse::Announce { interval, .. } => {
+                return Ok(*interval);
+            }
+            _ => {}
+        }
+
+        Err(TrackerError::UnexpectedAction)
+    }
 }
 
 fn write_to_buffer<'a, T>(buf: &mut [u8], offset: usize, value: T)

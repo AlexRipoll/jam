@@ -104,6 +104,13 @@ impl TrackerResponse {
             TrackerResponse::Udp(response) => response.decode_peers(),
         }
     }
+
+    pub fn get_interval(&self) -> Result<Vec<Peer>, TrackerError> {
+        match self {
+            TrackerResponse::Http(response) => response.interval(),
+            TrackerResponse::Udp(response) => response.interval(),
+        }
+    }
 }
 
 pub trait TrackerProtocol {

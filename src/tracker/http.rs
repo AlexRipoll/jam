@@ -182,6 +182,19 @@ impl TrackerResponse {
 
         Err(TrackerError::EmptyPeers)
     }
+
+    pub fn interval(&self) -> Result<u32, TrackerError> {
+        match &self {
+            TrackerResponse::Success { interval, .. } => {
+                return Ok(*interval);
+            }
+            _ => {}
+        }
+
+        Err(TrackerError::ErrorResponse(
+            "should not reach here".to_string(),
+        ))
+    }
 }
 
 #[cfg(test)]
