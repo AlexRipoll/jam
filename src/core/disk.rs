@@ -32,10 +32,10 @@ pub enum DiskWriterCommand {
 #[derive(Debug, Clone, Default)]
 pub struct DiskWriterStats {
     /// Total number of bytes written to disk
-    pub bytes_written: u64,
+    pub downloaded_bytes: u64,
 
-    /// Number of pieces successfully written
-    pub pieces_written: u32,
+    /// Number of bytes sent to peers
+    pub uploaded_bytes: u64,
 
     /// Number of write errors encountered
     pub write_errors: u32,
@@ -244,8 +244,7 @@ impl DiskWriter {
         writer.write_all(&data)?;
 
         // Update stats
-        self.stats.bytes_written += data.len() as u64;
-        self.stats.pieces_written += 1;
+        self.stats.downloaded_bytes += data.len() as u64;
 
         debug!(
             piece_index = ?piece_index,
@@ -341,8 +340,7 @@ mod test {
         // Verify the initial state
         assert_eq!(disk_writer.file_size, 2048);
         assert_eq!(disk_writer.piece_size, 1024);
-        assert_eq!(disk_writer.stats.bytes_written, 0);
-        assert_eq!(disk_writer.stats.pieces_written, 0);
+        assert_eq!(disk_writer.stats.downloaded_bytes, 0);
         assert_eq!(disk_writer.stats.write_errors, 0);
     }
 
@@ -407,8 +405,7 @@ mod test {
         writer.flush().expect("Failed to flush writer");
 
         // Verify stats
-        assert_eq!(disk_writer.stats.bytes_written, 1024);
-        assert_eq!(disk_writer.stats.pieces_written, 1);
+        assert_eq!(disk_writer.stats.downloaded_bytes, 1024);
         assert_eq!(disk_writer.stats.write_errors, 0);
 
         // Verify file contents
@@ -579,8 +576,7 @@ mod test {
             .expect("Failed to send query stats command");
 
         let stats = stats_rx.recv().await.expect("Failed to receive stats");
-        assert_eq!(stats.bytes_written, 2048);
-        assert_eq!(stats.pieces_written, 2);
+        assert_eq!(stats.downloaded_bytes, 2048);
         assert_eq!(stats.write_errors, 0);
 
         // Shutdown the disk writer
