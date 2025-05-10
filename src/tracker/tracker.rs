@@ -105,7 +105,7 @@ impl TrackerResponse {
         }
     }
 
-    pub fn get_interval(&self) -> Result<Vec<Peer>, TrackerError> {
+    pub fn get_interval(&self) -> Result<u32, TrackerError> {
         match self {
             TrackerResponse::Http(response) => response.interval(),
             TrackerResponse::Udp(response) => response.interval(),

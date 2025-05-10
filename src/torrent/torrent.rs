@@ -7,13 +7,13 @@ use std::{
 use protocol::piece::Piece;
 use rand::{distributions::Alphanumeric, Rng};
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, error, info};
 
 use crate::{
     config::Config,
     core::orchestrator::{Orchestrator, OrchestratorConfig},
     events::Event,
-    tracker::tracker::{Announce, Tracker},
+    tracker::tracker::{Announce, Event as AnnounceEvent, Tracker},
 };
 
 use super::{metainfo::Metainfo, peer::Peer};
@@ -24,12 +24,65 @@ pub struct Torrent {
     pub metadata: Metadata,
     pub peers: HashSet<Peer>,
     status: Status,
+    download_state: DownloadState,
     config: Config,
+}
+
+#[derive(Debug, Default)]
+struct DownloadState {
+    downloaded_bytes: u64,
+    uploaded_bytes: u64,
+    left_bytes: u64,
+    progress_percentage: u64,
+}
+
+impl fmt::Display for DownloadState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Format byte counts to be more readable
+        let format_bytes = |bytes: u64| -> String {
+            const KB: u64 = 1024;
+            const MB: u64 = KB * 1024;
+            const GB: u64 = MB * 1024;
+
+            if bytes >= GB {
+                format!("{:.2} GB", bytes as f64 / GB as f64)
+            } else if bytes >= MB {
+                format!("{:.2} MB", bytes as f64 / MB as f64)
+            } else if bytes >= KB {
+                format!("{:.2} KB", bytes as f64 / KB as f64)
+            } else {
+                format!("{} B", bytes)
+            }
+        };
+
+        // Create a simple progress bar
+        let bar_width = 20;
+        let filled = (self.progress_percentage as usize * bar_width) / 100;
+        let empty = bar_width - filled;
+        let progress_bar = format!("[{}{}]", "#".repeat(filled), "-".repeat(empty));
+
+        // Format the complete output
+        write!(
+            f,
+            "{} {}% | ↓ {} | ↑ {} | left: {}",
+            progress_bar,
+            self.progress_percentage,
+            format_bytes(self.downloaded_bytes),
+            format_bytes(self.uploaded_bytes),
+            format_bytes(self.left_bytes)
+        )
+    }
 }
 
 #[derive(Debug)]
 pub enum TorrentCommand {
-    DownloadState { percent: usize },
+    /// Download state statistics
+    DownloadState {
+        downloaded_pieces: u64,
+        uploaded_pieces: u64,
+        left_pieces: u64,
+        progress_percentage: u64,
+    },
     DownloadCompleted,
 }
 
@@ -44,12 +97,13 @@ impl Torrent {
             metadata: Metadata::new(info_hash, metainfo),
             peers: HashSet::new(),
             status: Status::Starting,
+            download_state: DownloadState::default(),
             config,
         }
     }
 
     pub async fn run(&mut self) {
-        let (cmd_tx, mut cmd_rx) = mpsc::channel::<TorrentCommand>(100);
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<TorrentCommand>(128);
 
         let mut announces_queue: VecDeque<Vec<String>> = VecDeque::new();
         // extract either the announce_list or announce
@@ -60,10 +114,11 @@ impl Torrent {
         }
 
         let announces = announces_queue.pop_front().unwrap();
+        // FIX:
         let mut tracker = Tracker::new(&announces[0]);
         let port = 6889;
         let numwant = 200;
-        let announce_data = Announce::new(
+        let mut announce_data = Announce::new(
             self.metadata.info_hash,
             self.peer_id,
             port,
@@ -74,7 +129,14 @@ impl Torrent {
             .request_announce(&announces[0], &announce_data)
             .await
             .unwrap();
+        // FIX: should get the response parsed as one unified struct
         let peers = response.get_peers().unwrap();
+        let announce_interval = response.get_interval().unwrap();
+
+        let state_interval: u64 = 5;
+
+        // TODO: Inform the tracker that the client is gracefully stopping its participation in this torrent.
+        // TODO: Handling Multiple Trackers (Tracker Tiers) -> Improve reliability by using backup trackers if the primary one fails.
 
         let new_peers: Vec<Peer> = peers
             .clone()
@@ -107,25 +169,107 @@ impl Torrent {
             cmd_tx.clone(),
         );
 
-        // -> send download event orchestrator (start, halt)
-        // -> request download state to orchestrator
-        // <- receive download completion from orchestrator
-        // -> send message to tracker every 30-60 seconds or when start or complete event
         let (orchestrator_tx, orchestrator_handle) = orchestrator.run().await;
 
         let _ = orchestrator_tx
             .send(Event::AddPeers { peers: new_peers })
             .await;
 
-        // -> send peers to orchestrator
-        // <- wait until receiving completion event from orchestrator
-        while let Some(event) = cmd_rx.recv().await {
-            match event {
-                TorrentCommand::DownloadState { percent } => debug!("{percent}%"),
-                TorrentCommand::DownloadCompleted => {
-                    orchestrator_handle.abort();
-                    break;
-                }
+        // Create an interval for periodic tracker updates
+        // The interval value comes from the tracker's response
+        let mut update_interval =
+            tokio::time::interval(tokio::time::Duration::from_secs(announce_interval as u64));
+        let mut state_check_interval =
+            tokio::time::interval(tokio::time::Duration::from_secs(state_interval as u64));
+
+        // update status to `downloading``
+        self.status = Status::Downloading;
+        loop {
+            tokio::select! {
+                // Handle commands from the orchestrator
+                Some(event) = cmd_rx.recv() => {
+                    match event {
+                        TorrentCommand::DownloadState { downloaded_pieces, uploaded_pieces, left_pieces, progress_percentage } => {
+                            debug!("Download progress: {progress_percentage}%");
+                            self.download_state.downloaded_bytes = downloaded_pieces.saturating_mul(self.metadata.piece_length);
+                            self.download_state.uploaded_bytes = uploaded_pieces.saturating_mul(self.metadata.piece_length);
+                            self.download_state.left_bytes = left_pieces.saturating_mul(self.metadata.piece_length);
+                            self.download_state.progress_percentage = progress_percentage;
+                            info!("Download state: {}", self.download_state);
+                        },
+                        TorrentCommand::DownloadCompleted => {
+                            debug!("Download completed!");
+                            self.download_state.downloaded_bytes = self.metadata.total_length;
+                            self.download_state.left_bytes = 0;
+                            self.download_state.progress_percentage = 100;
+
+                            // Send "completed" event to tracker
+                            announce_data.event = AnnounceEvent::Completed;
+                            announce_data.downloaded = self.download_state.downloaded_bytes;
+                            announce_data.left = self.download_state.left_bytes;
+
+                            info!("Download state: {}", self.download_state);
+
+                            // Fire and forget - we don't need to wait for the response
+                            tokio::spawn(async move {
+                                if let Err(e) = tracker.request_announce(&announces[0], &announce_data).await {
+                                    error!("Failed to send completion event to tracker: {}", e);
+                                }
+                            });
+
+                            // Abort the orchestrator task
+                            orchestrator_handle.abort();
+                            break;
+                        }
+                    }
+                },
+
+                // Periodic tracker updates
+                _ = update_interval.tick() => {
+                    // Send update (no specific event type for regular updates)
+                    debug!("Sending periodic update to tracker. Progress: {}%, Left: {} bytes", self.download_state.progress_percentage, self.download_state.left_bytes);
+                    announce_data.uploaded = self.download_state.uploaded_bytes;
+                    announce_data.downloaded = self.download_state.downloaded_bytes;
+                    announce_data.left = self.download_state.left_bytes;
+
+                    match tracker.request_announce(&announces[0], &announce_data).await {
+                        Ok(response) => {
+                            // Process any new peers
+                            if let Ok(new_peers_list) = response.get_peers() {
+                                let filtered_peers: Vec<Peer> = new_peers_list
+                                    .into_iter()
+                                    .filter(|item| !self.peers.contains(item))
+                                    .collect();
+
+                                if !filtered_peers.is_empty() {
+                                    debug!("Received {} new peers from tracker", filtered_peers.len());
+                                    self.peers.extend(filtered_peers.clone());
+                                    let _ = orchestrator_tx
+                                        .send(Event::AddPeers { peers: filtered_peers })
+                                        .await;
+                                }
+                            }
+
+                            // Update interval if the tracker suggests a new one
+                            if let Ok(new_interval) = response.get_interval() {
+                                if new_interval != announce_interval {
+                                    debug!("Tracker suggested new update interval: {new_interval} seconds");
+                                    update_interval = tokio::time::interval(tokio::time::Duration::from_secs(new_interval as u64));
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            debug!("Failed to send periodic update to tracker: {}", e);
+                            // TODO: Maybe try alternate trackers if this one fails
+                        }
+                    }
+                },
+                // Periodic state check
+                _ = state_check_interval.tick() => {
+                    let _ = orchestrator_tx
+                        .send(Event::QueryDownloadState { response_channel: cmd_tx.clone() })
+                        .await;
+                },
             }
         }
     }

@@ -131,8 +131,8 @@ pub enum StatusEvent {
     /// Download has completed
     DownloadCompleted,
     /// Request for disk statistics
-    DiskStats {
-        response_channel: mpsc::Sender<DiskWriterStats>,
+    QueryDownloadState {
+        response_channel: mpsc::Sender<TorrentCommand>,
     },
 }
 
@@ -361,14 +361,14 @@ impl Orchestrator {
 
                     // Status Events
                     Event::DownloadCompleted => {
-                        self.handle_status_event(StatusEvent::DownloadCompleted, &disk_tx)
+                        self.handle_status_event(StatusEvent::DownloadCompleted, &sync_tx)
                             .await;
                         break;
                     }
-                    Event::DiskStats { response_channel } => {
+                    Event::QueryDownloadState { response_channel } => {
                         self.handle_status_event(
-                            StatusEvent::DiskStats { response_channel },
-                            &disk_tx,
+                            StatusEvent::QueryDownloadState { response_channel },
+                            &sync_tx,
                         )
                         .await;
                     }
@@ -721,7 +721,7 @@ impl Orchestrator {
     async fn handle_status_event(
         &self,
         event: StatusEvent,
-        disk_tx: &mpsc::Sender<DiskWriterCommand>,
+        sync_tx: &mpsc::Sender<SynchronizerCommand>,
     ) {
         match event {
             StatusEvent::DownloadCompleted => {
@@ -734,13 +734,13 @@ impl Orchestrator {
                     error!(error = %e, "Failed to notify torrent of download completion");
                 }
             }
-            StatusEvent::DiskStats { response_channel } => {
-                debug!("Querying disk statistics");
-                if let Err(e) = disk_tx
-                    .send(DiskWriterCommand::QueryStats(response_channel))
+            StatusEvent::QueryDownloadState { response_channel } => {
+                debug!("Querying download statistics");
+                if let Err(e) = sync_tx
+                    .send(SynchronizerCommand::QueryDownloadState(response_channel))
                     .await
                 {
-                    error!(error = %e, "Failed to query disk statistics");
+                    error!(error = %e, "Failed to query download statistics");
                 }
             }
         }

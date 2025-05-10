@@ -3,7 +3,7 @@ use tokio::sync::mpsc;
 
 use super::core::disk::DiskWriterStats;
 
-use crate::torrent::peer::Peer;
+use crate::torrent::{peer::Peer, torrent::TorrentCommand};
 
 // Enum defining all possible commands the Orchestrator can handle
 #[derive(Debug)]
@@ -72,7 +72,7 @@ pub enum Event {
     DownloadCompleted,
 
     // Query
-    DiskStats {
-        response_channel: mpsc::Sender<DiskWriterStats>,
+    QueryDownloadState {
+        response_channel: mpsc::Sender<TorrentCommand>,
     },
 }

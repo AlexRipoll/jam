@@ -9,7 +9,7 @@ use protocol::{bitfield::Bitfield, piece::Piece};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{debug, error, info};
 
-use crate::events::Event;
+use crate::{events::Event, torrent::torrent::TorrentCommand};
 
 /// The Synchronizer coordinates piece downloads across multiple peer connections,
 /// managing piece assignment, tracking download progress, and handling the overall
@@ -107,6 +107,7 @@ pub enum SynchronizerCommand {
     },
 
     // Query commands (with response channels)
+    QueryDownloadState(mpsc::Sender<TorrentCommand>),
     /// Query the current download progress percentage
     QueryProgress(mpsc::Sender<u32>),
     /// Query whether the download is complete
@@ -358,6 +359,20 @@ impl Synchronizer {
                 let has_active = self.has_active_sessions();
                 response_tx.send(has_active).await?;
             }
+            SynchronizerCommand::QueryDownloadState(response_tx) => {
+                let downloaded_pieces = self.downloaded_pieces_count() as u64;
+                let left_pieces = self.bitfield.total_pieces as u64 - downloaded_pieces;
+                let progress_percentage = self.download_progress_percent() as u64;
+
+                response_tx
+                    .send(TorrentCommand::DownloadState {
+                        downloaded_pieces,
+                        uploaded_pieces: 0,
+                        left_pieces,
+                        progress_percentage,
+                    })
+                    .await?;
+            }
         }
 
         Ok(())
@@ -538,10 +553,7 @@ impl Synchronizer {
             self.remove_session(&session_id);
         }
 
-        info!("Download progress: {}%", self.download_progress_percent());
-
         if self.is_completed() {
-            info!("Download completed");
             self.event_tx.send(Event::DownloadCompleted).await?;
         }
 
@@ -974,6 +986,12 @@ impl From<mpsc::error::SendError<bool>> for SynchronizerError {
     }
 }
 
+impl From<mpsc::error::SendError<TorrentCommand>> for SynchronizerError {
+    fn from(err: mpsc::error::SendError<TorrentCommand>) -> Self {
+        SynchronizerError::QueryTxError(format!("{}", err))
+    }
+}
+
 impl std::error::Error for SynchronizerError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
@@ -989,10 +1007,7 @@ impl std::error::Error for SynchronizerError {
 mod tests {
     use super::*;
     use protocol::{bitfield::Bitfield, piece::Piece};
-    use std::{
-        collections::{HashMap, HashSet},
-        sync::Arc,
-    };
+    use std::collections::{HashMap, HashSet};
     use tokio::{sync::mpsc, test as async_test};
 
     // Helper function to create test pieces map
