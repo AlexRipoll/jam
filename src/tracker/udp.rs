@@ -15,8 +15,13 @@ use crate::torrent::peer::{Ip, Peer};
 
 use super::tracker::{Announce, TrackerError, TrackerProtocol};
 
+/// UDP protocol identifier for BitTorrent trackers
 const UDP_PROTOCOL_ID: u64 = 0x41727101980;
+/// Default timeout for UDP tracker requests in seconds
+const DEFAULT_TIMEOUT_SECS: u64 = 10;
 
+/// UDP tracker action codes
+#[derive(Debug, Clone, Copy)]
 enum Action {
     Connect = 0,
     Announce = 1,
@@ -44,76 +49,111 @@ impl Action {
     }
 }
 
+/// Implementation of the UDP tracker protocol
 #[derive(Debug)]
 pub struct UdpTracker {
     connection_id: u64,
+    timeout: Duration,
 }
 
 impl UdpTracker {
+    /// Creates a new UDP tracker client
     pub fn new() -> UdpTracker {
         UdpTracker {
             connection_id: UDP_PROTOCOL_ID,
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
         }
     }
 
-    fn build_connect_packet(&self, tx_id: u32) -> [u8; 16] {
-        let mut buf = [0u8; 16];
-        write_to_buffer(&mut buf, 0, UDP_PROTOCOL_ID);
-        write_to_buffer(&mut buf, 8, Action::Connect as u32);
-        write_to_buffer(&mut buf, 12, tx_id);
+    /// Sets the timeout for UDP tracker requests
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Creates a connect request packet
+    fn build_connect_packet(&self, tx_id: u32) -> Vec<u8> {
+        let mut buf = vec![0u8; 16];
+
+        // Connection ID (64 bits)
+        buf[0..8].copy_from_slice(&UDP_PROTOCOL_ID.to_be_bytes());
+        // Action (32 bits): connect = 0
+        buf[8..12].copy_from_slice(&(Action::Connect as u32).to_be_bytes());
+        // Transaction ID (32 bits)
+        buf[12..16].copy_from_slice(&tx_id.to_be_bytes());
 
         buf
     }
 
-    fn build_announce_packet(&self, req: &Announce, tx_id: u32) -> [u8; 98] {
-        let mut buf = [0u8; 98];
-        write_to_buffer(&mut buf, 0, self.connection_id);
-        write_to_buffer(&mut buf, 8, Action::Announce as u32);
-        write_to_buffer(&mut buf, 12, tx_id);
-        write_to_buffer(&mut buf, 16, req.info_hash.as_ref());
-        write_to_buffer(&mut buf, 36, req.peer_id.as_ref());
-        write_to_buffer(&mut buf, 56, req.downloaded);
-        write_to_buffer(&mut buf, 64, req.left);
-        write_to_buffer(&mut buf, 72, req.uploaded);
-        write_to_buffer(&mut buf, 80, req.event as u32);
-        let ip_addr = req
-            .ip
-            .unwrap_or(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)))
-            .to_string();
-        write_to_buffer(&mut buf, 84, ip_addr.parse::<u32>().unwrap());
-        write_to_buffer(
-            &mut buf,
-            88,
-            req.key.unwrap_or_else(|| rand::thread_rng().gen()),
-        );
-        write_to_buffer(&mut buf, 92, req.num_want.unwrap_or(-1));
-        write_to_buffer(&mut buf, 96, req.port);
+    /// Creates an announce request packet
+    fn build_announce_packet(&self, req: &Announce, tx_id: u32) -> Vec<u8> {
+        let mut buf = vec![0u8; 98];
+
+        // Connection ID (64 bits)
+        buf[0..8].copy_from_slice(&self.connection_id.to_be_bytes());
+        // Action (32 bits): announce = 1
+        buf[8..12].copy_from_slice(&(Action::Announce as u32).to_be_bytes());
+        // Transaction ID (32 bits)
+        buf[12..16].copy_from_slice(&tx_id.to_be_bytes());
+        // Info hash (20 bytes)
+        buf[16..36].copy_from_slice(&req.info_hash);
+        // Peer ID (20 bytes)
+        buf[36..56].copy_from_slice(&req.peer_id);
+        // Downloaded (64 bits)
+        buf[56..64].copy_from_slice(&req.downloaded.to_be_bytes());
+        // Left (64 bits)
+        buf[64..72].copy_from_slice(&req.left.to_be_bytes());
+        // Uploaded (64 bits)
+        buf[72..80].copy_from_slice(&req.uploaded.to_be_bytes());
+        // Event (32 bits)
+        buf[80..84].copy_from_slice(&(req.event as u32).to_be_bytes());
+
+        // IP address (32 bits) - 0 means the tracker uses the sender's IP
+        let ip_bytes = match req.ip {
+            Some(IpAddr::V4(ipv4)) => ipv4.octets(),
+            _ => [0, 0, 0, 0],
+        };
+        let ip_u32 = u32::from_be_bytes(ip_bytes);
+        buf[84..88].copy_from_slice(&ip_u32.to_be_bytes());
+
+        // Key (32 bits) - Used to identify the client
+        let key = req.key.unwrap_or_else(|| rand::thread_rng().gen());
+        buf[88..92].copy_from_slice(&key.to_be_bytes());
+
+        // Number of peers wanted (32 bits) - -1 for default
+        let num_want = req.num_want.unwrap_or(-1);
+        buf[92..96].copy_from_slice(&num_want.to_be_bytes());
+
+        // Port (16 bits)
+        buf[96..98].copy_from_slice(&req.port.to_be_bytes());
 
         buf
     }
 
+    /// Receives and processes a tracker response
     async fn receive_response(
         &self,
         socket: &UdpSocket,
         expected_tx_id: u32,
     ) -> Result<TrackerResponse, TrackerError> {
-        let mut buf = [0; 1024];
-        let timeout_duration = Duration::from_secs(5);
+        let mut buf = [0; 1024]; // Large enough for any typical response
 
-        let result = timeout(timeout_duration, socket.recv_from(&mut buf)).await;
+        let result = timeout(self.timeout, socket.recv_from(&mut buf)).await;
+
         match result {
             Ok(Ok((size, _))) => {
-                let resp = TrackerResponse::from_bencoded(&buf[..size]).await?;
-                if let TrackerResponse::Error {
-                    transaction_id,
-                    message,
-                } = resp
-                {
-                    if transaction_id != expected_tx_id {
+                let resp = TrackerResponse::parse_from_bytes(&buf[..size]).await?;
+
+                // Validate transaction ID
+                if let Some(tx_id) = resp.transaction_id() {
+                    if tx_id != expected_tx_id {
                         return Err(TrackerError::InvalidTransactionId);
                     }
+                }
 
-                    return Err(TrackerError::ErrorResponse(message));
+                // Check for error messages
+                if let TrackerResponse::Error { message, .. } = &resp {
+                    return Err(TrackerError::ErrorResponse(message.clone()));
                 }
 
                 Ok(resp)
@@ -132,76 +172,67 @@ impl TrackerProtocol for UdpTracker {
         announce: &str,
         announce_data: &Announce,
     ) -> Result<Self::Response, TrackerError> {
-        // Bind the socket to any available ip address
-        let socket = UdpSocket::bind(format!("0.0.0.0:{}", announce_data.port))
+        // Bind the socket to any available port
+        let socket = UdpSocket::bind("0.0.0.0:0")
             .await
-            .map_err(|e| TrackerError::UdpBindingError(e))?;
+            .map_err(TrackerError::UdpBindingError)?;
 
-        let tracker_addresses = lookup_host(announce)
-            .await
-            .map_err(|e| TrackerError::IoError(e))?;
+        // Resolve tracker hostname to IP addresses
+        let mut tracker_addresses = lookup_host(announce).await.map_err(TrackerError::IoError)?;
 
-        // Connect to one of the tracker's ip addresses
+        // Try to connect to one of the tracker's IP addresses
         let mut connected = false;
-        for ip_addr in tracker_addresses {
+        while let Some(ip_addr) = tracker_addresses.next() {
             if socket.connect(ip_addr).await.is_ok() {
                 connected = true;
                 break;
             }
         }
+
         if !connected {
             return Err(TrackerError::ConnectionFailed);
         }
 
-        // Generate a random transaction ID for connect request
+        // Step 1: Connection handshake
+
+        // Generate a random transaction ID
         let tx_id = rand::thread_rng().gen::<u32>();
 
-        // Send the connect packet to the tracker
+        // Send the connect packet
         let connect_packet = self.build_connect_packet(tx_id);
         socket
             .send(&connect_packet)
             .await
-            .map_err(|e| TrackerError::IoError(e))?;
+            .map_err(TrackerError::IoError)?;
 
         // Receive and parse the connection response
         let connect_resp = self.receive_response(&socket, tx_id).await?;
-        match connect_resp {
-            TrackerResponse::Connect {
-                transaction_id,
-                connection_id,
-            } => {
-                if transaction_id != tx_id {
-                    return Err(TrackerError::InvalidTransactionId);
-                }
-                self.connection_id = connection_id;
-            }
-            _ => return Err(TrackerError::UnexpectedAction),
+
+        // Extract connection ID for subsequent requests
+        if let TrackerResponse::Connect { connection_id, .. } = connect_resp {
+            self.connection_id = connection_id;
+        } else {
+            return Err(TrackerError::UnexpectedAction);
         }
 
-        // Generate a random transaction ID for announce request
+        // Step 2: Announce request
+
+        // Generate a new transaction ID for the announce
         let tx_id = rand::thread_rng().gen::<u32>();
 
-        // Send the announce packet to the tracker
+        // Send the announce packet
         let announce_packet = self.build_announce_packet(announce_data, tx_id);
         socket
             .send(&announce_packet)
             .await
-            .map_err(|e| TrackerError::IoError(e))?;
+            .map_err(TrackerError::IoError)?;
 
         // Receive and parse the announce response
         let announce_resp = self.receive_response(&socket, tx_id).await?;
-        match announce_resp {
-            TrackerResponse::Announce { transaction_id, .. } => {
-                if transaction_id != tx_id {
-                    return Err(TrackerError::InvalidTransactionId);
-                }
 
-                // Decode and return the list of peers
-                return Ok(announce_resp);
-            }
-            _ => {
-                return Err(TrackerError::UnexpectedAction);
-            }
+        match announce_resp {
+            TrackerResponse::Announce { .. } => Ok(announce_resp),
+            _ => Err(TrackerError::UnexpectedAction),
         }
     }
 }
@@ -217,8 +248,7 @@ pub enum TrackerResponse {
         interval: u32,
         leechers: u32,
         seeders: u32,
-        ip_address: Vec<u32>,
-        tcp_port: Vec<u16>,
+        peers: Vec<(u32, u16)>, // (ip, port) pairs
     },
     Error {
         transaction_id: u32,
@@ -227,26 +257,38 @@ pub enum TrackerResponse {
 }
 
 impl TrackerResponse {
-    pub async fn from_bencoded(buf: &[u8]) -> Result<TrackerResponse, TrackerError> {
-        let action = Action::from_bytes(&buf)?;
-
-        match action {
-            Action::Connect => TrackerResponse::decode_connect_packet(buf).await,
-            Action::Announce => TrackerResponse::decode_announce_packet(buf).await,
-            Action::Scrape => {
-                unimplemented!()
-            }
-            Action::Error => TrackerResponse::decode_error_packet(buf).await,
+    /// Returns the transaction ID from the response
+    pub fn transaction_id(&self) -> Option<u32> {
+        match self {
+            TrackerResponse::Connect { transaction_id, .. } => Some(*transaction_id),
+            TrackerResponse::Announce { transaction_id, .. } => Some(*transaction_id),
+            TrackerResponse::Error { transaction_id, .. } => Some(*transaction_id),
         }
     }
 
-    async fn decode_connect_packet(buf: &[u8]) -> Result<TrackerResponse, TrackerError> {
+    pub async fn parse_from_bytes(buf: &[u8]) -> Result<TrackerResponse, TrackerError> {
+        if buf.len() < 4 {
+            return Err(TrackerError::InvalidPacketSize);
+        }
+
+        let action = Action::from_bytes(buf)?;
+
+        match action {
+            Action::Connect => Self::parse_connect_packet(buf).await,
+            Action::Announce => Self::parse_announce_packet(buf).await,
+            Action::Scrape => Err(TrackerError::UnexpectedAction), // Not implemented
+            Action::Error => Self::parse_error_packet(buf).await,
+        }
+    }
+
+    async fn parse_connect_packet(buf: &[u8]) -> Result<TrackerResponse, TrackerError> {
         if buf.len() < 16 {
             return Err(TrackerError::InvalidPacketSize);
         }
-        let mut response = Cursor::new(&buf[4..]);
-        let transaction_id = response.read_u32().await.unwrap();
-        let connection_id = response.read_u64().await.unwrap();
+
+        let mut cursor = Cursor::new(&buf[4..]); // Skip action code
+        let transaction_id = read_u32_be(&mut cursor).await?;
+        let connection_id = read_u64_be(&mut cursor).await?;
 
         Ok(TrackerResponse::Connect {
             transaction_id,
@@ -254,29 +296,23 @@ impl TrackerResponse {
         })
     }
 
-    async fn decode_announce_packet(buf: &[u8]) -> Result<TrackerResponse, TrackerError> {
+    async fn parse_announce_packet(buf: &[u8]) -> Result<TrackerResponse, TrackerError> {
         if buf.len() < 20 {
             return Err(TrackerError::InvalidPacketSize);
         }
 
-        let mut cursor = Cursor::new(&buf[4..]);
-        let transaction_id = cursor.read_u32().await.unwrap();
+        let mut cursor = Cursor::new(&buf[4..]); // Skip action code
+        let transaction_id = read_u32_be(&mut cursor).await?;
+        let interval = read_u32_be(&mut cursor).await?;
+        let leechers = read_u32_be(&mut cursor).await?;
+        let seeders = read_u32_be(&mut cursor).await?;
 
-        let interval = cursor.read_u32().await.unwrap();
-        let leechers = cursor.read_u32().await.unwrap();
-        let seeders = cursor.read_u32().await.unwrap();
-
-        let mut ip_address = Vec::new();
-        let mut tcp_port = Vec::new();
-
-        while (cursor.position() as usize) + 6 <= buf.len() {
-            // Read IPv4 address (4 bytes)
-            let ip = cursor.read_u32().await.unwrap();
-            ip_address.push(ip);
-
-            // Read TCP port (2 bytes)
-            let port = cursor.read_u16().await.unwrap();
-            tcp_port.push(port);
+        // Remaining data is peer info
+        let mut peers = Vec::new();
+        while cursor.position() as usize + 6 <= buf.len() {
+            let ip = read_u32_be(&mut cursor).await?;
+            let port = read_u16_be(&mut cursor).await?;
+            peers.push((ip, port));
         }
 
         Ok(TrackerResponse::Announce {
@@ -284,17 +320,22 @@ impl TrackerResponse {
             interval,
             leechers,
             seeders,
-            ip_address,
-            tcp_port,
+            peers,
         })
     }
 
-    async fn decode_error_packet(buf: &[u8]) -> Result<TrackerResponse, TrackerError> {
-        let mut cursor = Cursor::new(&buf[4..]);
-        let transaction_id = cursor.read_u32().await.unwrap();
+    async fn parse_error_packet(buf: &[u8]) -> Result<TrackerResponse, TrackerError> {
+        if buf.len() < 8 {
+            return Err(TrackerError::InvalidPacketSize);
+        }
 
+        let mut cursor = Cursor::new(&buf[4..]); // Skip action code
+        let transaction_id = read_u32_be(&mut cursor).await?;
+
+        // Rest of the bytes are the error message
+        let message_bytes = &buf[8..];
         let message =
-            String::from_utf8(buf[8..].to_vec()).map_err(|_| TrackerError::InvalidUTF8)?;
+            String::from_utf8(message_bytes.to_vec()).map_err(|_| TrackerError::InvalidUTF8)?;
 
         Ok(TrackerResponse::Error {
             transaction_id,
@@ -302,117 +343,65 @@ impl TrackerResponse {
         })
     }
 
+    /// Convert the response to a list of peers
     pub fn decode_peers(&self) -> Result<Vec<Peer>, TrackerError> {
-        match &self {
-            TrackerResponse::Announce {
-                ip_address,
-                tcp_port,
-                ..
-            } => {
-                if !ip_address.is_empty() && !tcp_port.is_empty() {
-                    if ip_address.len() != tcp_port.len() {
-                        return Err(TrackerError::InvalidPeersFormat);
-                    }
-
-                    let peers: Vec<Peer> = ip_address
-                        .iter()
-                        .zip(tcp_port.iter())
-                        .map(|(&ip_addr, &port)| Peer {
-                            peer_id: None,
-                            ip: Ip::IpV4(Ipv4Addr::from(ip_addr)),
-                            port,
-                        })
-                        .collect();
-
-                    return Ok(peers);
+        match self {
+            TrackerResponse::Announce { peers, .. } => {
+                if peers.is_empty() {
+                    return Err(TrackerError::EmptyPeers);
                 }
-            }
-            _ => {}
-        }
 
-        Err(TrackerError::EmptyPeers)
+                let peers_list = peers
+                    .iter()
+                    .map(|(ip, port)| Peer {
+                        peer_id: None,
+                        ip: Ip::IpV4(Ipv4Addr::from(*ip)),
+                        port: *port,
+                    })
+                    .collect();
+
+                Ok(peers_list)
+            }
+            _ => Err(TrackerError::EmptyPeers),
+        }
     }
 
+    /// Get the announce interval from the response
     pub fn interval(&self) -> Result<u32, TrackerError> {
-        match &self {
-            TrackerResponse::Announce { interval, .. } => {
-                return Ok(*interval);
-            }
-            _ => {}
-        }
-
-        Err(TrackerError::UnexpectedAction)
-    }
-}
-
-fn write_to_buffer<'a, T>(buf: &mut [u8], offset: usize, value: T)
-where
-    T: Into<Writeable<'a>>,
-{
-    match value.into() {
-        Writeable::U64(v) => buf[offset..offset + 8].copy_from_slice(&v.to_be_bytes()),
-        Writeable::U32(v) => buf[offset..offset + 4].copy_from_slice(&v.to_be_bytes()),
-        Writeable::U16(v) => buf[offset..offset + 2].copy_from_slice(&v.to_be_bytes()),
-        Writeable::I32(v) => buf[offset..offset + 4].copy_from_slice(&v.to_be_bytes()),
-        Writeable::Bytes(b) => {
-            let end = offset + b.len();
-            if end > buf.len() {
-                panic!("Byte slice too large for buffer at offset {offset}");
-            }
-            buf[offset..end].copy_from_slice(b);
-        }
-        Writeable::Str(s) => {
-            let bytes = s.as_bytes();
-            let end = offset + bytes.len();
-            if end > buf.len() {
-                panic!("String too large for buffer at offset {offset}");
-            }
-            buf[offset..end].copy_from_slice(bytes);
+        match self {
+            TrackerResponse::Announce { interval, .. } => Ok(*interval),
+            _ => Err(TrackerError::UnexpectedAction),
         }
     }
 }
 
-enum Writeable<'a> {
-    U64(u64),
-    U32(u32),
-    U16(u16),
-    I32(i32),
-    Bytes(&'a [u8]),
-    Str(&'a str),
+// Helper functions to read binary data
+async fn read_u32_be(cursor: &mut Cursor<&[u8]>) -> Result<u32, TrackerError> {
+    let mut buf = [0; 4];
+    cursor
+        .read_exact(&mut buf)
+        .await
+        .map_err(|_| TrackerError::InvalidPacketSize)?;
+
+    Ok(u32::from_be_bytes(buf))
 }
 
-impl From<u64> for Writeable<'_> {
-    fn from(value: u64) -> Self {
-        Writeable::U64(value)
-    }
+async fn read_u64_be(cursor: &mut Cursor<&[u8]>) -> Result<u64, TrackerError> {
+    let mut buf = [0; 8];
+    cursor
+        .read_exact(&mut buf)
+        .await
+        .map_err(|_| TrackerError::InvalidPacketSize)?;
+
+    Ok(u64::from_be_bytes(buf))
 }
 
-impl From<u32> for Writeable<'_> {
-    fn from(value: u32) -> Self {
-        Writeable::U32(value)
-    }
-}
+async fn read_u16_be(cursor: &mut Cursor<&[u8]>) -> Result<u16, TrackerError> {
+    let mut buf = [0; 2];
+    cursor
+        .read_exact(&mut buf)
+        .await
+        .map_err(|_| TrackerError::InvalidPacketSize)?;
 
-impl From<u16> for Writeable<'_> {
-    fn from(value: u16) -> Self {
-        Writeable::U16(value)
-    }
-}
-
-impl From<i32> for Writeable<'_> {
-    fn from(value: i32) -> Self {
-        Writeable::I32(value)
-    }
-}
-
-impl<'a> From<&'a [u8]> for Writeable<'a> {
-    fn from(value: &'a [u8]) -> Self {
-        Writeable::Bytes(value)
-    }
-}
-
-impl<'a> From<&'a str> for Writeable<'a> {
-    fn from(value: &'a str) -> Self {
-        Writeable::Str(value)
-    }
+    Ok(u16::from_be_bytes(buf))
 }
