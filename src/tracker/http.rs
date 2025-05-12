@@ -1,6 +1,7 @@
+use reqwest::Client;
 use serde_bencode::de;
-use std::collections::HashMap;
 use std::net::Ipv4Addr;
+use std::{collections::HashMap, time::Duration};
 
 use percent_encoding::{percent_encode, NON_ALPHANUMERIC};
 use url::Url;
@@ -9,48 +10,92 @@ use crate::torrent::peer::{Ip, Peer};
 
 use super::tracker::{Announce, TrackerError, TrackerProtocol};
 
-pub struct HttpTracker {}
+/// Default timeout for HTTP tracker requests in seconds
+const DEFAULT_TIMEOUT_SECS: u64 = 10;
+
+/// HTTP tracker implementation
+pub struct HttpTracker {
+    client: Client,
+}
 
 impl HttpTracker {
-    pub fn new() -> HttpTracker {
-        HttpTracker {}
+    /// Creates a new HTTP tracker client
+    pub fn new() -> Self {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+            .build()
+            .unwrap_or_default();
+
+        Self { client }
     }
 
-    fn build_announce_request(
-        &mut self,
-        announce: &str,
-        announce_data: &Announce,
-    ) -> Result<String, TrackerError> {
-        // TODO: if both announce and announce_list are None, it means it is intended to be
-        // distributed over a DHT or PEX
+    /// Creates a new HTTP tracker client with a custom timeout
+    pub fn new_with_timeout(timeout: Duration) -> Self {
+        let client = Client::builder()
+            .timeout(timeout)
+            .build()
+            .unwrap_or_default();
 
-        // let announce = self
-        //     .annouces
-        //     .pop_front()
-        //     .ok_or(TrackerError::EmptyAnnounceQueue)?;
+        Self { client }
+    }
 
-        let mut url = Url::parse(&announce).map_err(|e| TrackerError::AnnounceParseError(e))?;
+    /// Builds the announce URL with query parameters
+    fn build_announce_url(&self, announce: &str, data: &Announce) -> Result<Url, TrackerError> {
+        // Parse the base URL
+        let mut url = Url::parse(announce).map_err(TrackerError::AnnounceParseError)?;
 
-        // Encode info_hash and peer_id
-        let info_hash =
-            percent_encode(&announce_data.info_hash, NON_ALPHANUMERIC).collect::<String>();
-        let encoded_peer_id = percent_encode(&announce_data.peer_id, NON_ALPHANUMERIC).to_string();
+        // Start with a clean query string
+        url.set_query(None);
 
-        url.set_query(Some(&format!("info_hash={info_hash}")));
-        url.set_query(Some(&format!(
-            "{}&{}",
-            url.query().unwrap_or(""),
-            &format!("peer_id={encoded_peer_id}")
-        )));
+        // Manually build query string to avoid double encoding of binary data
+        let mut query = String::new();
 
-        url.query_pairs_mut()
-            .append_pair("port", &announce_data.port.to_string())
-            .append_pair("uploaded", &announce_data.uploaded.to_string())
-            .append_pair("downloaded", &announce_data.downloaded.to_string())
-            .append_pair("left", &announce_data.left.to_string())
-            .append_pair("compact", &announce_data.compact.to_string());
+        // Add the binary fields first (info_hash and peer_id) with direct hex encoding
+        // URL-encode the binary info_hash and peer_id
+        let info_hash = percent_encode(&data.info_hash, NON_ALPHANUMERIC).to_string();
+        let peer_id = percent_encode(&data.peer_id, NON_ALPHANUMERIC).to_string();
+        query.push_str(&format!("info_hash={}", info_hash));
+        query.push_str(&format!("&peer_id={}", peer_id));
 
-        Ok(url.to_string())
+        // Add the remaining parameters with normal URL encoding
+        query.push_str(&format!("&port={}", data.port));
+        query.push_str(&format!("&uploaded={}", data.uploaded));
+        query.push_str(&format!("&downloaded={}", data.downloaded));
+        query.push_str(&format!("&left={}", data.left));
+        query.push_str(&format!("&compact={}", data.compact));
+
+        // Add optional parameters
+        if let Some(ip) = &data.ip {
+            query.push_str(&format!("&ip={}", ip));
+        }
+
+        if let Some(num_want) = data.num_want {
+            query.push_str(&format!("&numwant={}", num_want));
+        }
+
+        if let Some(key) = data.key {
+            query.push_str(&format!("&key={}", key));
+        }
+
+        // Add event if not "None"
+        if data.event as u8 != 0 {
+            let event_str = match data.event as u8 {
+                1 => "completed",
+                2 => "started",
+                3 => "stopped",
+                _ => "started", // Default to started for unknown values
+            };
+            query.push_str(&format!("&event={}", event_str));
+        }
+
+        if let Some(tracker_id) = &data.tracker_id {
+            query.push_str(&format!("&trackerid={}", tracker_id));
+        }
+
+        // Set the manually constructed query string
+        url.set_query(Some(&query));
+
+        Ok(url)
     }
 }
 
@@ -62,16 +107,25 @@ impl TrackerProtocol for HttpTracker {
         announce: &str,
         announce_data: &Announce,
     ) -> Result<Self::Response, TrackerError> {
-        let req_url = self.build_announce_request(announce, announce_data)?;
-        let response = reqwest::get(&req_url)
+        // Build the announcement URL with query parameters
+        let url = self.build_announce_url(announce, announce_data)?;
+
+        // Send the HTTP request
+        let response = self
+            .client
+            .get(url)
+            .send()
             .await
-            .map_err(|e| TrackerError::HttpRequestError(e))?;
-        let bencoded_body = response
+            .map_err(TrackerError::HttpRequestError)?;
+
+        // Get the raw bytes from the response
+        let response_bytes = response
             .bytes()
             .await
-            .map_err(|e| TrackerError::InvalidResponse(e))?;
+            .map_err(TrackerError::InvalidResponse)?;
 
-        TrackerResponse::from_bencoded(bencoded_body.as_ref())
+        // Parse the bencoded response
+        TrackerResponse::from_bencoded(&response_bytes)
     }
 }
 
@@ -92,12 +146,13 @@ pub enum TrackerResponse {
 }
 
 impl TrackerResponse {
-    pub fn from_bencoded(response: &[u8]) -> Result<TrackerResponse, TrackerError> {
+    /// Parse a bencoded tracker response
+    pub fn from_bencoded(response: impl AsRef<[u8]>) -> Result<TrackerResponse, TrackerError> {
+        let bytes = response.as_ref();
+
         // Deserialize the bencoded data into a temporary intermediate structure
-        let raw: HashMap<String, serde_bencode::value::Value> = match de::from_bytes(response) {
-            Ok(val) => val,
-            Err(err) => return Err(TrackerError::ParseError(err)),
-        };
+        let raw: HashMap<String, serde_bencode::value::Value> =
+            de::from_bytes(bytes).map_err(TrackerError::ParseError)?;
 
         // Check for failure response
         if let Some(serde_bencode::value::Value::Bytes(msg)) = raw.get("failure_reason") {
@@ -124,12 +179,12 @@ impl TrackerResponse {
 
         let seeders = match raw.get("complete") {
             Some(serde_bencode::value::Value::Int(i)) if *i >= 0 => *i as u32,
-            _ => 0,
+            _ => 0, // Default to 0 if missing
         };
 
         let leechers = match raw.get("incomplete") {
             Some(serde_bencode::value::Value::Int(i)) if *i >= 0 => *i as u32,
-            _ => 0,
+            _ => 0, // Default to 0 if missing
         };
 
         let warning = raw.get("warning_message").and_then(|v| match v {
@@ -139,10 +194,14 @@ impl TrackerResponse {
 
         let peers = match raw.get("peers") {
             Some(serde_bencode::value::Value::Bytes(bytes)) => bytes.clone(),
-            _ => vec![], // No peers found
+            Some(serde_bencode::value::Value::List(_)) => {
+                // We don't support dictionary model peers currently, only compact model
+                return Err(TrackerError::InvalidPeersFormat);
+            }
+            _ => return Err(TrackerError::ResponseMissingField("peers".to_string())),
         };
 
-        // Build the Ok variant
+        // Build the success response
         Ok(TrackerResponse::Success {
             tracker_id,
             interval,
@@ -154,46 +213,47 @@ impl TrackerResponse {
         })
     }
 
+    /// Decode the binary peers format into a list of Peer objects
     pub fn decode_peers(&self) -> Result<Vec<Peer>, TrackerError> {
-        match &self {
+        match self {
             TrackerResponse::Success { peers, .. } => {
-                if !peers.is_empty() {
-                    if peers.len() % 6 != 0 {
-                        return Err(TrackerError::InvalidPeersFormat);
-                    }
-                    let peers: Vec<Peer> = peers
-                        .chunks(6)
-                        .map(|peer_bytes| Peer {
-                            peer_id: None,
-                            ip: Ip::IpV4(Ipv4Addr::new(
-                                peer_bytes[0],
-                                peer_bytes[1],
-                                peer_bytes[2],
-                                peer_bytes[3],
-                            )),
-                            port: u16::from_be_bytes([peer_bytes[4], peer_bytes[5]]),
-                        })
-                        .collect();
-                    return Ok(peers);
+                if peers.is_empty() {
+                    return Err(TrackerError::EmptyPeers);
                 }
-            }
-            TrackerResponse::Failure { .. } => {}
-        }
 
-        Err(TrackerError::EmptyPeers)
+                // Compact format: each peer is 6 bytes (4 for IPv4, 2 for port)
+                if peers.len() % 6 != 0 {
+                    return Err(TrackerError::InvalidPeersFormat);
+                }
+
+                let peers_list = peers
+                    .chunks_exact(6)
+                    .map(|chunk| {
+                        let ip = Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
+                        let port = u16::from_be_bytes([chunk[4], chunk[5]]);
+
+                        Peer {
+                            peer_id: None,
+                            ip: Ip::IpV4(ip),
+                            port,
+                        }
+                    })
+                    .collect();
+
+                Ok(peers_list)
+            }
+            TrackerResponse::Failure { .. } => Err(TrackerError::EmptyPeers),
+        }
     }
 
+    /// Get the announce interval from the response
     pub fn interval(&self) -> Result<u32, TrackerError> {
-        match &self {
-            TrackerResponse::Success { interval, .. } => {
-                return Ok(*interval);
-            }
-            _ => {}
+        match self {
+            TrackerResponse::Success { interval, .. } => Ok(*interval),
+            TrackerResponse::Failure { .. } => Err(TrackerError::ErrorResponse(
+                "Cannot get interval from failure response".to_string(),
+            )),
         }
-
-        Err(TrackerError::ErrorResponse(
-            "should not reach here".to_string(),
-        ))
     }
 }
 
@@ -240,14 +300,15 @@ mod test {
         let mut tracker = HttpTracker::new();
         let announce = "https://torrent.ubuntu.com/announce";
         let url = tracker
-            .build_announce_request(announce, &announce_data)
+            .build_announce_url(announce, &announce_data)
             .unwrap();
 
         assert_eq!(
-            "https://torrent.ubuntu.com/announce?info_hash=%124Vx%9A%BC%DE%F1%23Eg%89%AB%CD%EF%124Vx%9A&peer_id=%2DJM0100%2DXPGcHeKEmI45&port=6889&uploaded=0&downloaded=0&left=5665497088&compact=1",
+            "https://torrent.ubuntu.com/announce?info_hash=%124Vx%9A%BC%DE%F1%23Eg%89%AB%CD%EF%124Vx%9A&peer_id=%2DJM0100%2DXPGcHeKEmI45&port=6889&uploaded=0&downloaded=0&left=5665497088&compact=1&event=started",
             url.as_str()
         );
     }
+
     #[test]
     fn test_tracker_response_from_bencoded_success_variant() {
         let bencoded_body =
