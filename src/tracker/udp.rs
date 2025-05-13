@@ -1,19 +1,22 @@
 use std::{
     io::Cursor,
     net::{IpAddr, Ipv4Addr},
+    sync::Arc,
     time::Duration,
 };
 
+use async_trait::async_trait;
 use rand::Rng;
 use tokio::{
     io::AsyncReadExt,
     net::{lookup_host, UdpSocket},
     time::timeout,
 };
+use url::Url;
 
 use crate::torrent::peer::{Ip, Peer};
 
-use super::tracker::{Announce, TrackerError, TrackerProtocol};
+use super::tracker::{AnnounceData, Tracker, TrackerError, TrackerResponse};
 
 /// UDP protocol identifier for BitTorrent trackers
 const UDP_PROTOCOL_ID: u64 = 0x41727101980;
@@ -52,21 +55,61 @@ impl Action {
 /// Implementation of the UDP tracker protocol
 #[derive(Debug)]
 pub struct UdpTracker {
-    connection_id: u64,
-    timeout: Duration,
+    announce_url: String,
+    socket: Arc<UdpSocket>,
+    timeout: u64,
 }
 
 impl UdpTracker {
     /// Creates a new UDP tracker client
-    pub fn new() -> UdpTracker {
-        UdpTracker {
-            connection_id: UDP_PROTOCOL_ID,
-            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+    pub async fn new(announce_url: &str) -> Result<UdpTracker, TrackerError> {
+        // Validate URL
+        let url = Url::parse(&announce_url).map_err(|_| {
+            TrackerError::InvalidUrl(format!("Invalid UDP tracker URL: {}", announce_url))
+        })?;
+
+        if url.scheme() != "udp" {
+            return Err(TrackerError::InvalidProtocol(format!(
+                "Expected UDP URL, got: {}",
+                announce_url
+            )));
         }
+
+        // Extract host and port
+        let host = url.host_str().ok_or_else(|| {
+            TrackerError::InvalidUrl(format!("Missing host in URL: {}", announce_url))
+        })?;
+
+        let port = url.port().unwrap_or(80);
+
+        // Create socket
+        let socket = UdpSocket::bind("0.0.0.0:0")
+            .await
+            .map_err(TrackerError::UdpBindingError)?;
+
+        // Resolve target address
+        let addr = format!("{}:{}", host, port);
+        let addr = lookup_host(addr)
+            .await
+            .map_err(TrackerError::IoError)?
+            .next()
+            .ok_or_else(|| TrackerError::UdpError("No addresses found".into()))?;
+
+        // Connect socket
+        socket
+            .connect(addr)
+            .await
+            .map_err(|e| TrackerError::UdpError(format!("Failed to connect UDP socket: {}", e)))?;
+
+        Ok(UdpTracker {
+            announce_url: announce_url.to_string(),
+            socket: Arc::new(socket),
+            timeout: DEFAULT_TIMEOUT_SECS,
+        })
     }
 
     /// Sets the timeout for UDP tracker requests
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+    pub fn with_timeout(mut self, timeout: u64) -> Self {
         self.timeout = timeout;
         self
     }
@@ -86,11 +129,11 @@ impl UdpTracker {
     }
 
     /// Creates an announce request packet
-    fn build_announce_packet(&self, req: &Announce, tx_id: u32) -> Vec<u8> {
+    fn build_announce_packet(&self, connection_id: u64, req: &AnnounceData, tx_id: u32) -> Vec<u8> {
         let mut buf = vec![0u8; 98];
 
         // Connection ID (64 bits)
-        buf[0..8].copy_from_slice(&self.connection_id.to_be_bytes());
+        buf[0..8].copy_from_slice(&connection_id.to_be_bytes());
         // Action (32 bits): announce = 1
         buf[8..12].copy_from_slice(&(Action::Announce as u32).to_be_bytes());
         // Transaction ID (32 bits)
@@ -130,19 +173,23 @@ impl UdpTracker {
         buf
     }
 
-    /// Receives and processes a tracker response
-    async fn receive_response(
+    /// Reads and processes a tracker response
+    async fn read_response(
         &self,
         socket: &UdpSocket,
         expected_tx_id: u32,
-    ) -> Result<TrackerResponse, TrackerError> {
+    ) -> Result<AnnounceResponse, TrackerError> {
         let mut buf = [0; 1024]; // Large enough for any typical response
 
-        let result = timeout(self.timeout, socket.recv_from(&mut buf)).await;
+        let result = timeout(
+            Duration::from_secs(self.timeout),
+            socket.recv_from(&mut buf),
+        )
+        .await;
 
         match result {
             Ok(Ok((size, _))) => {
-                let resp = TrackerResponse::parse_from_bytes(&buf[..size]).await?;
+                let resp = AnnounceResponse::parse_from_bytes(&buf[..size]).await?;
 
                 // Validate transaction ID
                 if let Some(tx_id) = resp.transaction_id() {
@@ -152,7 +199,7 @@ impl UdpTracker {
                 }
 
                 // Check for error messages
-                if let TrackerResponse::Error { message, .. } = &resp {
+                if let AnnounceResponse::Error { message, .. } = &resp {
                     return Err(TrackerError::ErrorResponse(message.clone()));
                 }
 
@@ -164,35 +211,9 @@ impl UdpTracker {
     }
 }
 
-impl TrackerProtocol for UdpTracker {
-    type Response = TrackerResponse;
-
-    async fn request_announce(
-        &mut self,
-        announce: &str,
-        announce_data: &Announce,
-    ) -> Result<Self::Response, TrackerError> {
-        // Bind the socket to any available port
-        let socket = UdpSocket::bind("0.0.0.0:0")
-            .await
-            .map_err(TrackerError::UdpBindingError)?;
-
-        // Resolve tracker hostname to IP addresses
-        let mut tracker_addresses = lookup_host(announce).await.map_err(TrackerError::IoError)?;
-
-        // Try to connect to one of the tracker's IP addresses
-        let mut connected = false;
-        while let Some(ip_addr) = tracker_addresses.next() {
-            if socket.connect(ip_addr).await.is_ok() {
-                connected = true;
-                break;
-            }
-        }
-
-        if !connected {
-            return Err(TrackerError::ConnectionFailed);
-        }
-
+#[async_trait]
+impl Tracker for UdpTracker {
+    async fn announce(&self, announce_data: AnnounceData) -> Result<TrackerResponse, TrackerError> {
         // Step 1: Connection handshake
 
         // Generate a random transaction ID
@@ -200,20 +221,19 @@ impl TrackerProtocol for UdpTracker {
 
         // Send the connect packet
         let connect_packet = self.build_connect_packet(tx_id);
-        socket
+        self.socket
             .send(&connect_packet)
             .await
             .map_err(TrackerError::IoError)?;
 
         // Receive and parse the connection response
-        let connect_resp = self.receive_response(&socket, tx_id).await?;
+        let connect_resp = self.read_response(&self.socket, tx_id).await?;
 
         // Extract connection ID for subsequent requests
-        if let TrackerResponse::Connect { connection_id, .. } = connect_resp {
-            self.connection_id = connection_id;
-        } else {
-            return Err(TrackerError::UnexpectedAction);
-        }
+        let connection_id = match connect_resp {
+            AnnounceResponse::Connect { connection_id, .. } => connection_id,
+            _ => return Err(TrackerError::UnexpectedAction),
+        };
 
         // Step 2: Announce request
 
@@ -221,24 +241,50 @@ impl TrackerProtocol for UdpTracker {
         let tx_id = rand::thread_rng().gen::<u32>();
 
         // Send the announce packet
-        let announce_packet = self.build_announce_packet(announce_data, tx_id);
-        socket
+        let announce_packet = self.build_announce_packet(connection_id, &announce_data, tx_id);
+        self.socket
             .send(&announce_packet)
             .await
             .map_err(TrackerError::IoError)?;
 
         // Receive and parse the announce response
-        let announce_resp = self.receive_response(&socket, tx_id).await?;
+        let announce_resp = self.read_response(&self.socket, tx_id).await?;
 
-        match announce_resp {
-            TrackerResponse::Announce { .. } => Ok(announce_resp),
-            _ => Err(TrackerError::UnexpectedAction),
+        if let AnnounceResponse::Announce {
+            transaction_id: _,
+            interval,
+            leechers,
+            seeders,
+            peers,
+        } = announce_resp
+        {
+            let peers = decode_peers(peers)?;
+
+            Ok(TrackerResponse {
+                interval,
+                min_interval: None,
+                tracker_id: None,
+                seeders,
+                leechers,
+                peers,
+                warning_message: None,
+            })
+        } else {
+            Err(TrackerError::UnexpectedAction)
         }
+    }
+
+    fn clone_box(&self) -> Box<dyn Tracker> {
+        Box::new(Self {
+            announce_url: self.announce_url.clone(),
+            socket: Arc::clone(&self.socket),
+            timeout: self.timeout.clone(),
+        })
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum TrackerResponse {
+pub enum AnnounceResponse {
     Connect {
         transaction_id: u32,
         connection_id: u64,
@@ -256,17 +302,17 @@ pub enum TrackerResponse {
     },
 }
 
-impl TrackerResponse {
+impl AnnounceResponse {
     /// Returns the transaction ID from the response
     pub fn transaction_id(&self) -> Option<u32> {
         match self {
-            TrackerResponse::Connect { transaction_id, .. } => Some(*transaction_id),
-            TrackerResponse::Announce { transaction_id, .. } => Some(*transaction_id),
-            TrackerResponse::Error { transaction_id, .. } => Some(*transaction_id),
+            AnnounceResponse::Connect { transaction_id, .. } => Some(*transaction_id),
+            AnnounceResponse::Announce { transaction_id, .. } => Some(*transaction_id),
+            AnnounceResponse::Error { transaction_id, .. } => Some(*transaction_id),
         }
     }
 
-    pub async fn parse_from_bytes(buf: &[u8]) -> Result<TrackerResponse, TrackerError> {
+    pub async fn parse_from_bytes(buf: &[u8]) -> Result<AnnounceResponse, TrackerError> {
         if buf.len() < 4 {
             return Err(TrackerError::InvalidPacketSize);
         }
@@ -281,7 +327,7 @@ impl TrackerResponse {
         }
     }
 
-    async fn parse_connect_packet(buf: &[u8]) -> Result<TrackerResponse, TrackerError> {
+    async fn parse_connect_packet(buf: &[u8]) -> Result<AnnounceResponse, TrackerError> {
         if buf.len() < 16 {
             return Err(TrackerError::InvalidPacketSize);
         }
@@ -290,13 +336,13 @@ impl TrackerResponse {
         let transaction_id = read_u32_be(&mut cursor).await?;
         let connection_id = read_u64_be(&mut cursor).await?;
 
-        Ok(TrackerResponse::Connect {
+        Ok(AnnounceResponse::Connect {
             transaction_id,
             connection_id,
         })
     }
 
-    async fn parse_announce_packet(buf: &[u8]) -> Result<TrackerResponse, TrackerError> {
+    async fn parse_announce_packet(buf: &[u8]) -> Result<AnnounceResponse, TrackerError> {
         if buf.len() < 20 {
             return Err(TrackerError::InvalidPacketSize);
         }
@@ -315,7 +361,7 @@ impl TrackerResponse {
             peers.push((ip, port));
         }
 
-        Ok(TrackerResponse::Announce {
+        Ok(AnnounceResponse::Announce {
             transaction_id,
             interval,
             leechers,
@@ -324,7 +370,7 @@ impl TrackerResponse {
         })
     }
 
-    async fn parse_error_packet(buf: &[u8]) -> Result<TrackerResponse, TrackerError> {
+    async fn parse_error_packet(buf: &[u8]) -> Result<AnnounceResponse, TrackerError> {
         if buf.len() < 8 {
             return Err(TrackerError::InvalidPacketSize);
         }
@@ -337,42 +383,29 @@ impl TrackerResponse {
         let message =
             String::from_utf8(message_bytes.to_vec()).map_err(|_| TrackerError::InvalidUTF8)?;
 
-        Ok(TrackerResponse::Error {
+        Ok(AnnounceResponse::Error {
             transaction_id,
             message,
         })
     }
+}
 
-    /// Convert the response to a list of peers
-    pub fn decode_peers(&self) -> Result<Vec<Peer>, TrackerError> {
-        match self {
-            TrackerResponse::Announce { peers, .. } => {
-                if peers.is_empty() {
-                    return Err(TrackerError::EmptyPeers);
-                }
-
-                let peers_list = peers
-                    .iter()
-                    .map(|(ip, port)| Peer {
-                        peer_id: None,
-                        ip: Ip::IpV4(Ipv4Addr::from(*ip)),
-                        port: *port,
-                    })
-                    .collect();
-
-                Ok(peers_list)
-            }
-            _ => Err(TrackerError::EmptyPeers),
-        }
+/// Convert the response to a list of peers
+pub fn decode_peers(peers: Vec<(u32, u16)>) -> Result<Vec<Peer>, TrackerError> {
+    if peers.is_empty() {
+        return Err(TrackerError::EmptyPeers);
     }
 
-    /// Get the announce interval from the response
-    pub fn interval(&self) -> Result<u32, TrackerError> {
-        match self {
-            TrackerResponse::Announce { interval, .. } => Ok(*interval),
-            _ => Err(TrackerError::UnexpectedAction),
-        }
-    }
+    let peers_list = peers
+        .iter()
+        .map(|(ip, port)| Peer {
+            peer_id: None,
+            ip: Ip::IpV4(Ipv4Addr::from(*ip)),
+            port: *port,
+        })
+        .collect();
+
+    Ok(peers_list)
 }
 
 // Helper functions to read binary data
