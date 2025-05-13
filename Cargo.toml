@@ -27,6 +27,7 @@ uuid = { version = "1.13.1", features = [
     "fast-rng",
     "macro-diagnostics",
 ] }
+async-trait = "0.1.88"
 
 [dev-dependencies]
 assert_matches = "1.5.0"

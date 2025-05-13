@@ -1,26 +1,32 @@
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
-use std::{collections::HashMap, error::Error, fmt::Display, net::IpAddr};
+use std::{collections::HashMap, error::Error, fmt::Display, net::IpAddr, time::Duration};
 use tokio::io;
 use url::Url;
 
 use crate::torrent::peer::Peer;
 
-use super::{
-    http::{self, HttpTracker},
-    udp::{self, UdpTracker},
-};
+use super::{http::HttpTracker, udp::UdpTracker};
 
-pub struct Tracker {
-    announce: String,
-    seeders: u64,
-    leechers: u64,
-    http: HttpTracker,
-    udp: UdpTracker,
+/// The trait that all tracker implementations must implement
+#[async_trait]
+pub trait Tracker: Send + Sync {
+    /// Announce to the tracker
+    async fn announce(&self, data: AnnounceData) -> Result<TrackerResponse, TrackerError>;
+
+    /// Clone the tracker as a boxed trait object
+    fn clone_box(&self) -> Box<dyn Tracker>;
+}
+
+impl Clone for Box<dyn Tracker> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct Announce {
+pub struct AnnounceData {
     pub info_hash: [u8; 20],
     pub peer_id: [u8; 20],
     pub port: u16,
@@ -36,7 +42,137 @@ pub struct Announce {
     pub tracker_id: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+impl AnnounceData {
+    /// Creates a new announce
+    pub fn new(
+        info_hash: [u8; 20],
+        peer_id: [u8; 20],
+        port: u16,
+        downloaded: u64,
+        uploaded: u64,
+        left: u64,
+        event: Event,
+        num_want: Option<i32>,
+    ) -> Self {
+        Self {
+            info_hash,
+            peer_id,
+            port,
+            uploaded,
+            downloaded,
+            left,
+            compact: 1, // Always use compact format
+            no_peer_id: 0,
+            event,
+            ip: None,
+            num_want,
+            key: None,
+            tracker_id: None,
+        }
+    }
+}
+
+/// Factory for creating tracker instances
+pub struct TrackerFactory;
+
+impl TrackerFactory {
+    /// Create a tracker from an announce URL
+    pub async fn create(announce_url: &str) -> Result<Box<dyn Tracker>, TrackerError> {
+        // Parse URL to determine protocol
+        let url = Url::parse(announce_url).map_err(TrackerError::AnnounceParseError)?;
+
+        match url.scheme() {
+            "http" | "https" => {
+                let tracker = HttpTracker::new(announce_url)?;
+                Ok(Box::new(tracker))
+            }
+            "udp" => {
+                let tracker = UdpTracker::new(announce_url).await?;
+                Ok(Box::new(tracker))
+            }
+            _ => Err(TrackerError::UnsupportedProtocol(format!(
+                "Unsupported protocol: {}",
+                url.scheme()
+            ))),
+        }
+    }
+}
+
+/// The main tracker manager that coordinates with multiple trackers
+#[derive(Clone)]
+pub struct TrackerManager {
+    trackers: Vec<Box<dyn Tracker>>,
+    metainfo_hash: [u8; 20],
+    peer_id: [u8; 20],
+    port: u16,
+}
+
+impl TrackerManager {
+    /// Create a new tracker manager
+    pub fn new(metainfo_hash: [u8; 20], peer_id: [u8; 20], port: u16) -> Self {
+        Self {
+            trackers: Vec::new(),
+            metainfo_hash,
+            peer_id,
+            port,
+        }
+    }
+
+    /// Add a tracker to the manager
+    pub fn add_tracker(&mut self, tracker: Box<dyn Tracker>) {
+        self.trackers.push(tracker);
+    }
+
+    /// Add multiple trackers to the manager
+    pub async fn add_trackers(
+        &mut self,
+        announce_urls: &[String],
+    ) -> Vec<Result<(), TrackerError>> {
+        let mut results = Vec::with_capacity(announce_urls.len());
+
+        for url in announce_urls {
+            let result = match TrackerFactory::create(url).await {
+                Ok(tracker) => {
+                    self.trackers.push(tracker);
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            };
+
+            results.push(result);
+        }
+
+        results
+    }
+
+    pub async fn announce(
+        &self,
+        info_hash: [u8; 20],
+        peer_id: [u8; 20],
+        port: u16,
+        downloaded: u64,
+        uploaded: u64,
+        left: u64,
+        event: Event,
+        num_want: Option<i32>,
+    ) -> Result<TrackerResponse, TrackerError> {
+        let tracker = self.trackers().first().unwrap();
+        let announce_data = AnnounceData::new(
+            info_hash, peer_id, port, downloaded, uploaded, left, event, num_want,
+        );
+
+        tracker.announce(announce_data).await
+    }
+
+    /// Get all available trackers
+    pub fn trackers(&self) -> &[Box<dyn Tracker>] {
+        &self.trackers
+    }
+}
+
+/// Tracker event types
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[repr(u8)]
 pub enum Event {
     None = 0,
     Completed = 1,
@@ -59,100 +195,21 @@ struct FileStatus {
     incomplete: Option<u32>,
 }
 
-impl Announce {
-    // TODO: improve with builder pattern
-    pub fn new(
-        info_hash: [u8; 20],
-        peer_id: [u8; 20],
-        port: u16,
-        left: u64,
-        num_want: i32,
-    ) -> Announce {
-        Announce {
-            info_hash,
-            peer_id,
-            port,
-            uploaded: 0,
-            downloaded: 0,
-            left,
-            compact: 1,
-            no_peer_id: 0,
-            event: Event::Started,
-            ip: None,
-            num_want: Some(num_want),
-            key: None,
-            tracker_id: None,
-        }
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Flags {
     min_request_interval: Option<u64>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum TrackerResponse {
-    Http(http::TrackerResponse),
-    Udp(udp::TrackerResponse),
-}
-
-impl TrackerResponse {
-    pub fn get_peers(&self) -> Result<Vec<Peer>, TrackerError> {
-        match self {
-            TrackerResponse::Http(response) => response.decode_peers(),
-            TrackerResponse::Udp(response) => response.decode_peers(),
-        }
-    }
-
-    pub fn get_interval(&self) -> Result<u32, TrackerError> {
-        match self {
-            TrackerResponse::Http(response) => response.interval(),
-            TrackerResponse::Udp(response) => response.interval(),
-        }
-    }
-}
-
-pub trait TrackerProtocol {
-    type Response;
-
-    async fn request_announce(
-        &mut self,
-        announce: &str,
-        announce_data: &Announce,
-    ) -> Result<Self::Response, TrackerError>;
-}
-
-impl Tracker {
-    pub fn new(annouce_url: &str) -> Tracker {
-        Tracker {
-            announce: annouce_url.to_string(),
-            seeders: 0,
-            leechers: 0,
-            http: HttpTracker::new(),
-            udp: UdpTracker::new(),
-        }
-    }
-
-    pub async fn request_announce(
-        &mut self,
-        announce: &str,
-        announce_data: &Announce,
-    ) -> Result<TrackerResponse, TrackerError> {
-        // Parse the URL to determine the protocol
-        let url = Url::parse(announce).map_err(|e| TrackerError::AnnounceParseError(e))?;
-        match url.scheme() {
-            "http" | "https" => {
-                let response = self.http.request_announce(announce, announce_data).await?;
-                return Ok(TrackerResponse::Http(response));
-            }
-            "udp" => {
-                let response = self.udp.request_announce(announce, announce_data).await?;
-                return Ok(TrackerResponse::Udp(response));
-            }
-            _ => Err(TrackerError::UnsupportedProtocol(url.scheme().to_string())),
-        }
-    }
+/// Response from a tracker request across both HTTP and UDP protocols
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackerResponse {
+    pub interval: u32,
+    pub min_interval: Option<u32>,
+    pub tracker_id: Option<String>,
+    pub seeders: u32,
+    pub leechers: u32,
+    pub peers: Vec<Peer>,
+    pub warning_message: Option<String>,
 }
 
 #[derive(Debug)]
@@ -179,6 +236,10 @@ pub enum TrackerError {
     IoError(tokio::io::Error),
     ResponseTimeout,
     ConnectionFailed,
+    InvalidUrl(String),
+    InvalidProtocol(String),
+    TrackerResponse(String),
+    UdpError(String),
 }
 
 impl Display for TrackerError {
@@ -211,6 +272,10 @@ impl Display for TrackerError {
             TrackerError::IoError(e) => write!(f, "IO error: {}", e),
             TrackerError::ResponseTimeout => write!(f, "Tracker response timeout"),
             TrackerError::ConnectionFailed => write!(f, "Failed to connect to the tracker"),
+            TrackerError::InvalidUrl(e) => write!(f, "Invalid URL: {}", e),
+            TrackerError::InvalidProtocol(e) => write!(f, "Invalid protocol: {}", e),
+            TrackerError::TrackerResponse(e) => write!(f, "Announce response failure: {}", e),
+            TrackerError::UdpError(e) => write!(f, "UDP error: {}", e),
         }
     }
 }
