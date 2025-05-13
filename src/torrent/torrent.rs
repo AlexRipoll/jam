@@ -6,14 +6,15 @@ use std::{
 
 use protocol::piece::Piece;
 use rand::{distributions::Alphanumeric, Rng};
+use sha1::digest::typenum::NonZero;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     config::Config,
     core::orchestrator::{Orchestrator, OrchestratorConfig},
     events::Event,
-    tracker::tracker::{Announce, Event as AnnounceEvent, Tracker},
+    tracker::tracker::{AnnounceData, Event as AnnounceEvent, Tracker, TrackerManager},
 };
 
 use super::{metainfo::Metainfo, peer::Peer};
@@ -105,33 +106,59 @@ impl Torrent {
     pub async fn run(&mut self) {
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<TorrentCommand>(128);
 
-        let mut announces_queue: VecDeque<Vec<String>> = VecDeque::new();
-        // extract either the announce_list or announce
+        // Collect all announce URLs
+        let mut announce_urls = Vec::new();
+
+        // Handle announce_list (tiers of trackers) if available
         if let Some(announce_list) = self.metadata.announce_list.clone() {
-            announces_queue = VecDeque::from(announce_list);
-        } else {
-            announces_queue.push_front(vec![self.metadata.announce.clone().unwrap()]);
+            // Flatten all tiers into a single list of URLs
+            for tier in announce_list {
+                announce_urls.extend(tier);
+            }
+        }
+        // Add the main announce URL if it exists
+        else if let Some(announce) = self.metadata.announce.clone() {
+            announce_urls.push(announce);
         }
 
-        let announces = announces_queue.pop_front().unwrap();
         // FIX:
-        let mut tracker = Tracker::new(&announces[0]);
         let port = 6889;
-        let numwant = 200;
-        let mut announce_data = Announce::new(
-            self.metadata.info_hash,
-            self.peer_id,
-            port,
-            self.metadata.total_length,
-            numwant,
-        );
-        let response = tracker
-            .request_announce(&announces[0], &announce_data)
+        let num_want = 200;
+
+        let mut tracker_manager = TrackerManager::new(self.metadata.info_hash, self.peer_id, port);
+
+        // Add all trackers to the manager
+        if !announce_urls.is_empty() {
+            let results = tracker_manager.add_trackers(&announce_urls).await;
+
+            // Optional: Log which trackers were successfully added
+            for (i, result) in results.iter().enumerate() {
+                if result.is_err() {
+                    // Log error or handle failed tracker
+                    warn!("Failed to add tracker {}: {:?}", announce_urls[i], result);
+                }
+            }
+        }
+
+        // Now you can make an announce request if at least one tracker was added
+        // if !tracker_manager.trackers().is_empty() {
+        let tracker_resonse = tracker_manager
+            .announce(
+                self.metadata.info_hash,
+                self.peer_id,
+                6889,                       // port
+                0,                          // downloaded
+                0,                          // uploaded
+                self.metadata.total_length, // left
+                AnnounceEvent::Started,
+                Some(num_want), // num_want
+            )
             .await
             .unwrap();
-        // FIX: should get the response parsed as one unified struct
-        let peers = response.get_peers().unwrap();
-        let announce_interval = response.get_interval().unwrap();
+        // }
+
+        let peers = tracker_resonse.peers;
+        let announce_interval = tracker_resonse.interval;
 
         let state_interval: u64 = 5;
 
@@ -204,15 +231,19 @@ impl Torrent {
                             self.download_state.progress_percentage = 100;
 
                             // Send "completed" event to tracker
-                            announce_data.event = AnnounceEvent::Completed;
-                            announce_data.downloaded = self.download_state.downloaded_bytes;
-                            announce_data.left = self.download_state.left_bytes;
+                            let info_hash = self.metadata.info_hash;
+                            let peer_id = self.peer_id;
+                            let event = AnnounceEvent::Completed;
+                            let downloaded = self.download_state.downloaded_bytes;
+                            let uploaded = 0;
+                            let left = self.download_state.left_bytes;
 
                             info!("Download state: {}", self.download_state);
 
+                            let tracker_manager_clone = tracker_manager.clone();
                             // Fire and forget - we don't need to wait for the response
                             tokio::spawn(async move {
-                                if let Err(e) = tracker.request_announce(&announces[0], &announce_data).await {
+                                if let Err(e) = tracker_manager_clone.announce(info_hash, peer_id, port, downloaded, uploaded, left, event, None).await {
                                     error!("Failed to send completion event to tracker: {}", e);
                                 }
                             });
@@ -228,15 +259,16 @@ impl Torrent {
                 _ = update_interval.tick() => {
                     // Send update (no specific event type for regular updates)
                     debug!("Sending periodic update to tracker. Progress: {}%, Left: {} bytes", self.download_state.progress_percentage, self.download_state.left_bytes);
-                    announce_data.uploaded = self.download_state.uploaded_bytes;
-                    announce_data.downloaded = self.download_state.downloaded_bytes;
-                    announce_data.left = self.download_state.left_bytes;
+                            let event= AnnounceEvent::Completed;
+                            let downloaded = self.download_state.downloaded_bytes;
+                            let uploaded = 0;
+                            let left = self.download_state.left_bytes;
 
-                    match tracker.request_announce(&announces[0], &announce_data).await {
+
+                    match tracker_manager.announce(self.metadata.info_hash,self.peer_id,port, downloaded, uploaded, left, event, None).await {
                         Ok(response) => {
                             // Process any new peers
-                            if let Ok(new_peers_list) = response.get_peers() {
-                                let filtered_peers: Vec<Peer> = new_peers_list
+                                let filtered_peers: Vec<Peer> = response.peers
                                     .into_iter()
                                     .filter(|item| !self.peers.contains(item))
                                     .collect();
@@ -248,15 +280,12 @@ impl Torrent {
                                         .send(Event::AddPeers { peers: filtered_peers })
                                         .await;
                                 }
-                            }
 
                             // Update interval if the tracker suggests a new one
-                            if let Ok(new_interval) = response.get_interval() {
-                                if new_interval != announce_interval {
-                                    debug!("Tracker suggested new update interval: {new_interval} seconds");
-                                    update_interval = tokio::time::interval(tokio::time::Duration::from_secs(new_interval as u64));
+                                if response.interval != announce_interval {
+                                    debug!("Tracker suggested new update interval: {} seconds", response.interval );
+                                    update_interval = tokio::time::interval(tokio::time::Duration::from_secs(response.interval as u64));
                                 }
-                            }
                         },
                         Err(e) => {
                             debug!("Failed to send periodic update to tracker: {}", e);
