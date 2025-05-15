@@ -1,15 +1,9 @@
-use std::{
-    fs::File,
-    io::{self, Read},
-    time::Instant,
-};
+use std::io::{self};
 
 use config::Config;
-use torrent::{
-    metainfo::Metainfo,
-    torrent::{generate_peer_id, Torrent},
-};
-use tracing::{debug, info, trace, warn, Level};
+use repl::run_repl;
+use torrent::torrent::TorrentManager;
+use tracing::Level;
 use tracing_appender::rolling;
 use tracing_subscriber::{
     fmt::{self, format::FmtSpan},
@@ -21,6 +15,7 @@ mod config;
 mod core;
 mod events;
 mod peer;
+mod repl;
 mod torrent;
 mod tracker;
 
@@ -51,9 +46,6 @@ async fn main() -> io::Result<()> {
         .with(file_layer);
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
-    info!(" Starting BitTorrent client...");
-    let start = Instant::now();
-
     // Open the torrent file
     // Torrent file options:
     // With announce:
@@ -66,41 +58,14 @@ async fn main() -> io::Result<()> {
     //
     // With DHT or PEX:
     // - archlinux-2024.09.01-x86_64.iso.torrent
-    let file_path = "debian-12.7.0-amd64-netinst.iso.torrent";
-    debug!("Opening torrent file: {}", file_path);
-    let mut file = File::open(file_path).map_err(|e| {
-        warn!("Failed to open torrent file: {}", e);
-        e
-    })?;
-    let mut buffer = Vec::new();
-
-    trace!("Reading torrent file into buffer...");
-    file.read_to_end(&mut buffer)?;
-
-    debug!("Computing info hash...");
-    let info_hash = Metainfo::compute_info_hash(&buffer)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-    debug!(info_hash = ?hex::encode(info_hash), "Info hash computed");
-
-    trace!("Deserializing matainfo file");
-    let metainfo = Metainfo::deserialize(&buffer).map_err(|e| {
-        warn!("Failed to deserialize metainfo: {}", e);
-        io::Error::new(io::ErrorKind::Other, e)
-    })?;
-    debug!(torrent_name = ?metainfo.info.name, "Successfully deserialized metainfo");
-
-    let peer_id = generate_peer_id();
-    debug!(peer_id = ?String::from_utf8_lossy(&peer_id), "Generated session peer ID");
 
     let config = Config::load().unwrap();
 
-    let mut torrent = Torrent::new(peer_id, &buffer, config);
-    torrent.run().await;
+    // Create torrent manager
+    let manager = TorrentManager::new(&config);
 
-    info!("Download completed successfully");
-
-    let duration = start.elapsed();
-    println!("Time elapsed: {:.2?}", duration);
+    // Start the REPL
+    run_repl(manager).await?;
 
     Ok(())
 }
