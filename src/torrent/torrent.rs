@@ -1,32 +1,98 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    fmt,
+    error::Error,
+    fmt::{self, Display},
+    fs::File,
+    io::{self, Read},
     path::Path,
 };
 
+use hex::encode;
 use protocol::piece::Piece;
 use rand::{distributions::Alphanumeric, Rng};
-use sha1::digest::typenum::NonZero;
-use tokio::sync::mpsc;
+use sha1::{Digest, Sha1};
+use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{debug, error, info, warn};
 
 use crate::{
     config::Config,
     core::orchestrator::{Orchestrator, OrchestratorConfig},
     events::Event,
-    tracker::tracker::{AnnounceData, Event as AnnounceEvent, Tracker, TrackerManager},
+    tracker::tracker::{Event as AnnounceEvent, TrackerManager},
 };
 
-use super::{metainfo::Metainfo, peer::Peer};
+use super::{
+    metainfo::{Metainfo, MetainfoError},
+    peer::Peer,
+};
+
+// Define TorrentManager to handle multiple downloads
+#[derive(Debug)]
+pub struct TorrentManager<'a> {
+    torrents: HashMap<[u8; 20], TorrentHandle>,
+    config: &'a Config,
+    peer_id: [u8; 20],
+}
+
+impl<'a> TorrentManager<'a> {
+    pub fn new(config: &'a Config) -> Self {
+        TorrentManager {
+            peer_id: generate_peer_id(),
+            torrents: HashMap::new(),
+            config,
+        }
+    }
+
+    pub async fn start_torrent(&mut self, file_path: &str) -> Result<String, TorrentError> {
+        debug!("Opening torrent file: {}", file_path);
+        let mut file = File::open(file_path)?;
+
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer)?;
+
+        debug!("Computing info hash...");
+        let info_hash = Metainfo::compute_info_hash(&buffer)?;
+        debug!(info_hash = ?hex::encode(info_hash), "Info hash computed");
+
+        debug!("Deserializing metainfo file");
+        let metainfo = Metainfo::deserialize(&buffer)?;
+
+        let info_name = metainfo.info.name.clone();
+        debug!(torrent_name = ?info_name, "Successfully deserialized metainfo");
+
+        let torrent = Torrent::new(file_path, self.peer_id, &buffer, &self.config);
+
+        let (torrent_tx, torrent_handle) = torrent.run().await;
+
+        let mut hasher = Sha1::new();
+        hasher.update(&info_name);
+
+        let torrent_id = hasher.finalize().into();
+        // encode to hexadecimal for human representation
+        let torrent_id_hex = encode(torrent_id);
+
+        // Store the handle
+        self.torrents.insert(
+            torrent_id,
+            TorrentHandle {
+                tx: torrent_tx,
+                _handle: torrent_handle,
+            },
+        );
+
+        Ok(torrent_id_hex)
+    }
+}
 
 #[derive(Debug)]
-pub struct Torrent {
+struct Torrent<'a> {
+    file_path: String,
     peer_id: [u8; 20],
     pub metadata: Metadata,
     pub peers: HashSet<Peer>,
     status: Status,
     download_state: DownloadState,
-    config: Config,
+    config: &'a Config,
 }
 
 #[derive(Debug, Default)]
@@ -76,6 +142,14 @@ impl fmt::Display for DownloadState {
 }
 
 #[derive(Debug)]
+struct TorrentHandle {
+    /// Channel to send events to the torrent
+    tx: mpsc::Sender<TorrentCommand>,
+    /// Handle to the torrent task
+    _handle: JoinHandle<()>,
+}
+
+#[derive(Debug)]
 pub enum TorrentCommand {
     /// Download state statistics
     DownloadState {
@@ -87,13 +161,18 @@ pub enum TorrentCommand {
     DownloadCompleted,
 }
 
-impl Torrent {
-    pub fn new(peer_id: [u8; 20], torrent_bytes: &[u8], config: Config) -> Torrent {
+impl<'a> Torrent<'a> {
+    pub fn new(
+        file_path: &'a str,
+        peer_id: [u8; 20],
+        torrent_bytes: &'a [u8],
+        config: &'a Config,
+    ) -> Torrent<'a> {
         let info_hash = Metainfo::compute_info_hash(&torrent_bytes).unwrap();
         let metainfo = Metainfo::deserialize(&torrent_bytes).unwrap();
-        let total_pieces = metainfo.total_pieces();
 
         Torrent {
+            file_path: file_path.to_string(),
             peer_id,
             metadata: Metadata::new(info_hash, metainfo),
             peers: HashSet::new(),
@@ -103,7 +182,7 @@ impl Torrent {
         }
     }
 
-    pub async fn run(&mut self) {
+    pub async fn run(mut self) -> (mpsc::Sender<TorrentCommand>, JoinHandle<()>) {
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<TorrentCommand>(128);
 
         // Collect all announce URLs
@@ -211,96 +290,106 @@ impl Torrent {
 
         // update status to `downloading``
         self.status = Status::Downloading;
-        loop {
-            tokio::select! {
-                // Handle commands from the orchestrator
-                Some(event) = cmd_rx.recv() => {
-                    match event {
-                        TorrentCommand::DownloadState { downloaded_pieces, uploaded_pieces, left_pieces, progress_percentage } => {
-                            debug!("Download progress: {progress_percentage}%");
-                            self.download_state.downloaded_bytes = downloaded_pieces.saturating_mul(self.metadata.piece_length);
-                            self.download_state.uploaded_bytes = uploaded_pieces.saturating_mul(self.metadata.piece_length);
-                            self.download_state.left_bytes = left_pieces.saturating_mul(self.metadata.piece_length);
-                            self.download_state.progress_percentage = progress_percentage;
-                            info!("Download state: {}", self.download_state);
-                        },
-                        TorrentCommand::DownloadCompleted => {
-                            debug!("Download completed!");
-                            self.download_state.downloaded_bytes = self.metadata.total_length;
-                            self.download_state.left_bytes = 0;
-                            self.download_state.progress_percentage = 100;
 
-                            // Send "completed" event to tracker
-                            let info_hash = self.metadata.info_hash;
-                            let peer_id = self.peer_id;
-                            let event = AnnounceEvent::Completed;
-                            let downloaded = self.download_state.downloaded_bytes;
-                            let uploaded = 0;
-                            let left = self.download_state.left_bytes;
+        // Create a clone of cmd_tx to return
+        let return_cmd_tx = cmd_tx.clone();
 
-                            info!("Download state: {}", self.download_state);
+        // Spawn the main loop as a task and get its handle
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    // Handle commands from the orchestrator
+                    Some(event) = cmd_rx.recv() => {
+                        match event {
+                            TorrentCommand::DownloadState { downloaded_pieces, uploaded_pieces, left_pieces, progress_percentage } => {
+                                debug!("Download progress: {progress_percentage}%");
+                                self.download_state.downloaded_bytes = downloaded_pieces.saturating_mul(self.metadata.piece_length);
+                                self.download_state.uploaded_bytes = uploaded_pieces.saturating_mul(self.metadata.piece_length);
+                                self.download_state.left_bytes = left_pieces.saturating_mul(self.metadata.piece_length);
+                                self.download_state.progress_percentage = progress_percentage;
+                                info!("Download state: {}", self.download_state);
+                            },
+                            TorrentCommand::DownloadCompleted => {
+                                debug!("Download completed!");
+                                self.download_state.downloaded_bytes = self.metadata.total_length;
+                                self.download_state.left_bytes = 0;
+                                self.download_state.progress_percentage = 100;
 
-                            let tracker_manager_clone = tracker_manager.clone();
-                            // Fire and forget - we don't need to wait for the response
-                            tokio::spawn(async move {
-                                if let Err(e) = tracker_manager_clone.announce(info_hash, peer_id, port, downloaded, uploaded, left, event, None).await {
-                                    error!("Failed to send completion event to tracker: {}", e);
-                                }
-                            });
+                                // Send "completed" event to tracker
+                                let info_hash = self.metadata.info_hash;
+                                let peer_id = self.peer_id;
+                                let event = AnnounceEvent::Completed;
+                                let downloaded = self.download_state.downloaded_bytes;
+                                let uploaded = 0;
+                                let left = self.download_state.left_bytes;
 
-                            // Abort the orchestrator task
-                            orchestrator_handle.abort();
-                            break;
+                                info!("Download state: {}", self.download_state);
+
+                                let tracker_manager_clone = tracker_manager.clone();
+                                // Fire and forget - we don't need to wait for the response
+                                tokio::spawn(async move {
+                                    if let Err(e) = tracker_manager_clone.announce(info_hash, peer_id, port, downloaded, uploaded, left, event, None).await {
+                                        error!("Failed to send completion event to tracker: {}", e);
+                                    }
+                                });
+
+                                // Abort the orchestrator task
+                                orchestrator_handle.abort();
+                                break;
+                            }
                         }
-                    }
-                },
+                    },
 
-                // Periodic tracker updates
-                _ = update_interval.tick() => {
-                    // Send update (no specific event type for regular updates)
-                    debug!("Sending periodic update to tracker. Progress: {}%, Left: {} bytes", self.download_state.progress_percentage, self.download_state.left_bytes);
-                            let event= AnnounceEvent::Completed;
-                            let downloaded = self.download_state.downloaded_bytes;
-                            let uploaded = 0;
-                            let left = self.download_state.left_bytes;
+                    // Periodic tracker updates
+                    _ = update_interval.tick() => {
+                        // Send update (no specific event type for regular updates)
+                        debug!("Sending periodic update to tracker. Progress: {}%, Left: {} bytes", self.download_state.progress_percentage, self.download_state.left_bytes);
+                                let event= AnnounceEvent::Completed;
+                                let downloaded = self.download_state.downloaded_bytes;
+                                let uploaded = 0;
+                                let left = self.download_state.left_bytes;
 
 
-                    match tracker_manager.announce(self.metadata.info_hash,self.peer_id,port, downloaded, uploaded, left, event, None).await {
-                        Ok(response) => {
-                            // Process any new peers
-                                let filtered_peers: Vec<Peer> = response.peers
-                                    .into_iter()
-                                    .filter(|item| !self.peers.contains(item))
-                                    .collect();
+                        match tracker_manager.announce(self.metadata.info_hash,self.peer_id,port, downloaded, uploaded, left, event, None).await {
+                            Ok(response) => {
+                                // Process any new peers
+                                    let filtered_peers: Vec<Peer> = response.peers
+                                        .into_iter()
+                                        .filter(|item| !self.peers.contains(item))
+                                        .collect();
 
-                                if !filtered_peers.is_empty() {
-                                    debug!("Received {} new peers from tracker", filtered_peers.len());
-                                    self.peers.extend(filtered_peers.clone());
-                                    let _ = orchestrator_tx
-                                        .send(Event::AddPeers { peers: filtered_peers })
-                                        .await;
-                                }
+                                    if !filtered_peers.is_empty() {
+                                        debug!("Received {} new peers from tracker", filtered_peers.len());
+                                        self.peers.extend(filtered_peers.clone());
+                                        let _ = orchestrator_tx
+                                            .send(Event::AddPeers { peers: filtered_peers })
+                                            .await;
+                                    }
 
-                            // Update interval if the tracker suggests a new one
-                                if response.interval != announce_interval {
-                                    debug!("Tracker suggested new update interval: {} seconds", response.interval );
-                                    update_interval = tokio::time::interval(tokio::time::Duration::from_secs(response.interval as u64));
-                                }
-                        },
-                        Err(e) => {
-                            debug!("Failed to send periodic update to tracker: {}", e);
-                            // TODO: Maybe try alternate trackers if this one fails
+                                // Update interval if the tracker suggests a new one
+                                    if response.interval != announce_interval {
+                                        debug!("Tracker suggested new update interval: {} seconds", response.interval );
+                                        update_interval = tokio::time::interval(tokio::time::Duration::from_secs(response.interval as u64));
+                                    }
+                            },
+                            Err(e) => {
+                                debug!("Failed to send periodic update to tracker: {}", e);
+                                // TODO: Maybe try alternate trackers if this one fails
+                            }
                         }
-                    }
-                },
-                // Periodic state check
-                _ = state_check_interval.tick() => {
-                    let _ = orchestrator_tx
-                        .send(Event::QueryDownloadState { response_channel: cmd_tx.clone() })
-                        .await;
-                },
+                    },
+                    // Periodic state check
+                    _ = state_check_interval.tick() => {
+                        let _ = orchestrator_tx
+                            .send(Event::QueryDownloadState { response_channel: cmd_tx.clone() })
+                            .await;
+                    },
+                }
             }
-        }
+        });
+
+        // Return the command sender and join handle
+        (return_cmd_tx, handle)
     }
 }
 
@@ -373,19 +462,6 @@ impl Metadata {
     }
 }
 
-// TODO: move to client module
-fn client_version() -> String {
-    let version_tag = env!("CARGO_PKG_VERSION").replace('.', "");
-    let version = version_tag
-        .chars()
-        .filter(|c| c.is_ascii_digit())
-        .take(4)
-        .collect::<String>();
-
-    // Ensure exactly 4 characters, padding with "0" if necessary
-    format!("{:0<4}", version)
-}
-
 pub fn generate_peer_id() -> [u8; 20] {
     let version = client_version();
     let client_id = "JM";
@@ -403,4 +479,55 @@ pub fn generate_peer_id() -> [u8; 20] {
     id.copy_from_slice(format.as_bytes());
 
     id
+}
+
+fn client_version() -> String {
+    let version_tag = env!("CARGO_PKG_VERSION").replace('.', "");
+    let version = version_tag
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .take(4)
+        .collect::<String>();
+
+    // Ensure exactly 4 characters, padding with "0" if necessary
+    format!("{:0<4}", version)
+}
+
+#[derive(Debug)]
+pub enum TorrentError {
+    /// Metainfo related error
+    Metainfo(MetainfoError),
+
+    /// Standard I/O error
+    Io(io::Error),
+}
+
+impl Display for TorrentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TorrentError::Metainfo(err) => write!(f, "Metainfo error: {}", err),
+            TorrentError::Io(err) => write!(f, "I/O error: {}", err),
+        }
+    }
+}
+
+impl Error for TorrentError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            TorrentError::Metainfo(err) => Some(err),
+            TorrentError::Io(err) => Some(err),
+        }
+    }
+}
+
+impl From<MetainfoError> for TorrentError {
+    fn from(err: MetainfoError) -> Self {
+        TorrentError::Metainfo(err)
+    }
+}
+
+impl From<io::Error> for TorrentError {
+    fn from(err: io::Error) -> Self {
+        TorrentError::Io(err)
+    }
 }
