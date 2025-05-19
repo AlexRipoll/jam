@@ -2,7 +2,7 @@
 download_path = "./downloads/"
 
 [network]
-max_peer_connections = 1
+max_peer_connections = 10
 queue_capacity = 40
 timeout_threshold = 15
 connection_retries = 1
