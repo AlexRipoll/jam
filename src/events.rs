@@ -1,5 +1,5 @@
 use protocol::piece::Piece;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::core::disk::DiskWriterStats;
 
@@ -74,5 +74,8 @@ pub enum Event {
     // Query
     QueryDownloadState {
         response_channel: mpsc::Sender<TorrentCommand>,
+    },
+    QueryConnectedPeers {
+        response_channel: oneshot::Sender<usize>,
     },
 }

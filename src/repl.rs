@@ -158,9 +158,7 @@ pub async fn run_repl<'a>(mut manager: TorrentManager<'a>) -> io::Result<()> {
             Command::Cancel(id) => {
                 unimplemented!();
             }
-            Command::Status => {
-                unimplemented!();
-            }
+            Command::Status => manager.display_torrents_state().await,
             Command::Stats(id) => {
                 unimplemented!();
             }

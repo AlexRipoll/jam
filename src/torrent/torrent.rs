@@ -5,19 +5,25 @@ use std::{
     fs::File,
     io::{self, Read},
     path::Path,
+    time::{Duration, Instant},
 };
 
 use hex::encode;
 use protocol::piece::Piece;
 use rand::{distributions::Alphanumeric, Rng};
 use sha1::{Digest, Sha1};
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+    time::timeout,
+};
 use tracing::{debug, error, info, warn};
 
 use crate::{
     config::Config,
     core::orchestrator::{Orchestrator, OrchestratorConfig},
     events::Event,
+    torrent::status::{create_progress_bar, format_bytes, format_eta, format_speed, format_status},
     tracker::tracker::{Event as AnnounceEvent, TrackerManager},
 };
 
@@ -61,13 +67,10 @@ impl<'a> TorrentManager<'a> {
         debug!(torrent_name = ?info_name, "Successfully deserialized metainfo");
 
         let torrent = Torrent::new(file_path, self.peer_id, &buffer, &self.config);
+        let torrent_id = torrent.metadata.info_hash;
 
         let (torrent_tx, torrent_handle) = torrent.run().await;
 
-        let mut hasher = Sha1::new();
-        hasher.update(&info_name);
-
-        let torrent_id = hasher.finalize().into();
         // encode to hexadecimal for human representation
         let torrent_id_hex = encode(torrent_id);
 
@@ -82,9 +85,164 @@ impl<'a> TorrentManager<'a> {
 
         Ok(torrent_id_hex)
     }
+
+    async fn torrents_status(&self) -> Vec<TorrentState> {
+        let mut statuses = Vec::new();
+        let timeout_duration = Duration::from_secs(5);
+
+        for (id, handle) in &self.torrents {
+            let (response_tx, response_rx) = oneshot::channel();
+
+            // Send status query to the torrent
+            if let Err(e) = handle
+                .tx
+                .send(TorrentCommand::QueryStatus {
+                    response_channel: response_tx,
+                })
+                .await
+            {
+                warn!(
+                    "Failed to send status query to torrent {}: {}",
+                    hex::encode(id),
+                    e
+                );
+                continue;
+            }
+
+            // Wait for response with timeout
+            match timeout(timeout_duration, response_rx).await {
+                Ok(Ok(status)) => statuses.push(status),
+                Ok(Err(e)) => warn!(
+                    "Failed to receive status from torrent {}: {}",
+                    hex::encode(id),
+                    e
+                ),
+                Err(_) => warn!(
+                    "Timeout waiting for status from torrent {}",
+                    hex::encode(id)
+                ),
+            }
+        }
+
+        statuses
+    }
+
+    pub async fn display_torrents_state(&self) {
+        let statuses = self.torrents_status().await;
+
+        if statuses.is_empty() {
+            println!("No active torrents");
+            return;
+        }
+
+        // Print header
+        println!();
+        println!("┌──────────────────────────────────────────────────────────────────────────────────────────────────┐");
+        println!("│                                 TORRENT STATUS                                                   │");
+        println!("├──────────────────────────────────────────────────────────────────────────────────────────────────┤");
+        println!("│ Name                   │ Progress        │ Size                │ Speed  │ ETA   │ Peers │ Status │");
+        println!("├──────────────────────────────────────────────────────────────────────────────────────────────────┤");
+
+        for status in statuses {
+            let truncated_name = if status.name.len() > 22 {
+                format!("{}...", &status.name[..19])
+            } else {
+                format!("{:<22}", status.name)
+            };
+
+            let progress_bar = create_progress_bar(status.download_state.progress_percentage);
+            let downloaded_display = format_bytes(status.download_state.downloaded_bytes);
+            let size_display = format_bytes(
+                status.download_state.downloaded_bytes + status.download_state.left_bytes,
+            );
+            let speed_display = format_speed(status.download_speed);
+            let eta_display = format_eta(status.eta);
+            let status_display = format_status(&status.status);
+
+            println!(
+                "│ {} │ {} │ {:>8} of {:>8}│ {:>6} │ {:>5} │ {:>5} │ {:>6} │",
+                truncated_name,
+                progress_bar,
+                downloaded_display,
+                size_display,
+                speed_display,
+                eta_display,
+                status.peers_count,
+                status_display
+            );
+        }
+
+        println!("└──────────────────────────────────────────────────────────────────────────────────────────────────┘");
+        println!();
+    }
+
+    pub async fn display_compact_state(&self) {
+        let statuses = self.torrents_status().await;
+
+        if statuses.is_empty() {
+            println!("No active torrents");
+            return;
+        }
+
+        for status in statuses {
+            let progress_bar = create_progress_bar(status.download_state.progress_percentage);
+            let speed = format_speed(status.download_speed);
+            let eta = format_eta(status.eta);
+
+            println!(
+                "{} {} {}% ↓{} ETA:{} [{}]",
+                status.name,
+                progress_bar,
+                status.download_state.progress_percentage,
+                speed,
+                eta,
+                format_status(&status.status)
+            );
+        }
+    }
+
+    // async fn stop_torrent(&self, id: usize) -> bool {
+    //     if let Some(handle) = self.torrents.get(&id) {
+    //         let _ = handle.tx.send(TorrentCommand::Pause).await;
+    //         return true;
+    //     }
+    //     false
+    // }
+    //
+    // async fn resume_torrent(&self, id: usize) -> bool {
+    //     if let Some(handle) = self.torrents.get(&id) {
+    //         let _ = handle.tx.send(TorrentCommand::Resume).await;
+    //         return true;
+    //     }
+    //     false
+    // }
+    //
+    // async fn cancel_torrent(&mut self, id: usize) -> bool {
+    //     if let Some(handle) = self.torrents.get(&id) {
+    //         let _ = handle.tx.send(TorrentCommand::Cancel).await;
+    //         return true;
+    //     }
+    //     false
+    // }
+    //
+    // fn get_status(&self) -> Vec<(usize, String, TorrentState)> {
+    //     let mut result = Vec::new();
+    //     for (&id, handle) in &self.torrents {
+    //         let handle = handle.lock().unwrap();
+    //         result.push((id, handle.info_name.clone(), handle.state));
+    //     }
+    //     result
+    // }
+    //
+    // fn get_stats(&self, id: usize) -> Option<TorrentStats> {
+    //     if let Some(handle) = self.torrents.get(&id) {
+    //         return Some(handle.stats.clone());
+    //     }
+    //     None
+    // }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Torrent<'a> {
     file_path: String,
     peer_id: [u8; 20],
@@ -95,7 +253,7 @@ struct Torrent<'a> {
     config: &'a Config,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct DownloadState {
     downloaded_bytes: u64,
     uploaded_bytes: u64,
@@ -159,6 +317,22 @@ pub enum TorrentCommand {
         progress_percentage: u64,
     },
     DownloadCompleted,
+    /// Query current download state
+    QueryStatus {
+        response_channel: oneshot::Sender<TorrentState>,
+    },
+}
+
+#[derive(Debug)]
+pub struct TorrentState {
+    pub id: String,
+    pub name: String,
+    pub status: Status,
+    pub download_state: DownloadState,
+    pub peers_count: usize,
+    pub eta: Option<Duration>, // TODO: tbi
+    pub download_speed: f64,   // bytes per second TODO:tbi
+    pub upload_speed: f64,     // bytes per second TODO:tbi
 }
 
 impl<'a> Torrent<'a> {
@@ -184,6 +358,7 @@ impl<'a> Torrent<'a> {
 
     pub async fn run(mut self) -> (mpsc::Sender<TorrentCommand>, JoinHandle<()>) {
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<TorrentCommand>(128);
+        let start = Instant::now();
 
         // Collect all announce URLs
         let mut announce_urls = Vec::new();
@@ -309,6 +484,75 @@ impl<'a> Torrent<'a> {
                                 self.download_state.progress_percentage = progress_percentage;
                                 info!("Download state: {}", self.download_state);
                             },
+                            TorrentCommand::QueryStatus { response_channel } => {
+                                // Create a channel to receive the connected peers count from orchestrator
+                                let (peers_tx, peers_rx) = oneshot::channel();
+
+                                // Send query to orchestrator
+                                if let Err(_) = orchestrator_tx.send(Event::QueryConnectedPeers {
+                                    response_channel: peers_tx
+                                }).await {
+                                    // If we can't communicate with orchestrator, fall back to 0
+                                    warn!("Failed to query connected peers from orchestrator");
+                                    let response = TorrentState {
+                                        id: hex::encode(self.metadata.info_hash),
+                                        name: self.metadata.name.clone(),
+                                        status: self.status.clone(),
+                                        download_state: self.download_state.clone(),
+                                        peers_count: 0, // Default to 0 if we can't get the real count
+                                        eta: None,
+                                        download_speed: 0.0,
+                                        upload_speed: 0.0,
+                                    };
+                                    let _ = response_channel.send(response);
+                                    continue;
+                                }
+
+                                // Wait for response from orchestrator with a timeout
+                                match timeout(Duration::from_secs(5), peers_rx).await {
+                                    Ok(Ok(peers_count)) => {
+                                        let response = TorrentState {
+                                            id: hex::encode(self.metadata.info_hash),
+                                            name: self.metadata.name.clone(),
+                                            status: self.status.clone(),
+                                            download_state: self.download_state.clone(),
+                                            peers_count,
+                                            eta: None,
+                                            download_speed: 0.0,
+                                            upload_speed: 0.0,
+                                        };
+                                        let _ = response_channel.send(response);
+                                    },
+                                    Ok(Err(_)) => {
+                                        warn!("Orchestrator failed to respond with connected peers count");
+                                        let response = TorrentState {
+                                            id: hex::encode(self.metadata.info_hash),
+                                            name: self.metadata.name.clone(),
+                                            status: self.status.clone(),
+                                            download_state: self.download_state.clone(),
+                                            peers_count: 0,
+                                            eta: None,
+                                            download_speed: 0.0,
+                                            upload_speed: 0.0,
+                                        };
+                                        let _ = response_channel.send(response);
+                                    },
+                                    Err(_) => {
+                                        warn!("Timeout waiting for connected peers count from orchestrator");
+                                        let response = TorrentState {
+                                            id: hex::encode(self.metadata.info_hash),
+                                            name: self.metadata.name.clone(),
+                                            status: self.status.clone(),
+                                            download_state: self.download_state.clone(),
+                                            peers_count: 0,
+                                            eta: None,
+                                            download_speed: 0.0,
+                                            upload_speed: 0.0,
+                                        };
+                                        let _ = response_channel.send(response);
+                                    }
+                                }
+                            },
                             TorrentCommand::DownloadCompleted => {
                                 debug!("Download completed!");
                                 self.download_state.downloaded_bytes = self.metadata.total_length;
@@ -333,9 +577,12 @@ impl<'a> Torrent<'a> {
                                     }
                                 });
 
+                                info!("Download completed successfully");
+                                let duration = start.elapsed();
+                                debug!("Time elapsed: {:.2?}", duration);
+
                                 // Abort the orchestrator task
                                 orchestrator_handle.abort();
-                                break;
                             }
                         }
                     },
@@ -393,13 +640,16 @@ impl<'a> Torrent<'a> {
     }
 }
 
-#[derive(Debug)]
-enum Status {
+#[derive(Debug, Clone)]
+pub enum Status {
     Starting,
     Downloading,
     Paused,
+    Completed,
+    Error(String),
 }
 
+#[derive(Clone)]
 pub struct Metadata {
     pub info_hash: [u8; 20],
     pub name: String,

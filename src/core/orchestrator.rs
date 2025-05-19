@@ -1,7 +1,10 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use protocol::piece::Piece;
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
 use tracing::{debug, error, warn};
 
 use crate::{
@@ -12,7 +15,7 @@ use crate::{
 };
 
 use super::{
-    disk::{DiskWriter, DiskWriterStats},
+    disk::DiskWriter,
     monitor::{Monitor, MonitorCommand},
     sync::{Synchronizer, SynchronizerCommand},
 };
@@ -133,6 +136,9 @@ pub enum StatusEvent {
     /// Request for disk statistics
     QueryDownloadState {
         response_channel: mpsc::Sender<TorrentCommand>,
+    },
+    QueryConnectedPeers {
+        response_channel: oneshot::Sender<usize>,
     },
 }
 
@@ -368,6 +374,13 @@ impl Orchestrator {
                     Event::QueryDownloadState { response_channel } => {
                         self.handle_status_event(
                             StatusEvent::QueryDownloadState { response_channel },
+                            &sync_tx,
+                        )
+                        .await;
+                    }
+                    Event::QueryConnectedPeers { response_channel } => {
+                        self.handle_status_event(
+                            StatusEvent::QueryConnectedPeers { response_channel },
                             &sync_tx,
                         )
                         .await;
@@ -741,6 +754,11 @@ impl Orchestrator {
                     .await
                 {
                     error!(error = %e, "Failed to query download statistics");
+                }
+            }
+            StatusEvent::QueryConnectedPeers { response_channel } => {
+                if let Err(e) = response_channel.send(self.peer_sessions.iter().count()) {
+                    error!(error = %e, "Failed to query current peers connected");
                 }
             }
         }
