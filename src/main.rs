@@ -25,11 +25,11 @@ async fn main() -> io::Result<()> {
     let file_appender = rolling::daily("logs", "app.log");
 
     // Logger for terminal output (with colors).
-    let terminal_layer = fmt::layer()
-        .with_thread_names(true)
-        .with_target(true)
-        .with_span_events(FmtSpan::NONE)
-        .with_ansi(true); // Enable ANSI for terminal
+    // let terminal_layer = fmt::layer()
+    //     .with_thread_names(true)
+    //     .with_target(true)
+    //     .with_span_events(FmtSpan::NONE)
+    //     .with_ansi(true); // Enable ANSI for terminal
 
     // Logger for file output (no colors or ANSI escape codes).
     let file_layer = fmt::layer()
@@ -42,7 +42,7 @@ async fn main() -> io::Result<()> {
     // Combine the layers and apply the subscriber.
     let subscriber = Registry::default()
         .with(EnvFilter::from_default_env().add_directive(Level::DEBUG.into()))
-        .with(terminal_layer)
+        // .with(terminal_layer)
         .with(file_layer);
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
