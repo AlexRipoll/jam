@@ -11,10 +11,8 @@ enum Command {
     Stop(usize),     // Pause a download by ID
     Resume(usize),   // Resume a paused download by ID
     Cancel(usize),   // Cancel and remove download by ID
-    Status,          // Show status of all downloads
-    Stats(usize),    // Show detailed stats for a specific download
-    Peers(usize),    // Show connected peers for a specific download
-    List,            // List all torrents
+    State,           // Show state of all downloads
+    Inspect(usize),  // Show detailed stats for a specific download
     Log(Level),      // Change log level
     Help,            // Show help
     Exit,            // Exit the application
@@ -66,28 +64,17 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
-        "status" => Command::Status,
-        "stats" => {
+        "state" => Command::State,
+        "inspect" => {
             if parts.len() < 2 {
                 Command::Invalid("Missing torrent ID".to_string())
             } else {
                 match parts[1].parse::<usize>() {
-                    Ok(id) => Command::Stats(id),
+                    Ok(id) => Command::Inspect(id),
                     Err(_) => Command::Invalid("Invalid torrent ID".to_string()),
                 }
             }
         }
-        "peers" => {
-            if parts.len() < 2 {
-                Command::Invalid("Missing torrent ID".to_string())
-            } else {
-                match parts[1].parse::<usize>() {
-                    Ok(id) => Command::Peers(id),
-                    Err(_) => Command::Invalid("Invalid torrent ID".to_string()),
-                }
-            }
-        }
-        "list" => Command::List,
         "log" => {
             if parts.len() < 2 {
                 Command::Invalid("Missing log level".to_string())
@@ -117,10 +104,9 @@ fn display_help() {
     println!("  stop <id>          - Pause a download");
     println!("  resume <id>        - Resume a paused download");
     println!("  cancel <id>        - Cancel and remove a download");
-    println!("  status             - Show status of all downloads");
+    println!("  state              - Show state of all downloads");
     println!("  stats <id>         - Show detailed stats for a download");
     println!("  peers <id>         - Show connected peers for a download");
-    println!("  list               - List all torrents");
     println!("  log <level>        - Set log level (ERROR, WARN, INFO, DEBUG, TRACE)");
     println!("  help               - Show this help");
     println!("  exit               - Exit the application");
@@ -158,14 +144,8 @@ pub async fn run_repl<'a>(mut manager: TorrentManager<'a>) -> io::Result<()> {
             Command::Cancel(id) => {
                 unimplemented!();
             }
-            Command::Status => manager.display_torrents_state().await,
-            Command::Stats(id) => {
-                unimplemented!();
-            }
-            Command::Peers(id) => {
-                unimplemented!();
-            }
-            Command::List => {
+            Command::State => manager.display_torrents_state().await,
+            Command::Inspect(id) => {
                 unimplemented!();
             }
             Command::Log(level) => {
