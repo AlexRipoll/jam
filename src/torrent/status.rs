@@ -57,6 +57,31 @@ pub fn format_speed(bytes_per_second: f64) -> String {
     }
 }
 
+pub fn format_duration(duration: Duration) -> String {
+    let total_seconds = duration.as_secs();
+
+    let days = total_seconds / 86400;
+    let hours = (total_seconds % 86400) / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+
+    let mut parts = Vec::new();
+    if days > 0 {
+        parts.push(format!("{}d", days));
+    }
+    if hours > 0 {
+        parts.push(format!("{}h", hours));
+    }
+    if minutes > 0 {
+        parts.push(format!("{}m", minutes));
+    }
+    if seconds > 0 || parts.is_empty() {
+        parts.push(format!("{}s", seconds));
+    }
+
+    parts.join(" ")
+}
+
 pub fn format_eta(eta: Option<Duration>) -> String {
     match eta {
         Some(duration) => {

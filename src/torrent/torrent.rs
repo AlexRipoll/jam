@@ -23,7 +23,9 @@ use crate::{
     config::Config,
     core::orchestrator::{Orchestrator, OrchestratorConfig},
     events::Event,
-    torrent::status::{create_progress_bar, format_bytes, format_eta, format_speed, format_status},
+    torrent::status::{
+        create_progress_bar, format_bytes, format_duration, format_eta, format_speed, format_status,
+    },
     tracker::tracker::{Event as AnnounceEvent, TrackerManager},
 };
 
@@ -238,7 +240,7 @@ impl<'a> TorrentManager<'a> {
                 .fold(0, |acc, &byte| acc + byte.count_ones() as usize);
 
             println!("┌{}┐", "─".repeat(102));
-            println!("│ {:<100} │", format!("Piece Map: {}", state.name));
+            println!("│ {:<100} │", format!("Torrent: {}", state.name));
             println!(
                 "│ {:<100} │",
                 format!(
@@ -246,6 +248,13 @@ impl<'a> TorrentManager<'a> {
                     filled_pieces,
                     total_pieces,
                     (filled_pieces as f64 / total_pieces as f64) * 100.0
+                )
+            );
+            println!(
+                "│ {:<100} │",
+                format!(
+                    "Download time: {}",
+                    format_duration(state.download_state.time_elasped)
                 )
             );
             println!("├{}┤", "─".repeat(102));
@@ -322,6 +331,7 @@ pub struct DownloadState {
     pub left_bytes: u64,
     pub progress_percentage: u64,
     pub bitfield: Bitfield,
+    pub time_elasped: Duration,
 }
 
 impl DownloadState {
@@ -329,9 +339,10 @@ impl DownloadState {
         Self {
             downloaded_bytes: 0,
             uploaded_bytes: 0,
-            left_bytes: 0,
+            left_bytes: total_size,
             progress_percentage: 0,
             bitfield: Bitfield::new(total_pieces),
+            time_elasped: Duration::from_secs(0),
         }
     }
 }
@@ -437,7 +448,7 @@ impl<'a> Torrent<'a> {
 
     pub async fn run(mut self) -> (mpsc::Sender<TorrentCommand>, JoinHandle<()>) {
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<TorrentCommand>(128);
-        let start = Instant::now();
+        let duration = Instant::now();
 
         // Collect all announce URLs
         let mut announce_urls = Vec::new();
@@ -562,6 +573,7 @@ impl<'a> Torrent<'a> {
                                 self.download_state.left_bytes = left_pieces.saturating_mul(self.metadata.piece_length);
                                 self.download_state.progress_percentage = progress_percentage;
                                 self.download_state.bitfield = bitfield;
+                                self.download_state.time_elasped = duration.elapsed();
                                 info!("Download state: {}", self.download_state);
                             },
                             TorrentCommand::QueryStatus { response_channel } => {
@@ -652,7 +664,7 @@ impl<'a> Torrent<'a> {
                                 });
 
                                 info!("Download completed successfully");
-                                let duration = start.elapsed();
+                                self.download_state.time_elasped = duration.elapsed();
                                 debug!("Time elapsed: {:.2?}", duration);
 
                                 self.status = Status::Completed;
