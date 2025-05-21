@@ -363,6 +363,7 @@ impl Synchronizer {
                 let downloaded_pieces = self.downloaded_pieces_count() as u64;
                 let left_pieces = self.bitfield.total_pieces as u64 - downloaded_pieces;
                 let progress_percentage = self.download_progress_percent() as u64;
+                let bitfield = self.bitfield.clone();
 
                 response_tx
                     .send(TorrentCommand::DownloadState {
@@ -370,6 +371,7 @@ impl Synchronizer {
                         uploaded_pieces: 0,
                         left_pieces,
                         progress_percentage,
+                        bitfield,
                     })
                     .await?;
             }

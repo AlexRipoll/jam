@@ -146,7 +146,7 @@ pub async fn run_repl<'a>(mut manager: TorrentManager<'a>) -> io::Result<()> {
             }
             Command::State => manager.display_torrents_state().await,
             Command::Inspect(id) => {
-                unimplemented!();
+                manager.display_pieces_maps().await;
             }
             Command::Log(level) => {
                 println!("Changing log level to {:?}", level);

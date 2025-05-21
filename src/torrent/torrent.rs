@@ -9,7 +9,7 @@ use std::{
 };
 
 use hex::encode;
-use protocol::piece::Piece;
+use protocol::{bitfield::Bitfield, piece::Piece};
 use rand::{distributions::Alphanumeric, Rng};
 use sha1::{Digest, Sha1};
 use tokio::{
@@ -86,9 +86,9 @@ impl<'a> TorrentManager<'a> {
         Ok(torrent_id_hex)
     }
 
-    async fn torrents_status(&self) -> Vec<TorrentState> {
+    async fn torrents_states(&self) -> Result<Vec<TorrentState>, TorrentError> {
         let mut statuses = Vec::new();
-        let timeout_duration = Duration::from_secs(5);
+        let timeout_duration = Duration::from_secs(10);
 
         for (id, handle) in &self.torrents {
             let (response_tx, response_rx) = oneshot::channel();
@@ -101,7 +101,7 @@ impl<'a> TorrentManager<'a> {
                 })
                 .await
             {
-                warn!(
+                println!(
                     "Failed to send status query to torrent {}: {}",
                     hex::encode(id),
                     e
@@ -117,20 +117,28 @@ impl<'a> TorrentManager<'a> {
                     hex::encode(id),
                     e
                 ),
-                Err(_) => warn!(
-                    "Timeout waiting for status from torrent {}",
-                    hex::encode(id)
-                ),
+                Err(_) => {
+                    return Err(TorrentError::Timeout(format!(
+                        "Timeout waiting for status from torrent {}",
+                        hex::encode(id)
+                    )));
+                }
             }
         }
 
-        statuses
+        Ok(statuses)
     }
 
     pub async fn display_torrents_state(&self) {
-        let statuses = self.torrents_status().await;
+        let states = match self.torrents_states().await {
+            Ok(states) => states,
+            Err(err) => {
+                println!("Failed to retrieve torrent states: {}", err);
+                return;
+            }
+        };
 
-        if statuses.is_empty() {
+        if states.is_empty() {
             println!("No active torrents");
             return;
         }
@@ -143,7 +151,7 @@ impl<'a> TorrentManager<'a> {
         println!("│ Name                   │ Progress        │ Size                │ Speed  │ ETA   │ Peers │ Status │");
         println!("├──────────────────────────────────────────────────────────────────────────────────────────────────┤");
 
-        for status in statuses {
+        for status in states {
             let truncated_name = if status.name.len() > 22 {
                 format!("{}...", &status.name[..19])
             } else {
@@ -177,14 +185,20 @@ impl<'a> TorrentManager<'a> {
     }
 
     pub async fn display_compact_state(&self) {
-        let statuses = self.torrents_status().await;
+        let states = match self.torrents_states().await {
+            Ok(states) => states,
+            Err(err) => {
+                println!("Failed to retrieve torrent states: {}", err);
+                return;
+            }
+        };
 
-        if statuses.is_empty() {
+        if states.is_empty() {
             println!("No active torrents");
             return;
         }
 
-        for status in statuses {
+        for status in states {
             let progress_bar = create_progress_bar(status.download_state.progress_percentage);
             let speed = format_speed(status.download_speed);
             let eta = format_eta(status.eta);
@@ -198,6 +212,54 @@ impl<'a> TorrentManager<'a> {
                 eta,
                 format_status(&status.status)
             );
+        }
+    }
+
+    pub async fn display_pieces_maps(&self) {
+        let states = match self.torrents_states().await {
+            Ok(states) => states,
+            Err(err) => {
+                println!("Failed to retrieve torrent states: {}", err);
+                return;
+            }
+        };
+
+        if states.is_empty() {
+            println!("No active torrents");
+            return;
+        }
+
+        for state in &states {
+            let total_pieces = state.bitfield.total_pieces;
+            let filled_pieces = state
+                .bitfield
+                .bytes
+                .iter()
+                .fold(0, |acc, &byte| acc + byte.count_ones() as usize);
+
+            println!("┌{}┐", "─".repeat(102));
+            println!("│ {:<100} │", format!("Piece Map: {}", state.name));
+            println!(
+                "│ {:<100} │",
+                format!(
+                    "Progress: {}/{} pieces ({:.1}%)",
+                    filled_pieces,
+                    total_pieces,
+                    (filled_pieces as f64 / total_pieces as f64) * 100.0
+                )
+            );
+            println!("├{}┤", "─".repeat(102));
+
+            // Display the piece map with a nice border
+            let width = 100;
+            let map = display_bitfield(&state.bitfield, width);
+            for line in map.lines() {
+                println!("│ {:<102} │", line);
+            }
+
+            println!("└{}┘", "─".repeat(102));
+            println!("Legend: ■ = Downloaded piece  ▪ = Missing piece");
+            println!();
         }
     }
 
@@ -253,12 +315,25 @@ struct Torrent<'a> {
     config: &'a Config,
 }
 
-#[derive(Debug, Default, Clone)]
-struct DownloadState {
-    downloaded_bytes: u64,
-    uploaded_bytes: u64,
-    left_bytes: u64,
-    progress_percentage: u64,
+#[derive(Debug, Clone)]
+pub struct DownloadState {
+    pub downloaded_bytes: u64,
+    pub uploaded_bytes: u64,
+    pub left_bytes: u64,
+    pub progress_percentage: u64,
+    pub bitfield: Bitfield,
+}
+
+impl DownloadState {
+    fn new(total_size: u64, total_pieces: usize) -> Self {
+        Self {
+            downloaded_bytes: 0,
+            uploaded_bytes: 0,
+            left_bytes: 0,
+            progress_percentage: 0,
+            bitfield: Bitfield::new(total_pieces),
+        }
+    }
 }
 
 impl fmt::Display for DownloadState {
@@ -315,6 +390,7 @@ pub enum TorrentCommand {
         uploaded_pieces: u64,
         left_pieces: u64,
         progress_percentage: u64,
+        bitfield: Bitfield,
     },
     DownloadCompleted,
     /// Query current download state
@@ -330,6 +406,7 @@ pub struct TorrentState {
     pub status: Status,
     pub download_state: DownloadState,
     pub peers_count: usize,
+    pub bitfield: Bitfield,
     pub eta: Option<Duration>, // TODO: tbi
     pub download_speed: f64,   // bytes per second TODO:tbi
     pub upload_speed: f64,     // bytes per second TODO:tbi
@@ -344,6 +421,8 @@ impl<'a> Torrent<'a> {
     ) -> Torrent<'a> {
         let info_hash = Metainfo::compute_info_hash(&torrent_bytes).unwrap();
         let metainfo = Metainfo::deserialize(&torrent_bytes).unwrap();
+        let total_pieces = metainfo.total_pieces();
+        let total_size = metainfo.info.length.unwrap_or(0);
 
         Torrent {
             file_path: file_path.to_string(),
@@ -351,7 +430,7 @@ impl<'a> Torrent<'a> {
             metadata: Metadata::new(info_hash, metainfo),
             peers: HashSet::new(),
             status: Status::Starting,
-            download_state: DownloadState::default(),
+            download_state: DownloadState::new(total_size, total_pieces),
             config,
         }
     }
@@ -476,12 +555,13 @@ impl<'a> Torrent<'a> {
                     // Handle commands from the orchestrator
                     Some(event) = cmd_rx.recv() => {
                         match event {
-                            TorrentCommand::DownloadState { downloaded_pieces, uploaded_pieces, left_pieces, progress_percentage } => {
+                            TorrentCommand::DownloadState { downloaded_pieces, uploaded_pieces, left_pieces, progress_percentage, bitfield } => {
                                 debug!("Download progress: {progress_percentage}%");
                                 self.download_state.downloaded_bytes = downloaded_pieces.saturating_mul(self.metadata.piece_length);
                                 self.download_state.uploaded_bytes = uploaded_pieces.saturating_mul(self.metadata.piece_length);
                                 self.download_state.left_bytes = left_pieces.saturating_mul(self.metadata.piece_length);
                                 self.download_state.progress_percentage = progress_percentage;
+                                self.download_state.bitfield = bitfield;
                                 info!("Download state: {}", self.download_state);
                             },
                             TorrentCommand::QueryStatus { response_channel } => {
@@ -494,16 +574,7 @@ impl<'a> Torrent<'a> {
                                 }).await {
                                     // If we can't communicate with orchestrator, fall back to 0
                                     warn!("Failed to query connected peers from orchestrator");
-                                    let response = TorrentState {
-                                        id: hex::encode(self.metadata.info_hash),
-                                        name: self.metadata.name.clone(),
-                                        status: self.status.clone(),
-                                        download_state: self.download_state.clone(),
-                                        peers_count: 0, // Default to 0 if we can't get the real count
-                                        eta: None,
-                                        download_speed: 0.0,
-                                        upload_speed: 0.0,
-                                    };
+                                    let response = TorrentState {id:hex::encode(self.metadata.info_hash),name:self.metadata.name.clone(),status:self.status.clone(),download_state:self.download_state.clone(), bitfield: self.download_state.bitfield.clone(), peers_count:0,eta:None,download_speed:0.0,upload_speed:0.0};
                                     let _ = response_channel.send(response);
                                     continue;
                                 }
@@ -516,6 +587,7 @@ impl<'a> Torrent<'a> {
                                             name: self.metadata.name.clone(),
                                             status: self.status.clone(),
                                             download_state: self.download_state.clone(),
+                                            bitfield: self.download_state.bitfield.clone(),
                                             peers_count,
                                             eta: None,
                                             download_speed: 0.0,
@@ -530,6 +602,7 @@ impl<'a> Torrent<'a> {
                                             name: self.metadata.name.clone(),
                                             status: self.status.clone(),
                                             download_state: self.download_state.clone(),
+                                            bitfield: self.download_state.bitfield.clone(),
                                             peers_count: 0,
                                             eta: None,
                                             download_speed: 0.0,
@@ -544,6 +617,7 @@ impl<'a> Torrent<'a> {
                                             name: self.metadata.name.clone(),
                                             status: self.status.clone(),
                                             download_state: self.download_state.clone(),
+                                            bitfield: self.download_state.bitfield.clone(),
                                             peers_count: 0,
                                             eta: None,
                                             download_speed: 0.0,
@@ -752,6 +826,8 @@ pub enum TorrentError {
 
     /// Standard I/O error
     Io(io::Error),
+
+    Timeout(String),
 }
 
 impl Display for TorrentError {
@@ -759,6 +835,7 @@ impl Display for TorrentError {
         match self {
             TorrentError::Metainfo(err) => write!(f, "Metainfo error: {}", err),
             TorrentError::Io(err) => write!(f, "I/O error: {}", err),
+            TorrentError::Timeout(msg) => write!(f, "Timeout error: {}", msg),
         }
     }
 }
@@ -768,6 +845,7 @@ impl Error for TorrentError {
         match self {
             TorrentError::Metainfo(err) => Some(err),
             TorrentError::Io(err) => Some(err),
+            _ => None,
         }
     }
 }
@@ -782,4 +860,62 @@ impl From<io::Error> for TorrentError {
     fn from(err: io::Error) -> Self {
         TorrentError::Io(err)
     }
+}
+
+// Bitfield display options
+pub enum BitfieldDisplayStyle {
+    /// Simple ASCII blocks (# and .)
+    Simple,
+    /// Unicode blocks with color (if supported)
+    Fancy,
+    /// Heat map style with gradients
+    HeatMap,
+}
+
+// Displays bitfield with unicode blocks with pseudo-color indicators
+fn display_bitfield(bitfield: &Bitfield, width: usize) -> String {
+    // Use different Unicode block characters for better visualization
+    // □ ■ ▢ ▣ ▤ ▥ ▦ ▧ ▨ ▩ ▪ ▫ ▬ ▭ ▮ ▯
+    let mut result = String::new();
+    let mut count = 0;
+
+    // Check if terminal supports ANSI colors
+    let use_colors = atty::is(atty::Stream::Stdout);
+
+    for byte in &bitfield.bytes {
+        for bit in 0..8 {
+            if count >= bitfield.total_pieces {
+                break;
+            }
+
+            let is_set = (byte & (1 << (7 - bit))) != 0;
+
+            if is_set {
+                if use_colors {
+                    result.push_str("\x1b[32m"); // Green color
+                    result.push('■');
+                    result.push_str("\x1b[0m"); // Reset color
+                } else {
+                    result.push('■');
+                }
+            } else {
+                if use_colors {
+                    result.push_str("\x1b[90m"); // Gray color
+                    result.push('▪');
+                    result.push_str("\x1b[0m"); // Reset color
+                } else {
+                    result.push('▪');
+                }
+            }
+
+            count += 1;
+
+            // Add newline for width formatting
+            if count % width == 0 && count < bitfield.total_pieces {
+                result.push('\n');
+            }
+        }
+    }
+
+    result
 }
