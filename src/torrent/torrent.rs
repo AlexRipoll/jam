@@ -581,6 +581,8 @@ impl<'a> Torrent<'a> {
                                 let duration = start.elapsed();
                                 debug!("Time elapsed: {:.2?}", duration);
 
+                                self.status = Status::Completed;
+
                                 // Abort the orchestrator task
                                 orchestrator_handle.abort();
                             }
