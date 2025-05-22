@@ -7,7 +7,7 @@ use std::{
 
 use protocol::{bitfield::Bitfield, piece::Piece};
 use tokio::{sync::mpsc, task::JoinHandle};
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 
 use crate::{events::Event, torrent::torrent::TorrentCommand};
 
@@ -364,6 +364,7 @@ impl Synchronizer {
                 let left_pieces = self.bitfield.total_pieces as u64 - downloaded_pieces;
                 let progress_percentage = self.download_progress_percent() as u64;
                 let bitfield = self.bitfield.clone();
+                let pieces_rarity = self.pieces_rarity.clone();
 
                 response_tx
                     .send(TorrentCommand::DownloadState {
@@ -372,6 +373,7 @@ impl Synchronizer {
                         left_pieces,
                         progress_percentage,
                         bitfield,
+                        pieces_rarity,
                     })
                     .await?;
             }

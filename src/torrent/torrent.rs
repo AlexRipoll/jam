@@ -1,4 +1,5 @@
 use std::{
+    cmp::min,
     collections::{HashMap, HashSet, VecDeque},
     error::Error,
     fmt::{self, Display},
@@ -8,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use hex::encode;
+use hex::{decode, encode};
 use protocol::{bitfield::Bitfield, piece::Piece};
 use rand::{distributions::Alphanumeric, Rng};
 use sha1::{Digest, Sha1};
@@ -33,6 +34,14 @@ use super::{
     metainfo::{Metainfo, MetainfoError},
     peer::Peer,
 };
+
+const GREEN: &str = "\x1b[32m";
+const RED: &str = "\x1b[91m";
+const ORANGE: &str = "\x1b[93m";
+const YELLOW: &str = "\x1b[33m";
+const BLUE: &str = "\x1b[94m";
+const GRAY: &str = "\x1b[90m";
+const RESET: &str = "\x1b[0m";
 
 // Define TorrentManager to handle multiple downloads
 #[derive(Debug)]
@@ -216,8 +225,7 @@ impl<'a> TorrentManager<'a> {
             );
         }
     }
-
-    pub async fn display_pieces_maps(&self) {
+    pub async fn display_inspect(&self, torrent_id: &str) {
         let states = match self.torrents_states().await {
             Ok(states) => states,
             Err(err) => {
@@ -232,43 +240,8 @@ impl<'a> TorrentManager<'a> {
         }
 
         for state in &states {
-            let total_pieces = state.bitfield.total_pieces;
-            let filled_pieces = state
-                .bitfield
-                .bytes
-                .iter()
-                .fold(0, |acc, &byte| acc + byte.count_ones() as usize);
-
-            println!("┌{}┐", "─".repeat(102));
-            println!("│ {:<100} │", format!("Torrent: {}", state.name));
-            println!(
-                "│ {:<100} │",
-                format!(
-                    "Progress: {}/{} pieces ({:.1}%)",
-                    filled_pieces,
-                    total_pieces,
-                    (filled_pieces as f64 / total_pieces as f64) * 100.0
-                )
-            );
-            println!(
-                "│ {:<100} │",
-                format!(
-                    "Download time: {}",
-                    format_duration(state.download_state.time_elasped)
-                )
-            );
-            println!("├{}┤", "─".repeat(102));
-
-            // Display the piece map with a nice border
-            let width = 100;
-            let map = display_bitfield(&state.bitfield, width);
-            for line in map.lines() {
-                println!("│ {:<102} │", line);
-            }
-
-            println!("└{}┘", "─".repeat(102));
-            println!("Legend: ■ = Downloaded piece  ▪ = Missing piece");
-            println!();
+            render_bitfield_progress(state).await;
+            render_pieces_rarity(state).await;
         }
     }
 
@@ -331,6 +304,7 @@ pub struct DownloadState {
     pub left_bytes: u64,
     pub progress_percentage: u64,
     pub bitfield: Bitfield,
+    pub pieces_rarity: Vec<u8>,
     pub time_elasped: Duration,
 }
 
@@ -343,6 +317,7 @@ impl DownloadState {
             progress_percentage: 0,
             bitfield: Bitfield::new(total_pieces),
             time_elasped: Duration::from_secs(0),
+            pieces_rarity: vec![],
         }
     }
 }
@@ -402,6 +377,7 @@ pub enum TorrentCommand {
         left_pieces: u64,
         progress_percentage: u64,
         bitfield: Bitfield,
+        pieces_rarity: Vec<u8>,
     },
     DownloadCompleted,
     /// Query current download state
@@ -566,13 +542,14 @@ impl<'a> Torrent<'a> {
                     // Handle commands from the orchestrator
                     Some(event) = cmd_rx.recv() => {
                         match event {
-                            TorrentCommand::DownloadState { downloaded_pieces, uploaded_pieces, left_pieces, progress_percentage, bitfield } => {
+                            TorrentCommand::DownloadState { downloaded_pieces, uploaded_pieces, left_pieces, progress_percentage, bitfield, pieces_rarity } => {
                                 debug!("Download progress: {progress_percentage}%");
                                 self.download_state.downloaded_bytes = downloaded_pieces.saturating_mul(self.metadata.piece_length);
                                 self.download_state.uploaded_bytes = uploaded_pieces.saturating_mul(self.metadata.piece_length);
                                 self.download_state.left_bytes = left_pieces.saturating_mul(self.metadata.piece_length);
                                 self.download_state.progress_percentage = progress_percentage;
                                 self.download_state.bitfield = bitfield;
+                                self.download_state.pieces_rarity = pieces_rarity;
                                 self.download_state.time_elasped = duration.elapsed();
                                 info!("Download state: {}", self.download_state);
                             },
@@ -874,21 +851,67 @@ impl From<io::Error> for TorrentError {
     }
 }
 
-// Bitfield display options
-pub enum BitfieldDisplayStyle {
-    /// Simple ASCII blocks (# and .)
-    Simple,
-    /// Unicode blocks with color (if supported)
-    Fancy,
-    /// Heat map style with gradients
-    HeatMap,
+pub async fn render_bitfield_progress(state: &TorrentState) {
+    let total_pieces = state.bitfield.total_pieces;
+    let filled_pieces: usize = state
+        .bitfield
+        .bytes
+        .iter()
+        .take((total_pieces + 7) / 8) // Only process bytes that contain actual piece data
+        .enumerate()
+        .map(|(i, &byte)| {
+            let bits_in_byte = min(8, total_pieces - i * 8);
+            let mask = (1u8 << bits_in_byte) - 1;
+            (byte & mask).count_ones() as usize
+        })
+        .sum();
+
+    println!("┌{}┐", "─".repeat(102));
+    println!("│ {:<100} │", format!("Torrent: {}", state.name));
+    println!(
+        "│ {:<100} │",
+        format!(
+            "Progress: {}/{} pieces ({:.1}%)",
+            filled_pieces,
+            total_pieces,
+            (filled_pieces as f64 / total_pieces as f64) * 100.0
+        )
+    );
+    println!(
+        "│ {:<100} │",
+        format!(
+            "Download time: {}",
+            format_duration(state.download_state.time_elasped)
+        )
+    );
+    println!("├{}┤", "─".repeat(102));
+
+    // Display the piece map with a nice border
+    let width = 100;
+    // □ ■ ▢ ▣ ▤ ▥ ▦ ▧ ▨ ▩ ▪ ▫ ▬ ▭ ▮ ▯
+    let symbol_set = '▣';
+    let symbol_not_set = '▪';
+    let map = format_bitfield_pieces(&state.bitfield, width, symbol_set, symbol_not_set);
+    for line in map.lines() {
+        println!("│ {:<102} │", line);
+    }
+
+    println!("└{}┘", "─".repeat(102));
+    println!("Legend: ■ = Downloaded piece  ▪ = Missing piece");
+    println!();
 }
 
 // Displays bitfield with unicode blocks with pseudo-color indicators
-fn display_bitfield(bitfield: &Bitfield, width: usize) -> String {
-    // Use different Unicode block characters for better visualization
-    // □ ■ ▢ ▣ ▤ ▥ ▦ ▧ ▨ ▩ ▪ ▫ ▬ ▭ ▮ ▯
-    let mut result = String::new();
+fn format_bitfield_pieces(
+    bitfield: &Bitfield,
+    width: usize,
+    symbol_set: char,
+    symbol_not_set: char,
+) -> String {
+    // Pre-allocate string capacity in format_bitfield_pieces
+    let estimated_size = (bitfield.total_pieces / width + 1) * (width + 1);
+    let mut result = String::with_capacity(estimated_size);
+
     let mut count = 0;
 
     // Check if terminal supports ANSI colors
@@ -904,19 +927,19 @@ fn display_bitfield(bitfield: &Bitfield, width: usize) -> String {
 
             if is_set {
                 if use_colors {
-                    result.push_str("\x1b[32m"); // Green color
-                    result.push('■');
-                    result.push_str("\x1b[0m"); // Reset color
+                    result.push_str(GREEN);
+                    result.push(symbol_set);
+                    result.push_str(RESET);
                 } else {
-                    result.push('■');
+                    result.push(symbol_set);
                 }
             } else {
                 if use_colors {
-                    result.push_str("\x1b[90m"); // Gray color
-                    result.push('▪');
-                    result.push_str("\x1b[0m"); // Reset color
+                    result.push_str(GRAY);
+                    result.push(symbol_not_set);
+                    result.push_str(RESET);
                 } else {
-                    result.push('▪');
+                    result.push(symbol_not_set);
                 }
             }
 
@@ -930,4 +953,93 @@ fn display_bitfield(bitfield: &Bitfield, width: usize) -> String {
     }
 
     result
+}
+
+pub async fn render_pieces_rarity(state: &TorrentState) {
+    let pieces_rarity = &state.download_state.pieces_rarity;
+
+    // Calculate rarity statistics
+    let total_pieces = pieces_rarity.len();
+    let mut rarity_counts: HashMap<u8, usize> = HashMap::new();
+
+    for &rarity in pieces_rarity {
+        *rarity_counts.entry(rarity).or_insert(0) += 1;
+    }
+
+    let unavailable_pieces = rarity_counts.get(&0).copied().unwrap_or(0);
+    let rare_pieces = rarity_counts
+        .iter()
+        .filter(|(&rarity, _)| rarity >= 1 && rarity <= 3)
+        .map(|(_, &count)| count)
+        .sum::<usize>();
+
+    println!("┌{}┐", "─".repeat(102));
+    println!("│ {:<100} │", format!("Piece rarity map"));
+    println!(
+        "│ {:<100} │",
+        format!(
+            "Pieces: {} total, {} unavailable, {} rare (≤3 peers)",
+            total_pieces, unavailable_pieces, rare_pieces
+        )
+    );
+    println!("├{}┤", "─".repeat(102));
+
+    // □ ■ ▢ ▣ ▤ ▥ ▦ ▧ ▨ ▩ ▪ ▫ ▬ ▭ ▮ ▯
+    let width = 100;
+    let symbol = '▣';
+    let map = format_pieces_rarity(pieces_rarity, width, symbol);
+    for line in map.lines() {
+        println!("│ {} │", line);
+    }
+
+    println!("└{}┘", "─".repeat(102));
+
+    // Color-coded legend
+    println!("Legend:");
+    println!(
+        "  {}{symbol}{} Unavailable (0 peers)     {}{symbol}{} Very rare (1 peer)",
+        RED, RESET, RED, RESET
+    );
+    println!(
+        "  {}{symbol}{} Rare (2-3 peers)          {}{symbol}{} Uncommon (4-5 peers)",
+        ORANGE, RESET, YELLOW, RESET
+    );
+    println!(
+        "  {}{symbol}{} Common (6-8 peers)        {}{symbol}{} Very common (9+ peers)",
+        GREEN, RESET, BLUE, RESET
+    );
+    println!();
+}
+
+fn format_pieces_rarity(pieces_rarity: &[u8], width: usize, symbol: char) -> String {
+    let mut result = String::new();
+    let total_pieces = pieces_rarity.len();
+
+    if total_pieces == 0 {
+        return "No pieces to display".to_string();
+    }
+
+    // Display each piece individually, one character per piece
+    for (piece_index, &rarity) in pieces_rarity.iter().enumerate() {
+        // Add newline at the beginning of each row (except the first)
+        if piece_index > 0 && piece_index % width == 0 {
+            result.push('\n');
+        }
+
+        let color = rarity_to_color(rarity);
+
+        result.push_str(&format!("{}{}{}", color, symbol, RESET));
+    }
+
+    result
+}
+
+fn rarity_to_color(occurrences: u8) -> &'static str {
+    match occurrences {
+        0..=1 => RED,    // Very rare - critical pieces
+        2..=3 => ORANGE, // Rare - important to download
+        4..=5 => YELLOW, // Uncommon - moderate priority
+        6..=8 => GREEN,  // Common - lower priority
+        _ => BLUE,       // Very common - lowest priority
+    }
 }
