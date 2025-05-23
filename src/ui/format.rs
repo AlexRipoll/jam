@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use super::torrent::Status;
+use crate::torrent::torrent::Status;
 
 pub fn create_progress_bar(percentage: u64) -> String {
     let bar_width = 8;
