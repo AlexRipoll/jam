@@ -2,7 +2,10 @@ use std::io::{self, BufRead, Write};
 
 use tracing::{debug, Level};
 
-use crate::torrent::torrent::TorrentManager;
+use crate::{
+    torrent::torrent::TorrentManager,
+    ui::render::{display_inspect, display_torrents_state},
+};
 
 // Define commands and control messages
 #[derive(Debug)]
@@ -144,9 +147,25 @@ pub async fn run_repl<'a>(mut manager: TorrentManager<'a>) -> io::Result<()> {
             Command::Cancel(id) => {
                 unimplemented!();
             }
-            Command::State => manager.display_torrents_state().await,
+            Command::State => {
+                let torrent_states = match manager.torrents_states().await {
+                    Ok(states) => states,
+                    Err(e) => {
+                        println!("{}", e);
+                        continue;
+                    }
+                };
+                display_torrents_state(torrent_states).await;
+            }
             Command::Inspect(id) => {
-                manager.display_inspect(&id).await;
+                let torrent_state = match manager.torrent_state(&id).await {
+                    Ok(states) => states,
+                    Err(e) => {
+                        println!("{}", e);
+                        continue;
+                    }
+                };
+                display_inspect(&torrent_state).await;
             }
             Command::Log(level) => {
                 println!("Changing log level to {:?}", level);

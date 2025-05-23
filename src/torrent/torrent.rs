@@ -1,6 +1,5 @@
 use std::{
-    cmp::min,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     error::Error,
     fmt::{self, Display},
     fs::File,
@@ -9,10 +8,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use hex::{decode, encode};
+use hex::encode;
 use protocol::{bitfield::Bitfield, piece::Piece};
 use rand::{distributions::Alphanumeric, Rng};
-use sha1::{Digest, Sha1};
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
@@ -24,9 +22,6 @@ use crate::{
     config::Config,
     core::orchestrator::{Orchestrator, OrchestratorConfig},
     events::Event,
-    torrent::status::{
-        create_progress_bar, format_bytes, format_duration, format_eta, format_speed, format_status,
-    },
     tracker::tracker::{Event as AnnounceEvent, TrackerManager},
 };
 
@@ -35,18 +30,9 @@ use super::{
     peer::Peer,
 };
 
-const GREEN: &str = "\x1b[32m";
-const RED: &str = "\x1b[91m";
-const ORANGE: &str = "\x1b[93m";
-const YELLOW: &str = "\x1b[33m";
-const BLUE: &str = "\x1b[94m";
-const GRAY: &str = "\x1b[90m";
-const RESET: &str = "\x1b[0m";
-
-// Define TorrentManager to handle multiple downloads
 #[derive(Debug)]
 pub struct TorrentManager<'a> {
-    torrents: HashMap<[u8; 20], TorrentHandle>,
+    torrents: HashMap<String, TorrentHandle>,
     config: &'a Config,
     peer_id: [u8; 20],
 }
@@ -60,7 +46,7 @@ impl<'a> TorrentManager<'a> {
         }
     }
 
-    pub async fn start_torrent(&mut self, file_path: &str) -> Result<String, TorrentError> {
+    pub async fn start_torrent(&mut self, file_path: &str) -> Result<String, TorrentManagerError> {
         debug!("Opening torrent file: {}", file_path);
         let mut file = File::open(file_path)?;
 
@@ -87,7 +73,7 @@ impl<'a> TorrentManager<'a> {
 
         // Store the handle
         self.torrents.insert(
-            torrent_id,
+            torrent_id_hex.clone(),
             TorrentHandle {
                 tx: torrent_tx,
                 _handle: torrent_handle,
@@ -97,8 +83,8 @@ impl<'a> TorrentManager<'a> {
         Ok(torrent_id_hex)
     }
 
-    async fn torrents_states(&self) -> Result<Vec<TorrentState>, TorrentError> {
-        let mut statuses = Vec::new();
+    pub async fn torrents_states(&self) -> Result<Vec<TorrentState>, TorrentManagerError> {
+        let mut torrent_states = Vec::new();
         let timeout_duration = Duration::from_secs(10);
 
         for (id, handle) in &self.torrents {
@@ -122,14 +108,14 @@ impl<'a> TorrentManager<'a> {
 
             // Wait for response with timeout
             match timeout(timeout_duration, response_rx).await {
-                Ok(Ok(status)) => statuses.push(status),
+                Ok(Ok(status)) => torrent_states.push(status),
                 Ok(Err(e)) => warn!(
                     "Failed to receive status from torrent {}: {}",
                     hex::encode(id),
                     e
                 ),
                 Err(_) => {
-                    return Err(TorrentError::Timeout(format!(
+                    return Err(TorrentManagerError::Timeout(format!(
                         "Timeout waiting for status from torrent {}",
                         hex::encode(id)
                     )));
@@ -137,111 +123,45 @@ impl<'a> TorrentManager<'a> {
             }
         }
 
-        Ok(statuses)
+        if torrent_states.is_empty() {
+            return Err(TorrentManagerError::NoActiveTorrents);
+        }
+
+        Ok(torrent_states)
     }
 
-    pub async fn display_torrents_state(&self) {
-        let states = match self.torrents_states().await {
-            Ok(states) => states,
-            Err(err) => {
-                println!("Failed to retrieve torrent states: {}", err);
-                return;
+    pub async fn torrent_state(&self, id: &str) -> Result<TorrentState, TorrentManagerError> {
+        let timeout_duration = Duration::from_secs(10);
+
+        let (info_hash, handle) = self
+            .torrents
+            .iter()
+            .find(|(info_hash, _)| info_hash.starts_with(id))
+            .ok_or(TorrentManagerError::NotFound(id.to_string()))?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        // Send status query to the torrent
+        if let Err(e) = handle
+            .tx
+            .send(TorrentCommand::QueryStatus {
+                response_channel: response_tx,
+            })
+            .await
+        {
+            return Err(TorrentManagerError::TorrentStateTxError(e));
+        }
+
+        // Wait for response with timeout
+        match timeout(timeout_duration, response_rx).await {
+            Ok(Ok(state)) => return Ok(state),
+            Ok(Err(e)) => Err(TorrentManagerError::TorrentStateRxError(e)),
+            Err(_) => {
+                return Err(TorrentManagerError::Timeout(format!(
+                    "Timeout waiting for status from torrent {}",
+                    info_hash
+                )));
             }
-        };
-
-        if states.is_empty() {
-            println!("No active torrents");
-            return;
-        }
-
-        // Print header
-        println!();
-        println!("┌──────────────────────────────────────────────────────────────────────────────────────────────────┐");
-        println!("│                                 TORRENT STATUS                                                   │");
-        println!("├──────────────────────────────────────────────────────────────────────────────────────────────────┤");
-        println!("│ Name                   │ Progress        │ Size                │ Speed  │ ETA   │ Peers │ Status │");
-        println!("├──────────────────────────────────────────────────────────────────────────────────────────────────┤");
-
-        for status in states {
-            let truncated_name = if status.name.len() > 22 {
-                format!("{}...", &status.name[..19])
-            } else {
-                format!("{:<22}", status.name)
-            };
-
-            let progress_bar = create_progress_bar(status.download_state.progress_percentage);
-            let downloaded_display = format_bytes(status.download_state.downloaded_bytes);
-            let size_display = format_bytes(
-                status.download_state.downloaded_bytes + status.download_state.left_bytes,
-            );
-            let speed_display = format_speed(status.download_speed);
-            let eta_display = format_eta(status.eta);
-            let status_display = format_status(&status.status);
-
-            println!(
-                "│ {} │ {} │ {:>8} of {:>8}│ {:>6} │ {:>5} │ {:>5} │ {:>6} │",
-                truncated_name,
-                progress_bar,
-                downloaded_display,
-                size_display,
-                speed_display,
-                eta_display,
-                status.peers_count,
-                status_display
-            );
-        }
-
-        println!("└──────────────────────────────────────────────────────────────────────────────────────────────────┘");
-        println!();
-    }
-
-    pub async fn display_compact_state(&self) {
-        let states = match self.torrents_states().await {
-            Ok(states) => states,
-            Err(err) => {
-                println!("Failed to retrieve torrent states: {}", err);
-                return;
-            }
-        };
-
-        if states.is_empty() {
-            println!("No active torrents");
-            return;
-        }
-
-        for status in states {
-            let progress_bar = create_progress_bar(status.download_state.progress_percentage);
-            let speed = format_speed(status.download_speed);
-            let eta = format_eta(status.eta);
-
-            println!(
-                "{} {} {}% ↓{} ETA:{} [{}]",
-                status.name,
-                progress_bar,
-                status.download_state.progress_percentage,
-                speed,
-                eta,
-                format_status(&status.status)
-            );
-        }
-    }
-    pub async fn display_inspect(&self, torrent_id: &str) {
-        let states = match self.torrents_states().await {
-            Ok(states) => states,
-            Err(err) => {
-                println!("Failed to retrieve torrent states: {}", err);
-                return;
-            }
-        };
-
-        if states.is_empty() {
-            println!("No active torrents");
-            return;
-        }
-
-        for state in &states {
-            render_bitfield_progress(state).await;
-            render_pieces_rarity(state).await;
         }
     }
 
@@ -809,7 +729,7 @@ fn client_version() -> String {
 }
 
 #[derive(Debug)]
-pub enum TorrentError {
+pub enum TorrentManagerError {
     /// Metainfo related error
     Metainfo(MetainfoError),
 
@@ -817,229 +737,50 @@ pub enum TorrentError {
     Io(io::Error),
 
     Timeout(String),
+    NoActiveTorrents,
+    NotFound(String),
+    TorrentStateTxError(mpsc::error::SendError<TorrentCommand>),
+    TorrentStateRxError(oneshot::error::RecvError),
 }
 
-impl Display for TorrentError {
+impl Display for TorrentManagerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TorrentError::Metainfo(err) => write!(f, "Metainfo error: {}", err),
-            TorrentError::Io(err) => write!(f, "I/O error: {}", err),
-            TorrentError::Timeout(msg) => write!(f, "Timeout error: {}", msg),
+            TorrentManagerError::Metainfo(err) => write!(f, "Metainfo error: {}", err),
+            TorrentManagerError::Io(err) => write!(f, "I/O error: {}", err),
+            TorrentManagerError::Timeout(msg) => write!(f, "Timeout error: {}", msg),
+            TorrentManagerError::NoActiveTorrents => write!(f, "No active torrents"),
+            TorrentManagerError::NotFound(id) => write!(f, "Torrent not found with id {}", id),
+            TorrentManagerError::TorrentStateTxError(e) => {
+                write!(f, "Failed to send status request: {}", e)
+            }
+            TorrentManagerError::TorrentStateRxError(e) => {
+                write!(f, "Failed to receive torrent state: {}", e)
+            }
         }
     }
 }
 
-impl Error for TorrentError {
+impl Error for TorrentManagerError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            TorrentError::Metainfo(err) => Some(err),
-            TorrentError::Io(err) => Some(err),
+            TorrentManagerError::Metainfo(err) => Some(err),
+            TorrentManagerError::Io(err) => Some(err),
+            TorrentManagerError::TorrentStateTxError(err) => Some(err),
+            TorrentManagerError::TorrentStateRxError(err) => Some(err),
             _ => None,
         }
     }
 }
 
-impl From<MetainfoError> for TorrentError {
+impl From<MetainfoError> for TorrentManagerError {
     fn from(err: MetainfoError) -> Self {
-        TorrentError::Metainfo(err)
+        TorrentManagerError::Metainfo(err)
     }
 }
 
-impl From<io::Error> for TorrentError {
+impl From<io::Error> for TorrentManagerError {
     fn from(err: io::Error) -> Self {
-        TorrentError::Io(err)
-    }
-}
-
-pub async fn render_bitfield_progress(state: &TorrentState) {
-    let total_pieces = state.bitfield.total_pieces;
-    let filled_pieces: usize = state
-        .bitfield
-        .bytes
-        .iter()
-        .take((total_pieces + 7) / 8) // Only process bytes that contain actual piece data
-        .enumerate()
-        .map(|(i, &byte)| {
-            let bits_in_byte = min(8, total_pieces - i * 8);
-            let mask = (1u8 << bits_in_byte) - 1;
-            (byte & mask).count_ones() as usize
-        })
-        .sum();
-
-    println!("┌{}┐", "─".repeat(102));
-    println!("│ {:<100} │", format!("Torrent: {}", state.name));
-    println!(
-        "│ {:<100} │",
-        format!(
-            "Progress: {}/{} pieces ({:.1}%)",
-            filled_pieces,
-            total_pieces,
-            (filled_pieces as f64 / total_pieces as f64) * 100.0
-        )
-    );
-    println!(
-        "│ {:<100} │",
-        format!(
-            "Download time: {}",
-            format_duration(state.download_state.time_elasped)
-        )
-    );
-    println!("├{}┤", "─".repeat(102));
-
-    // Display the piece map with a nice border
-    let width = 100;
-    // □ ■ ▢ ▣ ▤ ▥ ▦ ▧ ▨ ▩ ▪ ▫ ▬ ▭ ▮ ▯
-    let symbol_set = '▣';
-    let symbol_not_set = '▪';
-    let map = format_bitfield_pieces(&state.bitfield, width, symbol_set, symbol_not_set);
-    for line in map.lines() {
-        println!("│ {:<102} │", line);
-    }
-
-    println!("└{}┘", "─".repeat(102));
-    println!("Legend: ■ = Downloaded piece  ▪ = Missing piece");
-    println!();
-}
-
-// Displays bitfield with unicode blocks with pseudo-color indicators
-fn format_bitfield_pieces(
-    bitfield: &Bitfield,
-    width: usize,
-    symbol_set: char,
-    symbol_not_set: char,
-) -> String {
-    // Pre-allocate string capacity in format_bitfield_pieces
-    let estimated_size = (bitfield.total_pieces / width + 1) * (width + 1);
-    let mut result = String::with_capacity(estimated_size);
-
-    let mut count = 0;
-
-    // Check if terminal supports ANSI colors
-    let use_colors = atty::is(atty::Stream::Stdout);
-
-    for byte in &bitfield.bytes {
-        for bit in 0..8 {
-            if count >= bitfield.total_pieces {
-                break;
-            }
-
-            let is_set = (byte & (1 << (7 - bit))) != 0;
-
-            if is_set {
-                if use_colors {
-                    result.push_str(GREEN);
-                    result.push(symbol_set);
-                    result.push_str(RESET);
-                } else {
-                    result.push(symbol_set);
-                }
-            } else {
-                if use_colors {
-                    result.push_str(GRAY);
-                    result.push(symbol_not_set);
-                    result.push_str(RESET);
-                } else {
-                    result.push(symbol_not_set);
-                }
-            }
-
-            count += 1;
-
-            // Add newline for width formatting
-            if count % width == 0 && count < bitfield.total_pieces {
-                result.push('\n');
-            }
-        }
-    }
-
-    result
-}
-
-pub async fn render_pieces_rarity(state: &TorrentState) {
-    let pieces_rarity = &state.download_state.pieces_rarity;
-
-    // Calculate rarity statistics
-    let total_pieces = pieces_rarity.len();
-    let mut rarity_counts: HashMap<u8, usize> = HashMap::new();
-
-    for &rarity in pieces_rarity {
-        *rarity_counts.entry(rarity).or_insert(0) += 1;
-    }
-
-    let unavailable_pieces = rarity_counts.get(&0).copied().unwrap_or(0);
-    let rare_pieces = rarity_counts
-        .iter()
-        .filter(|(&rarity, _)| rarity >= 1 && rarity <= 3)
-        .map(|(_, &count)| count)
-        .sum::<usize>();
-
-    println!("┌{}┐", "─".repeat(102));
-    println!("│ {:<100} │", format!("Piece rarity map"));
-    println!(
-        "│ {:<100} │",
-        format!(
-            "Pieces: {} total, {} unavailable, {} rare (≤3 peers)",
-            total_pieces, unavailable_pieces, rare_pieces
-        )
-    );
-    println!("├{}┤", "─".repeat(102));
-
-    // □ ■ ▢ ▣ ▤ ▥ ▦ ▧ ▨ ▩ ▪ ▫ ▬ ▭ ▮ ▯
-    let width = 100;
-    let symbol = '▣';
-    let map = format_pieces_rarity(pieces_rarity, width, symbol);
-    for line in map.lines() {
-        println!("│ {} │", line);
-    }
-
-    println!("└{}┘", "─".repeat(102));
-
-    // Color-coded legend
-    println!("Legend:");
-    println!(
-        "  {}{symbol}{} Unavailable (0 peers)     {}{symbol}{} Very rare (1 peer)",
-        RED, RESET, RED, RESET
-    );
-    println!(
-        "  {}{symbol}{} Rare (2-3 peers)          {}{symbol}{} Uncommon (4-5 peers)",
-        ORANGE, RESET, YELLOW, RESET
-    );
-    println!(
-        "  {}{symbol}{} Common (6-8 peers)        {}{symbol}{} Very common (9+ peers)",
-        GREEN, RESET, BLUE, RESET
-    );
-    println!();
-}
-
-fn format_pieces_rarity(pieces_rarity: &[u8], width: usize, symbol: char) -> String {
-    let mut result = String::new();
-    let total_pieces = pieces_rarity.len();
-
-    if total_pieces == 0 {
-        return "No pieces to display".to_string();
-    }
-
-    // Display each piece individually, one character per piece
-    for (piece_index, &rarity) in pieces_rarity.iter().enumerate() {
-        // Add newline at the beginning of each row (except the first)
-        if piece_index > 0 && piece_index % width == 0 {
-            result.push('\n');
-        }
-
-        let color = rarity_to_color(rarity);
-
-        result.push_str(&format!("{}{}{}", color, symbol, RESET));
-    }
-
-    result
-}
-
-fn rarity_to_color(occurrences: u8) -> &'static str {
-    match occurrences {
-        0..=1 => RED,    // Very rare - critical pieces
-        2..=3 => ORANGE, // Rare - important to download
-        4..=5 => YELLOW, // Uncommon - moderate priority
-        6..=8 => GREEN,  // Common - lower priority
-        _ => BLUE,       // Very common - lowest priority
+        TorrentManagerError::Io(err)
     }
 }

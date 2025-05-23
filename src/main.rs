@@ -18,6 +18,7 @@ mod peer;
 mod repl;
 mod torrent;
 mod tracker;
+mod ui;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
