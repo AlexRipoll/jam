@@ -1,6 +1,7 @@
 use std::{
     env,
     io::{self, Write},
+    time::Duration,
 };
 
 use protocol::bitfield::Bitfield;
@@ -599,10 +600,21 @@ pub async fn display_torrents_state(torrents_state: Vec<TorrentState>) {
         let size_display = format_bytes(
             torrent_state.download_state.downloaded_bytes + torrent_state.download_state.left_bytes,
         );
-        let download_speed = torrent_state.download_state.downloaded_bytes as f64
-            / torrent_state.download_state.time_elasped.as_secs() as f64;
+        let download_speed = if torrent_state.peers_count > 0 {
+            torrent_state.download_state.downloaded_bytes as f64
+                / torrent_state.download_state.time_elasped.as_secs() as f64
+        } else {
+            0.0
+        };
         let speed_display = format_speed(download_speed);
-        let eta_display = format_eta(torrent_state.eta);
+        let eta_display = if download_speed > 0.0 && torrent_state.peers_count > 0 {
+            let remaining = Duration::from_secs(
+                (torrent_state.download_state.left_bytes as f64 / download_speed) as u64,
+            );
+            format_eta(Some(remaining))
+        } else {
+            format_eta(None)
+        };
         let status_display = format_status(&torrent_state.status);
 
         println!(
