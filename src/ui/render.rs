@@ -587,20 +587,23 @@ pub async fn display_torrents_state(torrents_state: Vec<TorrentState>) {
     println!("│ Name                   │ Progress        │ Size                │ Speed  │ ETA   │ Peers │ Status │");
     println!("├──────────────────────────────────────────────────────────────────────────────────────────────────┤");
 
-    for status in torrents_state {
-        let truncated_name = if status.name.len() > 22 {
-            format!("{}...", &status.name[..19])
+    for torrent_state in torrents_state {
+        let truncated_name = if torrent_state.name.len() > 22 {
+            format!("{}...", &torrent_state.name[..19])
         } else {
-            format!("{:<22}", status.name)
+            format!("{:<22}", torrent_state.name)
         };
 
-        let progress_bar = create_progress_bar(status.download_state.progress_percentage);
-        let downloaded_display = format_bytes(status.download_state.downloaded_bytes);
-        let size_display =
-            format_bytes(status.download_state.downloaded_bytes + status.download_state.left_bytes);
-        let speed_display = format_speed(status.download_speed);
-        let eta_display = format_eta(status.eta);
-        let status_display = format_status(&status.status);
+        let progress_bar = create_progress_bar(torrent_state.download_state.progress_percentage);
+        let downloaded_display = format_bytes(torrent_state.download_state.downloaded_bytes);
+        let size_display = format_bytes(
+            torrent_state.download_state.downloaded_bytes + torrent_state.download_state.left_bytes,
+        );
+        let download_speed = torrent_state.download_state.downloaded_bytes as f64
+            / torrent_state.download_state.time_elasped.as_secs() as f64;
+        let speed_display = format_speed(download_speed);
+        let eta_display = format_eta(torrent_state.eta);
+        let status_display = format_status(&torrent_state.status);
 
         println!(
             "│ {} │ {} │ {:>8} of {:>8}│ {:>6} │ {:>5} │ {:>5} │ {:>6} │",
@@ -610,7 +613,7 @@ pub async fn display_torrents_state(torrents_state: Vec<TorrentState>) {
             size_display,
             speed_display,
             eta_display,
-            status.peers_count,
+            torrent_state.peers_count,
             status_display
         );
     }

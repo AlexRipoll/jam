@@ -317,6 +317,7 @@ pub struct TorrentState {
     pub eta: Option<Duration>, // TODO: tbi
     pub download_speed: f64,   // bytes per second TODO:tbi
     pub upload_speed: f64,     // bytes per second TODO:tbi
+    pub time_elapsed: Duration,
 }
 
 impl<'a> Torrent<'a> {
@@ -481,9 +482,18 @@ impl<'a> Torrent<'a> {
                                 if let Err(_) = orchestrator_tx.send(Event::QueryConnectedPeers {
                                     response_channel: peers_tx
                                 }).await {
-                                    // If we can't communicate with orchestrator, fall back to 0
                                     warn!("Failed to query connected peers from orchestrator");
-                                    let response = TorrentState {id:hex::encode(self.metadata.info_hash),name:self.metadata.name.clone(),status:self.status.clone(),download_state:self.download_state.clone(), bitfield: self.download_state.bitfield.clone(), peers_count:0,eta:None,download_speed:0.0,upload_speed:0.0};
+                                    let response = TorrentState {
+                                        id:hex::encode(self.metadata.info_hash),
+                                        name:self.metadata.name.clone(),
+                                        status:self.status.clone(),
+                                        download_state:self.download_state.clone(),
+                                        bitfield: self.download_state.bitfield.clone(),
+                                        peers_count:0,
+                                        eta:None,download_speed:0.0,
+                                        upload_speed:0.0,
+                                        time_elapsed: self.download_state.time_elasped
+                                    };
                                     let _ = response_channel.send(response);
                                     continue;
                                 }
@@ -501,6 +511,7 @@ impl<'a> Torrent<'a> {
                                             eta: None,
                                             download_speed: 0.0,
                                             upload_speed: 0.0,
+                                            time_elapsed: self.download_state.time_elasped,
                                         };
                                         let _ = response_channel.send(response);
                                     },
@@ -516,6 +527,7 @@ impl<'a> Torrent<'a> {
                                             eta: None,
                                             download_speed: 0.0,
                                             upload_speed: 0.0,
+                                            time_elapsed: self.download_state.time_elasped,
                                         };
                                         let _ = response_channel.send(response);
                                     },
@@ -531,6 +543,7 @@ impl<'a> Torrent<'a> {
                                             eta: None,
                                             download_speed: 0.0,
                                             upload_speed: 0.0,
+                                            time_elapsed: self.download_state.time_elasped,
                                         };
                                         let _ = response_channel.send(response);
                                     }
