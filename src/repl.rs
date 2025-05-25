@@ -139,10 +139,10 @@ pub async fn run_repl<'a>(mut manager: TorrentManager<'a>) -> io::Result<()> {
                 Err(e) => println!("Failed to start download: {}", e),
             },
             Command::Stop(id) => {
-                unimplemented!();
+                print!("Operation not implemented yet")
             }
             Command::Resume(id) => {
-                unimplemented!();
+                print!("Operation not implemented yet")
             }
             Command::Cancel(id) => {
                 if let Err(e) = manager.cancel_torrent(&id).await {
@@ -170,8 +170,7 @@ pub async fn run_repl<'a>(mut manager: TorrentManager<'a>) -> io::Result<()> {
                 display_inspect(&torrent_state).await;
             }
             Command::Log(level) => {
-                println!("Changing log level to {:?}", level);
-                unimplemented!();
+                print!("Operation not implemented yet")
             }
             Command::Help => {
                 display_help();
