@@ -51,7 +51,7 @@ mod tests {
                             download_path: "./downloads/".to_string(),
                         },
                         network: NetworkConfig {
-                            max_peer_connections: 1,
+                            max_peer_connections: 10,
                             timeout_threshold: 15,
                             connection_retries: 1,
                             block_size: 16384,
