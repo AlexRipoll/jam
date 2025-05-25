@@ -1,3 +1,4 @@
+use core::error;
 use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
@@ -6,7 +7,10 @@ use std::{
 };
 
 use protocol::piece::Piece;
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
 use tracing::{debug, error, warn};
 
 use crate::events::Event;
@@ -22,6 +26,10 @@ pub enum DiskWriterCommand {
     Flush,
     /// Query the current write statistics - response will be sent on the provided channel
     QueryStats(mpsc::Sender<DiskWriterStats>),
+    /// Remove the download file from disk
+    RemoveFile {
+        confirmation_channel: oneshot::Sender<()>,
+    },
     /// Shutdown the disk writer gracefully
     Shutdown,
 }
@@ -158,6 +166,21 @@ impl DiskWriter {
                             error!("Failed to send stats response: {}", e);
                         }
                     }
+                    DiskWriterCommand::RemoveFile {
+                        confirmation_channel: response_tx,
+                    } => {
+                        debug!(
+                            task = "RemoveFile",
+                            "Removing file {:?}", self.absolute_file_path
+                        );
+                        if let Err(e) = self.remove_file().await {
+                            error!("Failed to remove file: {}", e);
+                        }
+                        if let Err(_) = response_tx.send(()) {
+                            error!("Failed to send cancellation confirmation");
+                        }
+                        break;
+                    }
                     DiskWriterCommand::Shutdown => {
                         debug!(task = "DiskWriter", "Shutting down gracefully");
                         // Final flush before exit
@@ -255,6 +278,35 @@ impl DiskWriter {
 
         Ok(())
     }
+
+    /// Remove the download file
+    ///
+    /// This is the async version that can be used within the DiskWriter's
+    /// processing loop without blocking.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the file was successfully removed or didn't exist,
+    /// `Err(DiskWriterError)` if removal failed
+    pub async fn remove_file(&self) -> Result<(), DiskWriterError> {
+        let file_path = self.absolute_file_path.with_extension("part");
+
+        match tokio::fs::remove_file(&file_path).await {
+            Ok(()) => {
+                debug!("Successfully removed file: {:?}", file_path);
+                Ok(())
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                // File doesn't exist, which is fine
+                debug!("File already doesn't exist: {:?}", file_path);
+                Err(DiskWriterError::FileNotFound)
+            }
+            Err(e) => {
+                error!("Failed to remove file {:?}: {}", file_path, e);
+                Err(DiskWriterError::IoError(e))
+            }
+        }
+    }
 }
 
 /// Error type for DiskWriter operations
@@ -268,6 +320,7 @@ pub enum DiskWriterError {
     PieceNotFound(u32),
     /// An error occurred when sending messages on a channel
     ChannelError(String),
+    FileNotFound,
 }
 
 impl From<io::Error> for DiskWriterError {
@@ -290,6 +343,7 @@ impl std::fmt::Display for DiskWriterError {
                 write!(f, "Piece with index {} not found", index)
             }
             DiskWriterError::ChannelError(msg) => write!(f, "Channel error: {}", msg),
+            DiskWriterError::FileNotFound => write!(f, "File not found"),
         }
     }
 }

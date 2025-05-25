@@ -130,6 +130,16 @@ impl<'a> TorrentManager<'a> {
         Ok(torrent_states)
     }
 
+    pub async fn torrent_handle(&self, id: &str) -> Result<&TorrentHandle, TorrentManagerError> {
+        let (_, handle) = self
+            .torrents
+            .iter()
+            .find(|(info_hash, _)| info_hash.starts_with(id))
+            .ok_or(TorrentManagerError::NotFound(id.to_string()))?;
+
+        Ok(handle)
+    }
+
     pub async fn torrent_state(&self, id: &str) -> Result<TorrentState, TorrentManagerError> {
         let timeout_duration = Duration::from_secs(10);
 
@@ -180,30 +190,15 @@ impl<'a> TorrentManager<'a> {
     //     }
     //     false
     // }
-    //
-    // async fn cancel_torrent(&mut self, id: usize) -> bool {
-    //     if let Some(handle) = self.torrents.get(&id) {
-    //         let _ = handle.tx.send(TorrentCommand::Cancel).await;
-    //         return true;
-    //     }
-    //     false
-    // }
-    //
-    // fn get_status(&self) -> Vec<(usize, String, TorrentState)> {
-    //     let mut result = Vec::new();
-    //     for (&id, handle) in &self.torrents {
-    //         let handle = handle.lock().unwrap();
-    //         result.push((id, handle.info_name.clone(), handle.state));
-    //     }
-    //     result
-    // }
-    //
-    // fn get_stats(&self, id: usize) -> Option<TorrentStats> {
-    //     if let Some(handle) = self.torrents.get(&id) {
-    //         return Some(handle.stats.clone());
-    //     }
-    //     None
-    // }
+
+    pub async fn cancel_torrent(&mut self, id: &str) -> Result<(), TorrentManagerError> {
+        let handle = self.torrent_handle(id).await?;
+        if let Err(e) = handle.tx.send(TorrentCommand::CancelDownload).await {
+            error!("{}", e);
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -290,6 +285,8 @@ struct TorrentHandle {
 
 #[derive(Debug)]
 pub enum TorrentCommand {
+    /// Cancel download
+    CancelDownload,
     /// Download state statistics
     DownloadState {
         downloaded_pieces: u64,
@@ -549,6 +546,19 @@ impl<'a> Torrent<'a> {
                                     }
                                 }
                             },
+                            TorrentCommand::CancelDownload => {
+                                debug!("Canceling download");
+                                let (response_tx, response_rx) = oneshot::channel();
+                                let _ = orchestrator_tx.send(Event::CancelDownload{ response_channel: response_tx }).await;
+
+                                match response_rx.await {
+                                    Ok(_) => {
+                                        self.status = Status::Canceled;
+                                        orchestrator_handle.abort();
+                                    },
+                                    Err(e) => {error!("No cancellation confirmation received: {}", e)},
+                                }
+                            }
                             TorrentCommand::DownloadCompleted => {
                                 debug!("Download completed!");
                                 self.download_state.downloaded_bytes = self.metadata.total_length;
@@ -579,6 +589,7 @@ impl<'a> Torrent<'a> {
 
                                 self.status = Status::Completed;
 
+                                // NOTE: rethink if abortion is needed
                                 // Abort the orchestrator task
                                 orchestrator_handle.abort();
                             }
@@ -643,6 +654,7 @@ pub enum Status {
     Starting,
     Downloading,
     Paused,
+    Canceled,
     Completed,
     Error(String),
 }

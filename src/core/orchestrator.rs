@@ -131,6 +131,10 @@ pub enum PieceEvent {
 
 /// Events related to overall torrent status
 pub enum StatusEvent {
+    /// Download canceled
+    CancelDownload {
+        response_channel: oneshot::Sender<()>,
+    },
     /// Download has completed
     DownloadCompleted,
     /// Request for disk statistics
@@ -366,15 +370,28 @@ impl Orchestrator {
                     }
 
                     // Status Events
+                    Event::CancelDownload { response_channel } => {
+                        self.handle_status_event(
+                            StatusEvent::CancelDownload { response_channel },
+                            &sync_tx,
+                            &disk_tx,
+                        )
+                        .await;
+                    }
                     Event::DownloadCompleted => {
-                        self.handle_status_event(StatusEvent::DownloadCompleted, &sync_tx)
-                            .await;
+                        self.handle_status_event(
+                            StatusEvent::DownloadCompleted,
+                            &sync_tx,
+                            &disk_tx,
+                        )
+                        .await;
                         break;
                     }
                     Event::QueryDownloadState { response_channel } => {
                         self.handle_status_event(
                             StatusEvent::QueryDownloadState { response_channel },
                             &sync_tx,
+                            &disk_tx,
                         )
                         .await;
                     }
@@ -382,6 +399,7 @@ impl Orchestrator {
                         self.handle_status_event(
                             StatusEvent::QueryConnectedPeers { response_channel },
                             &sync_tx,
+                            &disk_tx,
                         )
                         .await;
                     }
@@ -735,8 +753,22 @@ impl Orchestrator {
         &self,
         event: StatusEvent,
         sync_tx: &mpsc::Sender<SynchronizerCommand>,
+        disk_tx: &mpsc::Sender<DiskWriterCommand>,
     ) {
         match event {
+            StatusEvent::CancelDownload {
+                response_channel: confirmation_channel,
+            } => {
+                debug!("Download canceled, notifying Disk");
+                if let Err(e) = disk_tx
+                    .send(DiskWriterCommand::RemoveFile {
+                        confirmation_channel,
+                    })
+                    .await
+                {
+                    error!(error = %e, "Failed to request for file removal to disk");
+                }
+            }
             StatusEvent::DownloadCompleted => {
                 debug!("Download completed, notifying torrent");
                 if let Err(e) = self

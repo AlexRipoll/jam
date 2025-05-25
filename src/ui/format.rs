@@ -105,6 +105,7 @@ pub fn format_status(status: &Status) -> String {
         Status::Starting => "START".to_string(),
         Status::Downloading => "DOWN".to_string(),
         Status::Paused => "PAUSE".to_string(),
+        Status::Canceled => "CANCEL".to_string(),
         Status::Completed => "DONE".to_string(),
         Status::Error(_) => "ERROR".to_string(),
     }

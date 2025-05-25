@@ -68,7 +68,9 @@ pub enum Event {
         session_id: String,
         piece_index: u32,
     },
-
+    CancelDownload {
+        response_channel: oneshot::Sender<()>,
+    },
     DownloadCompleted,
 
     // Query

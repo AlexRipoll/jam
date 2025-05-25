@@ -13,7 +13,7 @@ enum Command {
     Start(String),   // Start/resume download with torrent file path
     Stop(usize),     // Pause a download by ID
     Resume(usize),   // Resume a paused download by ID
-    Cancel(usize),   // Cancel and remove download by ID
+    Cancel(String),  // Cancel and remove download by ID
     State,           // Show state of all downloads
     Inspect(String), // Show detailed stats for a specific download
     Log(Level),      // Change log level
@@ -61,7 +61,7 @@ fn parse_command(input: &str) -> Command {
             if parts.len() < 2 {
                 Command::Invalid("Missing torrent ID".to_string())
             } else {
-                match parts[1].parse::<usize>() {
+                match parts[1].parse::<String>() {
                     Ok(id) => Command::Cancel(id),
                     Err(_) => Command::Invalid("Invalid torrent ID".to_string()),
                 }
@@ -145,7 +145,9 @@ pub async fn run_repl<'a>(mut manager: TorrentManager<'a>) -> io::Result<()> {
                 unimplemented!();
             }
             Command::Cancel(id) => {
-                unimplemented!();
+                if let Err(e) = manager.cancel_torrent(&id).await {
+                    println!("{}", e);
+                }
             }
             Command::State => {
                 let torrent_states = match manager.torrents_states().await {
